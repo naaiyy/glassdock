@@ -89,8 +89,8 @@ jobs:
         with:
           xcode-version: "26.6"
 
-      - name: Install VMM build dependencies
-        run: HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install lld xz
+      - name: Install build and validation dependencies
+        run: HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install actionlint lld shellcheck xz
 
       - name: Display swift version
         run: |
