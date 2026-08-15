@@ -89,6 +89,9 @@ jobs:
         with:
           xcode-version: "26.6"
 
+      - name: Install VMM build dependencies
+        run: brew install lld xz
+
       - name: Display swift version
         run: |
           which swift
