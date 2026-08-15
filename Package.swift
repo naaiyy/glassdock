@@ -12,6 +12,13 @@ let package = Package(
     platforms: [
         .macOS(.v15)
     ],
+    products: [
+        .library(name: "SocktainerControl", targets: ["SocktainerControl"]),
+        .library(name: "SocktainerMenuKit", targets: ["SocktainerMenuKit"]),
+        .executable(name: "socktainer", targets: ["socktainer"]),
+        .executable(name: "socktainerctl", targets: ["socktainerctl"]),
+        .executable(name: "SocktainerMenu", targets: ["SocktainerMenu"]),
+    ],
     dependencies: [
         .package(url: "https://github.com/apple/container.git", exact: "1.2.1"),
         .package(url: "https://github.com/apple/containerization.git", exact: "0.40.1"),
@@ -22,6 +29,9 @@ let package = Package(
         .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
     ],
     targets: [
+        .target(
+            name: "SocktainerControl"
+        ),
         .executableTarget(
             name: "socktainer",
             dependencies: [
@@ -45,6 +55,21 @@ let package = Package(
                 "BuildInfo",
             ]
         ),
+        .executableTarget(
+            name: "socktainerctl",
+            dependencies: [
+                "SocktainerControl",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]
+        ),
+        .executableTarget(
+            name: "SocktainerMenu",
+            dependencies: ["SocktainerMenuKit"]
+        ),
+        .target(
+            name: "SocktainerMenuKit",
+            dependencies: ["SocktainerControl"]
+        ),
         .testTarget(
             name: "socktainerTests",
             dependencies: [
@@ -53,6 +78,14 @@ let package = Package(
                 .product(name: "VaporTesting", package: "vapor"),
                 .product(name: "libzstd", package: "zstd"),
             ],
+        ),
+        .testTarget(
+            name: "SocktainerControlTests",
+            dependencies: ["SocktainerControl"]
+        ),
+        .testTarget(
+            name: "SocktainerMenuKitTests",
+            dependencies: ["SocktainerMenuKit"]
         ),
         .target(
             name: "CFilteredStream",

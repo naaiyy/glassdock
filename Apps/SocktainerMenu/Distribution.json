@@ -1,0 +1,14 @@
+{
+  "bundleIdentifier": "io.github.socktainer.menu",
+  "category": "public.app-category.developer-tools",
+  "distribution": "Developer ID",
+  "minimumSystemVersion": "26.0",
+  "name": "Socktainer",
+  "privacy": {
+    "collectsData": false,
+    "tracking": false
+  },
+  "supportedArchitectures": [
+    "arm64"
+  ]
+}

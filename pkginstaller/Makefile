@@ -8,9 +8,8 @@ APPLE_APPLICATION_ID ?= -
 APPLE_PRODUCT_ID ?= mock
 NO_CODESIGN ?= 1
 NO_NOTARIZE ?= 1
-NOTARIZE_USERNAME ?=
-NOTARIZE_PASSWORD ?=
-NOTARIZE_TEAM ?=
+NOTARYTOOL_PROFILE ?=
+RELEASE_APPROVAL ?=
 INSTALL_PREFIX ?= /opt/socktainer
 PACKAGE_IDENTIFIER ?= io.github.socktainer
 PATHS_D_NAME ?= socktainer
@@ -106,13 +105,20 @@ prepare-root: setup
 
 .PHONY: copy-binary
 copy-binary: prepare-root
-	@echo "Copying socktainer binary..."
+	@echo "Copying Socktainer binaries..."
 	@if [ ! -f "../.build/release/socktainer" ]; then \
 		echo "Error: socktainer binary not found. Run 'make release' in the parent directory first."; \
 		exit 1; \
 	fi
-	@cp ../.build/release/socktainer "$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/"
-	@chmod +x "$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainer"
+	@if [ ! -f "../.build/release/socktainerctl" ]; then \
+		echo "Error: socktainerctl binary not found. Run 'make release' in the parent directory first."; \
+		exit 1; \
+	fi
+	@cp ../.build/release/socktainer ../.build/release/socktainerctl \
+		"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/"
+	@chmod +x \
+		"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainer" \
+		"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainerctl"
 	@for artifact in \
 		../VMM/out/socktainer-vmm \
 		../VMM/out/libkrun.1.dylib \
@@ -146,7 +152,9 @@ sign-binary: copy-binary
 			"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainer-vmm"; \
 		codesign --sign "$(APPLE_APPLICATION_ID)" --options runtime --timestamp --force \
 			"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainer"; \
-		for artifact in libkrun.1.dylib gvproxy socktainer-vmm socktainer; do \
+		codesign --sign "$(APPLE_APPLICATION_ID)" --options runtime --timestamp --force \
+			"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/socktainerctl"; \
+		for artifact in libkrun.1.dylib gvproxy socktainer-vmm socktainer socktainerctl; do \
 			codesign --verify --strict --verbose=2 \
 				"$(PACKAGE_ROOT)$(INSTALL_PREFIX)/bin/$$artifact"; \
 		done; \
@@ -189,15 +197,18 @@ sign-pkg: product-pkg
 # Notarize the signed package
 .PHONY: notarize
 notarize: sign-pkg
-	@if [ -z "$(APPLE_ID)" ] || [ -z "$(APPLE_ID_PASSWORD)" ] || [ -z "$(APPLE_TEAM_ID)" ]; then \
-		echo "❌ Missing notarization credentials. Set APPLE_ID, APPLE_ID_PASSWORD, and APPLE_TEAM_ID"; \
+	@if [ "$(SOCKTAINER_RELEASE_APPROVED)" != "YES" ] || [ "$(RELEASE_APPROVAL)" != "FINAL-APPROVAL" ]; then \
+		echo "❌ Notarization needs separate final approval"; \
+		echo "   Set SOCKTAINER_RELEASE_APPROVED=YES and RELEASE_APPROVAL=FINAL-APPROVAL after approval"; \
+		exit 1; \
+	fi
+	@if [ -z "$(NOTARYTOOL_PROFILE)" ]; then \
+		echo "❌ Missing NOTARYTOOL_PROFILE Keychain profile name"; \
 		exit 1; \
 	fi
 	@echo "Submitting installer for notarization..."
 	@xcrun notarytool submit $(OUT_DIR)/$(PKG_NAME) \
-		--apple-id "$(APPLE_ID)" \
-		--password "$(APPLE_ID_PASSWORD)" \
-		--team-id "$(APPLE_TEAM_ID)" \
+		--keychain-profile "$(NOTARYTOOL_PROFILE)" \
 		--wait
 	@echo "Stapling notarization ticket..."
 	@xcrun stapler staple $(OUT_DIR)/$(PKG_NAME)
@@ -233,9 +244,8 @@ help:
 	@echo "  NO_CODESIGN=1             - Skip code signing (default)"
 	@echo "  APPLE_APPLICATION_ID=<id>    - Code signing identity"
 	@echo "  APPLE_PRODUCT_ID=<id> - Product signing identity"
-	@echo "  APPLE_ID=<email> - Apple ID for notarization"
-	@echo "  APPLE_ID_PASSWORD=<pass>  - App-specific password for notarization"
-	@echo "  APPLE_TEAM_ID=<team_id>   - Team ID for notarization"
+	@echo "  NOTARYTOOL_PROFILE=<name> - notarytool Keychain profile"
+	@echo "  RELEASE_APPROVAL=FINAL-APPROVAL - final submission gate"
 	@echo "  INSTALL_PREFIX=/path      - Installation prefix (default: $(INSTALL_PREFIX))"
 	@echo "  PACKAGE_IDENTIFIER=id     - Package receipt identifier (default: $(PACKAGE_IDENTIFIER))"
 	@echo "  PATHS_D_NAME=name         - /etc/paths.d entry name (default: $(PATHS_D_NAME))"
@@ -247,17 +257,16 @@ help:
 	@echo "       NO_CODESIGN=0 pkginstaller"
 	@echo ""
 	@echo "Example notarized build:"
-	@echo "  make APPLE_APPLICATION_ID='Developer ID Application: Your Name' \\"
+	@echo "  SOCKTAINER_RELEASE_APPROVED=YES make APPLE_APPLICATION_ID='Developer ID Application: Your Name' \\"
 	@echo "       APPLE_PRODUCT_ID='Developer ID Installer: Your Name' \\"
-	@echo "       APPLE_ID='your@email.com' \\"
-	@echo "       APPLE_ID_PASSWORD='app-specific-password' \\"
-	@echo "       APPLE_TEAM_ID='TEAM123ID' \\"
+	@echo "       NOTARYTOOL_PROFILE='socktainer-notary' \\"
+	@echo "       RELEASE_APPROVAL=FINAL-APPROVAL \\"
 	@echo "       installer-notarized"
 	@echo ""
 	@echo "Prerequisites:"
 	@echo "  - Run 'make release guest-image vmm' in the parent directory to build the runtime"
 	@echo "  - Ensure Xcode command line tools are installed"
-	@echo "  - For notarization: Apple Developer account with app-specific password"
+	@echo "  - For notarization: a notarytool Keychain profile and final approval"
 
 .PHONY: clean-legacy
 clean-legacy:
