@@ -1012,7 +1012,13 @@ discover_products() {
 
 preflight() {
     local tool product suite host reference_cpu reference_memory reference_allocated reference_cache_policy seen_products=',' seen_hosts=',' valid_suites=',startup,lifecycle,nginx,bind,resources,storage,diagnostics,'
-    for tool in docker curl jq python3 perl awk sed ps du mktemp sysctl; do
+    # A dry run validates the design and declared commands only. It must not
+    # require Docker, which is intentionally absent from ordinary CI runners.
+    local required_tools='curl jq python3 perl awk sed ps du mktemp sysctl'
+    if [[ $MODE != dry-run ]]; then
+        required_tools='docker curl jq python3 perl awk sed ps du mktemp sysctl'
+    fi
+    for tool in $required_tools; do
         command -v "$tool" >/dev/null || die "required tool is not installed: $tool"
     done
     if suite_enabled nginx; then
