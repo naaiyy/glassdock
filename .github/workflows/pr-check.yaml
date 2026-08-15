@@ -90,7 +90,7 @@ jobs:
           xcode-version: "26.6"
 
       - name: Install VMM build dependencies
-        run: brew install lld xz
+        run: HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install lld xz
 
       - name: Display swift version
         run: |
