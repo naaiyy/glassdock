@@ -170,7 +170,7 @@ routes:
     path: /images/create
     support: partial
     owner: DockerRuntimeRoutes
-    note: Guest-backed image pull; tar import through fromSrc remains unsupported.
+    note: Guest-backed image pull; fromSrc tar import is supported for archives up to the guest protocol limit.
   - method: GET
     path: /images/json
     support: partial
@@ -211,6 +211,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Exports one guest image as an OCI/containerd tar archive.
+  - method: POST
+    path: /images/load
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Imports named OCI or Docker image archives into the guest for archives up to 10 MiB; larger archives need a streaming guest upload protocol.
   - method: GET
     path: /images/{name}/history
     support: partial

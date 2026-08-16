@@ -85,16 +85,16 @@
       "method": "POST",
       "path": "/commit",
       "operationId": "ImageCommit",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 201,
       "responseStatuses": [
         201,
         404,
         500
       ],
       "responseSchema": "#/definitions/IDResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Commits a guest container diff as a new image layer; supported Dockerfile changes update image configuration, while filesystem-executing changes remain unsupported."
     },
     {
       "method": "GET",
@@ -672,7 +672,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Guest-backed image pull; tar import through fromSrc remains unsupported."
+      "note": "Guest-backed image pull; fromSrc tar import is supported for archives up to the guest protocol limit."
     },
     {
       "method": "GET",
@@ -706,15 +706,15 @@
       "method": "POST",
       "path": "/images/load",
       "operationId": "ImageLoad",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this image operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Imports named OCI or Docker image archives into the guest for archives up to 10 MiB; larger archives need a streaming guest upload protocol."
     },
     {
       "method": "POST",

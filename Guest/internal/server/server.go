@@ -281,6 +281,19 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, image)
+	case api.MethodImageImport:
+		body, err := decode[api.ImageImportRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		images, err := s.backend.ImportImages(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, images)
 	case api.MethodContainerList:
 		items, err := s.backend.List(ctx)
 		if err != nil {

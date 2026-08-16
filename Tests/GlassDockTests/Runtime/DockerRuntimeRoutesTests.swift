@@ -546,14 +546,27 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
-    @Test("image import fails explicitly")
-    func unsupportedImageImport() async throws {
+    @Test("image import forwards archives to the guest runtime")
+    func imageImport() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
-            try await app.testing().test(.POST, "/v1.51/images/create?fromSrc=-") { response async in
-                #expect(response.status == .notImplemented)
+            try await app.testing().test(
+                .POST,
+                "/v1.51/images/create?fromSrc=-",
+                body: ByteBuffer(string: "image-archive")
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.body.string.contains("Loaded image"))
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/images/load",
+                body: ByteBuffer(string: "image-archive")
+            ) { response async in
+                #expect(response.status == .ok)
             }
         }
+        #expect(await backend.lastImportedData == Data("image-archive".utf8))
     }
 
     @Test("attach upgrades without starting a created container")
@@ -624,6 +637,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastExportReferences: [String]?
     private(set) var lastPush: Push?
     private(set) var lastCommit: Commit?
+    private(set) var lastImportedData: Data?
     private(set) var lastTopArguments: [String]?
     private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
@@ -705,6 +719,11 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             changes: changes
         )
         return DockerRuntimeImage(reference: repository ?? "glassdock/commit", digest: "sha256:committed")
+    }
+
+    func importImages(data: Data) async throws -> [DockerRuntimeImage] {
+        lastImportedData = data
+        return [DockerRuntimeImage(reference: "example.test/fixture:loaded", digest: "sha256:loaded")]
     }
 
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {

@@ -1,6 +1,8 @@
 import Foundation
 import Vapor
 
+private let maximumGuestImportArchiveBytes = 10 * 1024 * 1024
+
 private final class GuestStreamCollector: @unchecked Sendable {
     private static let maximumBytes = 16 * 1024 * 1024
     private let lock = NSLock()
@@ -118,6 +120,10 @@ private struct GuestImageDeletePayload: Decodable {
     let deleted: [String]?
     let untagged: [String]?
     let reclaimed: Int64?
+}
+
+private struct GuestImageImportPayload: Decodable {
+    let images: [GuestImagePayload]
 }
 
 private struct GuestExitPayload: Decodable {
@@ -500,6 +506,20 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
             method: "image.export",
             payload: ["references": .array(references.map { .string(Self.normalizedRegistryReference($0)) })]
         )
+    }
+
+    func importImages(data: Data) async throws -> [DockerRuntimeImage] {
+        guard data.count <= maximumGuestImportArchiveBytes else {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "image archive exceeds the 10 MiB guest protocol limit"
+            )
+        }
+        let response = try await request(
+            "image.import",
+            ["data": .string(data.base64EncodedString())]
+        )
+        let payload: GuestImageImportPayload = try decode(response)
+        return payload.images.map { DockerRuntimeImage(reference: $0.name, digest: $0.digest) }
     }
 
     func commitImage(

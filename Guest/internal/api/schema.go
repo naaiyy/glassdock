@@ -17,6 +17,7 @@ const (
 	MethodImagePush               = "image.push"
 	MethodImageExport             = "image.export"
 	MethodImageCommit             = "image.commit"
+	MethodImageImport             = "image.import"
 	MethodContainerList           = "container.list"
 	MethodContainerInspect        = "container.inspect"
 	MethodContainerLogs           = "container.logs"
@@ -85,6 +86,12 @@ type ImageCommitRequest struct {
 	Author     string `json:"author,omitempty"`
 	Pause      bool   `json:"pause,omitempty"`
 	Changes    string `json:"changes,omitempty"`
+}
+type ImageImportRequest struct {
+	Data []byte `json:"data"`
+}
+type ImageImportResponse struct {
+	Images []ImageResponse `json:"images"`
 }
 type Image struct {
 	ID           string            `json:"id"`

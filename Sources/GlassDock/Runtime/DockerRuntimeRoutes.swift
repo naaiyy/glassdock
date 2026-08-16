@@ -9,6 +9,12 @@ enum EngineContainerState: String, Sendable, Equatable {
     case exited
 }
 
+enum DockerRuntimeGuestLimits {
+    // Base64 encoding and the JSON envelope leave headroom below the guest's
+    // 16 MiB frame limit. Larger archives need a streaming upload protocol.
+    static let maximumImportArchiveBytes = 10 * 1024 * 1024
+}
+
 /// The Docker-facing operations needed by the runtime benchmark and its live
 /// lifecycle test. GuestRuntime implements this protocol; the route layer owns
 /// only Docker request and response semantics.
@@ -23,6 +29,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func tagImage(source: String, target: String) async throws
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error>
+    func importImages(data: Data) async throws -> [DockerRuntimeImage]
     func commitImage(
         container: String,
         repository: String?,
@@ -91,6 +98,9 @@ extension DockerRuntimeRouteBackend {
         changes: String?
     ) async throws -> DockerRuntimeImage {
         throw DockerRuntimeRouteError.invalidRequest("image commit is not supported")
+    }
+    func importImages(data: Data) async throws -> [DockerRuntimeImage] {
+        throw DockerRuntimeRouteError.invalidRequest("image import is not supported")
     }
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         throw DockerRuntimeRouteError.invalidRequest("container top is not supported")
@@ -433,6 +443,7 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     func boot(routes: RoutesBuilder) throws {
+        try routes.registerVersionedRoute(.POST, pattern: "/images/load", use: importImages)
         try routes.registerVersionedRoute(.POST, pattern: "/images/create", use: pullImage)
         try routes.registerVersionedRoute(.GET, pattern: "/images/json", use: listImages)
         try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/json", use: inspectImage)
@@ -477,7 +488,7 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func pullImage(_ req: Request) async throws -> Response {
         if req.query[String.self, at: "fromSrc"] != nil {
-            throw Abort(.notImplemented, reason: "Image import is not implemented by the persistent runtime")
+            return try await importImage(req)
         }
         let fromImage = try requiredQuery("fromImage", request: req)
         let tag = req.query[String.self, at: "tag"]
@@ -496,6 +507,33 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         var body = try JSONEncoder().encode(PullProgress(status: "Downloaded newer image for \(image.reference)", id: image.digest))
         body.append(0x0A)
+        let response = Response(status: .ok, body: .init(data: body))
+        response.headers.contentType = .json
+        return response
+    }
+
+    private func importImages(_ req: Request) async throws -> Response {
+        try await importImage(req)
+    }
+
+    private func importImage(_ req: Request) async throws -> Response {
+        guard
+            let buffer = try await req.body.collect(max: DockerRuntimeGuestLimits.maximumImportArchiveBytes).get(),
+            let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+            !data.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "Image archive request body is required")
+        }
+        let images = try await call { try await backend.importImages(data: data) }
+        var body = Data()
+        for image in images {
+            body.append(
+                try JSONEncoder().encode(
+                    ImageImportProgress(stream: "Loaded image: \(image.reference)\n")
+                )
+            )
+            body.append(0x0A)
+        }
         let response = Response(status: .ok, body: .init(data: body))
         response.headers.contentType = .json
         return response
@@ -1609,6 +1647,10 @@ struct DockerRuntimeRoutes: RouteCollection {
 private struct ImageDeleteItem: Encodable {
     let Deleted: String?
     let Untagged: String?
+}
+
+private struct ImageImportProgress: Encodable {
+    let stream: String
 }
 
 private struct ImagePruneResponse: Encodable {
