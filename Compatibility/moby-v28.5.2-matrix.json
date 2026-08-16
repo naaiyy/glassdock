@@ -1,0 +1,1655 @@
+{
+  "schema": 1,
+  "source": {
+    "repository": "moby/moby",
+    "ref": "v28.5.2",
+    "url": "https://raw.githubusercontent.com/moby/moby/v28.5.2/api/swagger.yaml",
+    "sha256": "2afceffc4138e3f4a030140c14f27d4118cec99024695f53d4884c79f3a10138",
+    "apiVersion": "1.51"
+  },
+  "operations": [
+    {
+      "method": "GET",
+      "path": "/_ping",
+      "operationId": "SystemPing",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "string",
+      "owner": "HealthCheckPingRoute",
+      "note": "Docker daemon liveness and API-version headers."
+    },
+    {
+      "method": "HEAD",
+      "path": "/_ping",
+      "operationId": "SystemPingHead",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "string",
+      "owner": "HealthCheckPingRoute",
+      "note": "Header-only Docker daemon liveness check."
+    },
+    {
+      "method": "POST",
+      "path": "/auth",
+      "operationId": "SystemAuth",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        204,
+        401,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "AuthRoute",
+      "note": "Registry credential validation."
+    },
+    {
+      "method": "POST",
+      "path": "/build",
+      "operationId": "ImageBuild",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/build/prune",
+      "operationId": "BuildPrune",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/commit",
+      "operationId": "ImageCommit",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        201,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/IDResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/configs",
+      "operationId": "ConfigList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/configs/create",
+      "operationId": "ConfigCreate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        201,
+        409,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/IDResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "DELETE",
+      "path": "/configs/{id}",
+      "operationId": "ConfigDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/configs/{id}",
+      "operationId": "ConfigInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Config",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/configs/{id}/update",
+      "operationId": "ConfigUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/create",
+      "operationId": "ContainerCreate",
+      "support": "partial",
+      "expectedStatus": 201,
+      "responseStatuses": [
+        201,
+        400,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerCreateResponse",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Persistent containerd creation with explicit 501 responses for unsupported options."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/json",
+      "operationId": "ContainerList",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        400,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Container listing and supported id, name, status, ancestor, and label filters."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/prune",
+      "operationId": "ContainerPrune",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Removes non-running containers with label and until filters; guest snapshot byte accounting reports zero."
+    },
+    {
+      "method": "DELETE",
+      "path": "/containers/{id}",
+      "operationId": "ContainerDelete",
+      "support": "partial",
+      "expectedStatus": 204,
+      "responseStatuses": [
+        204,
+        400,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Container removal and named-volume reference release."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/archive",
+      "operationId": "ContainerArchive",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "HEAD",
+      "path": "/containers/{id}/archive",
+      "operationId": "ContainerArchiveInfo",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "PUT",
+      "path": "/containers/{id}/archive",
+      "operationId": "PutContainerArchive",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        403,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/attach",
+      "operationId": "ContainerAttach",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        101,
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Read-only attach with raw stream framing; interactive stdin remains unsupported."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/attach/ws",
+      "operationId": "ContainerAttachWebsocket",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        101,
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/changes",
+      "operationId": "ContainerChanges",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/exec",
+      "operationId": "ContainerExec",
+      "support": "partial",
+      "expectedStatus": 201,
+      "responseStatuses": [
+        201,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": "#/definitions/IDResponse",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Exec creation and guest-backed command execution without interactive stdin."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/export",
+      "operationId": "ContainerExport",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/json",
+      "operationId": "ContainerInspect",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerInspectResponse",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Docker inspect response built from guest state and host metadata."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/kill",
+      "operationId": "ContainerKill",
+      "support": "implemented",
+      "expectedStatus": 204,
+      "responseStatuses": [
+        204,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Sends a validated signal to the guest container."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/logs",
+      "operationId": "ContainerLogs",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "string",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Stored stdout and stderr with stream framing and tail filtering; follow and timestamp modes remain unsupported."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/pause",
+      "operationId": "ContainerPause",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/rename",
+      "operationId": "ContainerRename",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/resize",
+      "operationId": "ContainerResize",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/restart",
+      "operationId": "ContainerRestart",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/start",
+      "operationId": "ContainerStart",
+      "support": "implemented",
+      "expectedStatus": 204,
+      "responseStatuses": [
+        204,
+        304,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Starts a persistent guest container and republishes ports."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/stats",
+      "operationId": "ContainerStats",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerStatsResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/stop",
+      "operationId": "ContainerStop",
+      "support": "partial",
+      "expectedStatus": 204,
+      "responseStatuses": [
+        204,
+        304,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Signal and timeout handling with a forced kill after timeout."
+    },
+    {
+      "method": "GET",
+      "path": "/containers/{id}/top",
+      "operationId": "ContainerTop",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerTopResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this container operation yet."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/unpause",
+      "operationId": "ContainerUnpause",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/update",
+      "operationId": "ContainerUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerUpdateResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/containers/{id}/wait",
+      "operationId": "ContainerWait",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ContainerWaitResponse",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Default, next-exit, not-running, and removed waits; healthy waits are explicit 501 responses."
+    },
+    {
+      "method": "GET",
+      "path": "/distribution/{name}/json",
+      "operationId": "DistributionInspect",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        401,
+        500
+      ],
+      "responseSchema": "#/definitions/DistributionInspect",
+      "owner": "DistributionJsonRoute",
+      "note": "Registry manifest and platform inspection."
+    },
+    {
+      "method": "GET",
+      "path": "/events",
+      "operationId": "SystemEvents",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        400,
+        500
+      ],
+      "responseSchema": "#/definitions/EventMessage",
+      "owner": "EventsRoute",
+      "note": "Persistent guest event stream with Docker event filtering."
+    },
+    {
+      "method": "GET",
+      "path": "/exec/{id}/json",
+      "operationId": "ExecInspect",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Host-side exec lifecycle inspection."
+    },
+    {
+      "method": "POST",
+      "path": "/exec/{id}/resize",
+      "operationId": "ExecResize",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/exec/{id}/start",
+      "operationId": "ExecStart",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        409
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Streaming exec start; detached exec and interactive stdin are unsupported."
+    },
+    {
+      "method": "POST",
+      "path": "/images/create",
+      "operationId": "ImageCreate",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Guest-backed image pull; tar import through fromSrc remains unsupported."
+    },
+    {
+      "method": "GET",
+      "path": "/images/get",
+      "operationId": "ImageGetAll",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "string",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this image operation yet."
+    },
+    {
+      "method": "GET",
+      "path": "/images/json",
+      "operationId": "ImageList",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Image listing with reference filtering."
+    },
+    {
+      "method": "POST",
+      "path": "/images/load",
+      "operationId": "ImageLoad",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this image operation yet."
+    },
+    {
+      "method": "POST",
+      "path": "/images/prune",
+      "operationId": "ImagePrune",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Guest image pruning with dangling filter handling."
+    },
+    {
+      "method": "GET",
+      "path": "/images/search",
+      "operationId": "ImageSearch",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this image operation yet."
+    },
+    {
+      "method": "DELETE",
+      "path": "/images/{name}",
+      "operationId": "ImageDelete",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Guest image deletion with force handling."
+    },
+    {
+      "method": "GET",
+      "path": "/images/{name}/get",
+      "operationId": "ImageGet",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "string",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "GET",
+      "path": "/images/{name}/history",
+      "operationId": "ImageHistory",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The persistent guest protocol does not expose this image operation yet."
+    },
+    {
+      "method": "GET",
+      "path": "/images/{name}/json",
+      "operationId": "ImageInspect",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/ImageInspect",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Guest image inspection with Docker-compatible core fields."
+    },
+    {
+      "method": "POST",
+      "path": "/images/{name}/push",
+      "operationId": "ImagePush",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    },
+    {
+      "method": "POST",
+      "path": "/images/{name}/tag",
+      "operationId": "ImageTag",
+      "support": "implemented",
+      "expectedStatus": 201,
+      "responseStatuses": [
+        201,
+        400,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "DockerRuntimeRoutes",
+      "note": "Adds a guest image reference."
+    },
+    {
+      "method": "GET",
+      "path": "/info",
+      "operationId": "SystemInfo",
+      "support": "partial",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "#/definitions/SystemInfo",
+      "owner": "DockerRuntimeRoutes",
+      "note": "Reports live guest counts and host/runtime metadata with capability warnings."
+    },
+    {
+      "method": "GET",
+      "path": "/networks",
+      "operationId": "NetworkList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "POST",
+      "path": "/networks/create",
+      "operationId": "NetworkCreate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        201,
+        400,
+        403,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/NetworkCreateResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "POST",
+      "path": "/networks/prune",
+      "operationId": "NetworkPrune",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "DELETE",
+      "path": "/networks/{id}",
+      "operationId": "NetworkDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        403,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "GET",
+      "path": "/networks/{id}",
+      "operationId": "NetworkInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/Network",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "POST",
+      "path": "/networks/{id}/connect",
+      "operationId": "NetworkConnect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        403,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "POST",
+      "path": "/networks/{id}/disconnect",
+      "operationId": "NetworkDisconnect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        403,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+    },
+    {
+      "method": "GET",
+      "path": "/nodes",
+      "operationId": "NodeList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/{id}",
+      "operationId": "NodeDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{id}",
+      "operationId": "NodeInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Node",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{id}/update",
+      "operationId": "NodeUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/plugins",
+      "operationId": "PluginList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/create",
+      "operationId": "PluginCreate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "GET",
+      "path": "/plugins/privileges",
+      "operationId": "GetPluginPrivileges",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/pull",
+      "operationId": "PluginPull",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "DELETE",
+      "path": "/plugins/{name}",
+      "operationId": "PluginDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/Plugin",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/{name}/disable",
+      "operationId": "PluginDisable",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/{name}/enable",
+      "operationId": "PluginEnable",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "GET",
+      "path": "/plugins/{name}/json",
+      "operationId": "PluginInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/Plugin",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/{name}/push",
+      "operationId": "PluginPush",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/{name}/set",
+      "operationId": "PluginSet",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "POST",
+      "path": "/plugins/{name}/upgrade",
+      "operationId": "PluginUpgrade",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker plugins require a host plugin manager that Glass Dock does not provide."
+    },
+    {
+      "method": "GET",
+      "path": "/secrets",
+      "operationId": "SecretList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/secrets/create",
+      "operationId": "SecretCreate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        201,
+        409,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/IDResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "DELETE",
+      "path": "/secrets/{id}",
+      "operationId": "SecretDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        204,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/secrets/{id}",
+      "operationId": "SecretInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Secret",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/secrets/{id}/update",
+      "operationId": "SecretUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/services",
+      "operationId": "ServiceList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/services/create",
+      "operationId": "ServiceCreate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        201,
+        400,
+        403,
+        409,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/ServiceCreateResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "DELETE",
+      "path": "/services/{id}",
+      "operationId": "ServiceDelete",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/services/{id}",
+      "operationId": "ServiceInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Service",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/services/{id}/logs",
+      "operationId": "ServiceLogs",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "string",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/services/{id}/update",
+      "operationId": "ServiceUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/ServiceUpdateResponse",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/session",
+      "operationId": "Session",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        101,
+        400,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Interactive sessions require a guest terminal handoff that is not implemented."
+    },
+    {
+      "method": "GET",
+      "path": "/swarm",
+      "operationId": "SwarmInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Swarm",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/swarm/init",
+      "operationId": "SwarmInit",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        500,
+        503
+      ],
+      "responseSchema": "string",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/swarm/join",
+      "operationId": "SwarmJoin",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/swarm/leave",
+      "operationId": "SwarmLeave",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/swarm/unlock",
+      "operationId": "SwarmUnlock",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/swarm/unlockkey",
+      "operationId": "SwarmUnlockkey",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "object",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "POST",
+      "path": "/swarm/update",
+      "operationId": "SwarmUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/system/df",
+      "operationId": "SystemDataUsage",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "The guest runtime does not expose complete Docker system disk accounting."
+    },
+    {
+      "method": "GET",
+      "path": "/tasks",
+      "operationId": "TaskList",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        500,
+        503
+      ],
+      "responseSchema": "array",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/tasks/{id}",
+      "operationId": "TaskInspect",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "#/definitions/Task",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/tasks/{id}/logs",
+      "operationId": "TaskLogs",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": "string",
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+    },
+    {
+      "method": "GET",
+      "path": "/version",
+      "operationId": "SystemVersion",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "#/definitions/SystemVersion",
+      "owner": "VersionRoute",
+      "note": "Glass Dock build and Docker API compatibility versions."
+    },
+    {
+      "method": "GET",
+      "path": "/volumes",
+      "operationId": "VolumeList",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "#/definitions/VolumeListResponse",
+      "owner": "VolumeListRoute",
+      "note": "Local volume listing."
+    },
+    {
+      "method": "POST",
+      "path": "/volumes/create",
+      "operationId": "VolumeCreate",
+      "support": "implemented",
+      "expectedStatus": 201,
+      "responseStatuses": [
+        201,
+        500
+      ],
+      "responseSchema": "#/definitions/Volume",
+      "owner": "VolumeCreateRoute",
+      "note": "Local persistent volume creation."
+    },
+    {
+      "method": "POST",
+      "path": "/volumes/prune",
+      "operationId": "VolumePrune",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        500
+      ],
+      "responseSchema": "object",
+      "owner": "VolumePruneRoute",
+      "note": "Anonymous and all-volume pruning with label filters."
+    },
+    {
+      "method": "DELETE",
+      "path": "/volumes/{name}",
+      "operationId": "VolumeDelete",
+      "support": "implemented",
+      "expectedStatus": 204,
+      "responseStatuses": [
+        204,
+        404,
+        409,
+        500
+      ],
+      "responseSchema": null,
+      "owner": "VolumeDeleteRoute",
+      "note": "Local volume deletion with in-use protection."
+    },
+    {
+      "method": "GET",
+      "path": "/volumes/{name}",
+      "operationId": "VolumeInspect",
+      "support": "implemented",
+      "expectedStatus": 200,
+      "responseStatuses": [
+        200,
+        404,
+        500
+      ],
+      "responseSchema": "#/definitions/Volume",
+      "owner": "VolumeInspectRoute",
+      "note": "Local volume inspection."
+    },
+    {
+      "method": "PUT",
+      "path": "/volumes/{name}",
+      "operationId": "VolumeUpdate",
+      "support": "unsupported",
+      "expectedStatus": 501,
+      "responseStatuses": [
+        200,
+        400,
+        404,
+        500,
+        503
+      ],
+      "responseSchema": null,
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+    }
+  ]
+}

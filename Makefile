@@ -84,6 +84,8 @@ help:
 	@echo "  benchmark-preflight - Validate runtime benchmark configuration"
 	@echo "  benchmark-tools-test - Test benchmark tool install/uninstall plans"
 	@echo "  benchmark        - Run the configured runtime benchmark matrix"
+	@echo "  api-compatibility-check - Validate the pinned Moby v28.5.2 matrix and 501 route coverage"
+	@echo "  api-compatibility-conformance - Probe a running Glass Dock socket against the matrix"
 	@echo "  fmt              - Format source code"
 	@echo "  clean            - Clean build artifacts"
 	@echo "  version          - Show version information"
@@ -163,6 +165,15 @@ raycast-build:
 .PHONY: benchmark
 benchmark:
 	@bash scripts/benchmark-runtime.sh
+
+.PHONY: api-compatibility-check
+api-compatibility-check:
+	@scripts/compatibility/check-moby-v1.51.sh
+
+.PHONY: api-compatibility-conformance
+api-compatibility-conformance:
+	@test -n "$(GLASSDOCK_SOCKET)" || (echo "Set GLASSDOCK_SOCKET to a running Glass Dock Unix socket" >&2; exit 1)
+	@ruby scripts/compatibility/run-moby-v1.51-conformance.rb --socket "$(GLASSDOCK_SOCKET)" --smoke
 
 # Prevent Foundation's Pipe() from being used when passing fds to Apple Container
 # APIs (createProcess/bootstrap). Apple closes those fds immediately after duping

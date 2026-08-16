@@ -111,6 +111,7 @@ struct DockerRuntimeRoutesTests {
             }
             try await app.testing().test(.POST, "/v1.51/containers/container-1/wait?condition=next-exit") { response async throws in
                 #expect(response.status == .ok)
+                #expect(!response.body.string.hasPrefix(" "))
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
                 #expect(value?["StatusCode"] as? Int == 7)
             }
@@ -217,9 +218,22 @@ struct DockerRuntimeRoutesTests {
                 let bytes = Array(response.body.readableBytesView)
                 #expect(bytes[0] == 1)
                 #expect(bytes[11] == 2)
+                #expect(response.headers.first(name: "Content-Type") == nil)
             }
             try await app.testing().test(.GET, "/v1.51/containers/missing/json") { response async in
                 #expect(response.status == .notFound)
+            }
+        }
+    }
+
+    @Test("container logs tail preserves the final newline")
+    func logsTail() async throws {
+        let backend = DockerRuntimeBackendMock(logOutput: "old\nnew\n")
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/logs?stdout=1&tail=1") { response async in
+                #expect(response.status == .ok)
+                let bytes = Array(response.body.readableBytesView)
+                #expect(Data(bytes.dropFirst(8)) == Data("new\n".utf8))
             }
         }
     }
@@ -241,7 +255,7 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
-    @Test("known unsupported routes return explicit 501 errors")
+    @Test("runtime and unsupported routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withApp(configure: { _ in }) { app in
@@ -249,9 +263,12 @@ struct DockerRuntimeRoutesTests {
             app.setRegexRouter(router)
             try app.register(collection: DockerRuntimeRoutes(backend: backend))
             try app.register(collection: ExplicitUnsupportedDockerRoutes())
-            try await app.testing().test(.GET, "/v1.51/info") { response async in
-                #expect(response.status == .notImplemented)
-                #expect(response.body.string.contains("not implemented"))
+            try await app.testing().test(.GET, "/v1.51/info") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Containers"] as? Int == 1)
+                #expect(value?["Images"] as? Int == 1)
+                #expect(value?["OSType"] as? String == "linux")
             }
             try await app.testing().test(.POST, "/v1.51/containers/container-1/restart") { response async in
                 #expect(response.status == .notImplemented)
@@ -262,7 +279,86 @@ struct DockerRuntimeRoutesTests {
             try await app.testing().test(.GET, "/v1.51/containers/container-1/attach/ws") { response async in
                 #expect(response.status == .notImplemented)
             }
+            for (method, path) in [
+                (HTTPMethod.GET, "/v1.51/swarm"),
+                (HTTPMethod.GET, "/v1.51/plugins"),
+                (HTTPMethod.POST, "/v1.51/session"),
+                (HTTPMethod.GET, "/v1.51/networks"),
+                (HTTPMethod.GET, "/v1.51/system/df"),
+            ] {
+                try await app.testing().test(method, path) { response async in
+                    #expect(response.status == .notImplemented)
+                }
+            }
         }
+    }
+
+    @Test("container prune removes stopped containers and reports Docker fields")
+    func containerPrune() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/prune") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["ContainersDeleted"] as? [String] == ["container-1"])
+                #expect(value?["SpaceReclaimed"] as? Int == 0)
+            }
+        }
+        #expect(await backend.lastDelete?.force == false)
+        #expect(await backend.lastDelete?.volumes == false)
+    }
+
+    @Test("container prune rejects filters it cannot apply")
+    func containerPruneRejectsUnsupportedFilter() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            let filters = "%7B%22status%22:%5B%22exited%22%5D%7D"
+            try await app.testing().test(.POST, "/v1.51/containers/prune?filters=\(filters)") { response async in
+                #expect(response.status == .badRequest)
+            }
+        }
+        #expect(await backend.lastDelete == nil)
+    }
+
+    @Test("healthy wait and detached exec are explicit 501 responses")
+    func unsupportedRuntimeVariants() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/wait?condition=healthy") { response async in
+                #expect(response.status == .notImplemented)
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/exec",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Cmd":["true"]}"#)
+            ) { response async throws in
+                #expect(response.status == .created)
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/exec/exec-1/start",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Detach":true}"#)
+            ) { response async in
+                #expect(response.status == .notImplemented)
+            }
+        }
+    }
+
+    @Test("attach honors Docker's false stream defaults")
+    func attachWithoutUpgrade() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/attach?stdout=1&stderr=1"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: "Upgrade") == nil)
+            }
+        }
+        #expect(await backend.startCount == 0)
     }
 
     @Test("unsupported create options fail explicitly")
@@ -356,6 +452,11 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastPruneAll: Bool?
     private(set) var startCount = 0
     private var running = false
+    private let logOutput: String?
+
+    init(logOutput: String? = nil) {
+        self.logOutput = logOutput
+    }
 
     func pullImage(
         reference: String, platform: String?, auth: DockerRegistryAuth?
@@ -425,8 +526,8 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
 
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {
         DockerRuntimeProcessOutput(
-            stdout: stdout ? Data("out".utf8) : Data(),
-            stderr: stderr ? Data("err".utf8) : Data(),
+            stdout: stdout ? Data((logOutput ?? "out").utf8) : Data(),
+            stderr: stderr ? Data((logOutput ?? "err").utf8) : Data(),
             exitCode: 0
         )
     }

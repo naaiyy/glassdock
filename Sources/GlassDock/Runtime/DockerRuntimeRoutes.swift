@@ -275,7 +275,9 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.DELETE, pattern: "/images/{name:.*}", use: deleteImage)
         try routes.registerVersionedRoute(.POST, pattern: "/images/prune", use: pruneImages)
         try routes.registerVersionedRoute(.POST, pattern: "/images/{name:.*}/tag", use: tagImage)
+        try routes.registerVersionedRoute(.GET, pattern: "/info", use: info)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: pruneContainers)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/start", use: startContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/stop", use: stopContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/kill", use: killContainer)
@@ -314,6 +316,42 @@ struct DockerRuntimeRoutes: RouteCollection {
         let response = Response(status: .ok, body: .init(data: body))
         response.headers.contentType = .json
         return response
+    }
+
+    private func info(_ req: Request) async throws -> Response {
+        let containers = try await call { try await backend.listContainers(showAll: true) }
+        let images = try await call { try await backend.listImages() }
+        let running = containers.filter { $0.state == .running }.count
+        let stopped = containers.count - running
+        let environment = ProcessInfo.processInfo.environment
+        let info = SystemInfo(
+            Containers: containers.count,
+            ContainersRunning: running,
+            ContainersPaused: 0,
+            ContainersStopped: stopped,
+            Images: images.count,
+            DockerRootDir: GlassDockDirectories.engineStateDirectory.path,
+            Debug: false,
+            KernelVersion: getKernel(),
+            OSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            OSType: "linux",
+            Architecture: "arm64",
+            NCPU: ProcessInfo.processInfo.activeProcessorCount,
+            MemTotal: Int64(min(ProcessInfo.processInfo.physicalMemory, UInt64(Int64.max))),
+            HttpProxy: environment["HTTP_PROXY"] ?? environment["http_proxy"],
+            HttpsProxy: environment["HTTPS_PROXY"] ?? environment["https_proxy"],
+            NoProxy: environment["NO_PROXY"] ?? environment["no_proxy"],
+            Name: ProcessInfo.processInfo.hostName,
+            Labels: [],
+            ExperimentalBuild: false,
+            ServerVersion: getBuildVersion(),
+            ProductLicense: "Apache-2.0",
+            SystemTime: ISO8601DateFormatter().string(from: Date()),
+            Warnings: [
+                "Some Docker Engine capabilities are unavailable because Glass Dock uses a persistent containerd guest runtime."
+            ]
+        )
+        return try jsonResponse(.ok, info)
     }
 
     private func listImages(_ req: Request) async throws -> Response {
@@ -358,6 +396,26 @@ struct DockerRuntimeRoutes: RouteCollection {
                 ImagesDeleted: Self.imageDeleteItems(result),
                 SpaceReclaimed: result.reclaimed
             )
+        )
+    }
+
+    private func pruneContainers(_ req: Request) async throws -> Response {
+        let filters = try req.query[String.self, at: "filters"].map(Self.containerPruneFilters)
+        let containers = try await call { try await backend.listContainers(showAll: true) }
+        let candidates = containers.filter { container in
+            container.state != .running
+                && (filters.map { Self.matches(container, filters: $0) } ?? true)
+        }
+        var deleted: [String] = []
+        for container in candidates {
+            try await call {
+                try await backend.deleteContainer(id: container.id, force: false, removeVolumes: false)
+            }
+            deleted.append(container.id)
+        }
+        return try jsonResponse(
+            .ok,
+            ContainerPruneResponse(ContainersDeleted: deleted, SpaceReclaimed: 0)
         )
     }
 
@@ -435,6 +493,9 @@ struct DockerRuntimeRoutes: RouteCollection {
         } else {
             condition = .default
         }
+        if condition == .healthy {
+            throw Abort(.notImplemented, reason: "healthy wait is not supported by the persistent runtime")
+        }
         let backend = self.backend
         var headers = HTTPHeaders()
         headers.contentType = .json
@@ -442,7 +503,6 @@ struct DockerRuntimeRoutes: RouteCollection {
             status: .ok,
             headers: headers,
             body: .init(managedAsyncStream: { writer in
-                try await writer.writeBuffer(ByteBuffer(string: " "))
                 let exitCode = try await backend.waitContainer(id: id, condition: condition)
                 let data = try JSONEncoder().encode(RESTContainerWait(statusCode: Int64(exitCode)))
                 try await writer.writeBuffer(ByteBuffer(bytes: data))
@@ -549,18 +609,11 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.notFound, reason: "Exec instance not found: \(id)")
         }
         let body = try req.content.decode(ExecStartRequest.self)
+        if body.Detach == true {
+            throw Abort(.notImplemented, reason: "detached exec is not supported by the persistent runtime")
+        }
         try execState.markRunning(id: id)
         let tty = body.Tty ?? entry.request.tty
-        if body.Detach ?? false {
-            do {
-                _ = try await call { try await backend.startExec(id: id, detach: true, tty: tty) }
-                execState.finish(id: id, exitCode: 0)
-                return Response(status: .ok)
-            } catch {
-                execState.finish(id: id, exitCode: -1)
-                throw error
-            }
-        }
         let stream = try await call { try await backend.streamExec(id: id, tty: tty) }
         if req.headers.first(name: "Upgrade")?.lowercased() == "tcp",
             req.headers.first(name: "Connection")?.lowercased().split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true
@@ -642,8 +695,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             || Self.mobyBool(req.query[String.self, at: "timestamps"])
             || Self.mobyBool(req.query[String.self, at: "details"])
             || req.query[String.self, at: "since"].map { $0 != "0" } == true
-            || req.query[String.self, at: "until"] != nil
-            || req.query[String.self, at: "tail"].map { $0 != "all" } == true
+            || req.query[String.self, at: "until"].map { !$0.isEmpty && $0 != "0" } == true
         if unsupported {
             throw Abort(.notImplemented, reason: "Requested Docker log filtering or follow mode is not implemented")
         }
@@ -653,8 +705,11 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
         }
         let container = try await call { try await backend.inspectContainer(id: id) }
-        let output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
-        return Self.streamResponse(output: output, tty: container.tty)
+        var output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+        if let tail = req.query[String.self, at: "tail"] {
+            output = try Self.applyTail(output, value: tail)
+        }
+        return Self.streamResponse(output: output, tty: container.tty, contentType: false)
     }
 
     private func attach(_ req: Request) async throws -> Response {
@@ -664,22 +719,33 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         let tty = try await inspectContainer(id: id).tty
         let backend = self.backend
-        let stdout = req.query[String.self, at: "stdout"].map(Self.mobyBool) ?? true
-        let stderr = req.query[String.self, at: "stderr"].map(Self.mobyBool) ?? true
+        let stdout = req.query[String.self, at: "stdout"].map(Self.mobyBool) ?? false
+        let stderr = req.query[String.self, at: "stderr"].map(Self.mobyBool) ?? false
+        guard stdout || stderr else {
+            throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
+        }
+        let upgraded =
+            req.headers.first(name: "Upgrade")?.lowercased() == "tcp"
+            && req.headers.first(name: "Connection")?.lowercased().split(separator: ",")
+                .map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true
         let stream = try await call {
             try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
         }
         var headers = HTTPHeaders()
-        headers.add(name: "Connection", value: "Upgrade")
-        headers.add(name: "Upgrade", value: "tcp")
         headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        if upgraded {
+            headers.add(name: "Connection", value: "Upgrade")
+            headers.add(name: "Upgrade", value: "tcp")
+        }
         return Response(
-            status: .switchingProtocols,
+            status: upgraded ? .switchingProtocols : .ok,
             headers: headers,
             body: .init(managedAsyncStream: { writer in
-                // Send the upgrade response before Docker issues the separate
-                // container-start request. Attach must not start the container.
-                try await writer.writeBuffer(ByteBuffer())
+                if upgraded {
+                    // Send the upgrade response before Docker issues the separate
+                    // container-start request. Attach must not start the container.
+                    try await writer.writeBuffer(ByteBuffer())
+                }
                 for try await frame in stream {
                     guard frame.exitCode == nil else { continue }
                     if tty {
@@ -731,7 +797,9 @@ struct DockerRuntimeRoutes: RouteCollection {
         return response
     }
 
-    private static func streamResponse(output: DockerRuntimeProcessOutput, tty: Bool) -> Response {
+    private static func streamResponse(
+        output: DockerRuntimeProcessOutput, tty: Bool, contentType: Bool = true
+    ) -> Response {
         var data = Data()
         if tty {
             data.append(output.stdout)
@@ -741,8 +809,41 @@ struct DockerRuntimeRoutes: RouteCollection {
             data.append(frame(output.stderr, stream: 2))
         }
         let response = Response(status: .ok, body: .init(data: data))
-        response.headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        if contentType {
+            response.headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        }
         return response
+    }
+
+    private static func applyTail(
+        _ output: DockerRuntimeProcessOutput, value: String
+    ) throws -> DockerRuntimeProcessOutput {
+        guard value == "all" || Int(value) != nil else {
+            throw Abort(.badRequest, reason: "Invalid tail value: \(value)")
+        }
+        guard value != "all", let count = Int(value) else { return output }
+        guard count >= 0 else {
+            throw Abort(.badRequest, reason: "Invalid tail value: \(value)")
+        }
+        func tail(_ data: Data) -> Data {
+            guard count > 0, !data.isEmpty else { return Data() }
+            let hasTrailingNewline = data.last == 0x0A
+            var lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+            if hasTrailingNewline { lines.removeLast() }
+            let selected = lines.suffix(count)
+            guard !selected.isEmpty else { return Data() }
+            var result = Data()
+            for (index, line) in selected.enumerated() {
+                result.append(line)
+                if index < selected.count - 1 || hasTrailingNewline {
+                    result.append(0x0A)
+                }
+            }
+            return result
+        }
+        return DockerRuntimeProcessOutput(
+            stdout: tail(output.stdout), stderr: tail(output.stderr), exitCode: output.exitCode
+        )
     }
 
     private static func frame(_ payload: Data, stream: UInt8) -> Data {
@@ -881,6 +982,14 @@ struct DockerRuntimeRoutes: RouteCollection {
         throw Abort(.badRequest, reason: "Invalid container filters")
     }
 
+    private static func containerPruneFilters(_ raw: String) throws -> [String: [String]] {
+        let filters = try containerFilters(raw)
+        guard let unsupported = filters.keys.first(where: { $0 != "label" && $0 != "until" }) else {
+            return filters
+        }
+        throw Abort(.badRequest, reason: "Unsupported container prune filter: \(unsupported)")
+    }
+
     private static func matches(
         _ container: DockerRuntimeContainer,
         filters: [String: [String]]
@@ -906,10 +1015,18 @@ struct DockerRuntimeRoutes: RouteCollection {
                     guard let actual = container.labels[parts[0]] else { return false }
                     return parts.count == 1 || actual == parts[1]
                 }
+            case "until":
+                guard let raw = values.first, let cutoff = parseDate(raw) else { return false }
+                return container.createdAt < cutoff
             default:
                 return false
             }
         }
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        if let seconds = Double(value) { return Date(timeIntervalSince1970: seconds) }
+        return ISO8601DateFormatter().date(from: value)
     }
 
     private static func imageDeleteItems(_ result: DockerRuntimeImageDelete) -> [ImageDeleteItem] {
@@ -978,6 +1095,11 @@ private struct ImageDeleteItem: Encodable {
 
 private struct ImagePruneResponse: Encodable {
     let ImagesDeleted: [ImageDeleteItem]
+    let SpaceReclaimed: Int64
+}
+
+private struct ContainerPruneResponse: Encodable {
+    let ContainersDeleted: [String]
     let SpaceReclaimed: Int64
 }
 

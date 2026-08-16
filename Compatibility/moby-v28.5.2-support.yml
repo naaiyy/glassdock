@@ -1,0 +1,173 @@
+schema: 1
+source:
+  repository: moby/moby
+  ref: v28.5.2
+  url: https://raw.githubusercontent.com/moby/moby/v28.5.2/api/swagger.yaml
+  sha256: 2afceffc4138e3f4a030140c14f27d4118cec99024695f53d4884c79f3a10138
+  apiVersion: "1.51"
+
+# Entries not listed here are generated as explicit 501 Not Implemented
+# endpoints. A route is listed only when Glass Dock can answer the operation
+# with the persistent guest runtime, even if some optional request variants
+# remain unsupported.
+routes:
+  - method: GET
+    path: /_ping
+    support: implemented
+    owner: HealthCheckPingRoute
+    note: Docker daemon liveness and API-version headers.
+  - method: HEAD
+    path: /_ping
+    support: implemented
+    owner: HealthCheckPingRoute
+    note: Header-only Docker daemon liveness check.
+  - method: POST
+    path: /auth
+    support: implemented
+    owner: AuthRoute
+    note: Registry credential validation.
+  - method: GET
+    path: /containers/json
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Container listing and supported id, name, status, ancestor, and label filters.
+  - method: POST
+    path: /containers/create
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Persistent containerd creation with explicit 501 responses for unsupported options.
+  - method: DELETE
+    path: /containers/{id}
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Container removal and named-volume reference release.
+  - method: GET
+    path: /containers/{id}/json
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Docker inspect response built from guest state and host metadata.
+  - method: GET
+    path: /containers/{id}/logs
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Stored stdout and stderr with stream framing and tail filtering; follow and timestamp modes remain unsupported.
+  - method: POST
+    path: /containers/prune
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Removes non-running containers with label and until filters; guest snapshot byte accounting reports zero.
+  - method: POST
+    path: /containers/{id}/attach
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Read-only attach with raw stream framing; interactive stdin remains unsupported.
+  - method: POST
+    path: /containers/{id}/exec
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Exec creation and guest-backed command execution without interactive stdin.
+  - method: POST
+    path: /containers/{id}/start
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Starts a persistent guest container and republishes ports.
+  - method: POST
+    path: /containers/{id}/stop
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Signal and timeout handling with a forced kill after timeout.
+  - method: POST
+    path: /containers/{id}/kill
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Sends a validated signal to the guest container.
+  - method: POST
+    path: /containers/{id}/wait
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Default, next-exit, not-running, and removed waits; healthy waits are explicit 501 responses.
+  - method: POST
+    path: /exec/{id}/start
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Streaming exec start; detached exec and interactive stdin are unsupported.
+  - method: GET
+    path: /exec/{id}/json
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Host-side exec lifecycle inspection.
+  - method: GET
+    path: /events
+    support: implemented
+    owner: EventsRoute
+    note: Persistent guest event stream with Docker event filtering.
+  - method: POST
+    path: /images/create
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Guest-backed image pull; tar import through fromSrc remains unsupported.
+  - method: GET
+    path: /images/json
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Image listing with reference filtering.
+  - method: GET
+    path: /images/{name}/json
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Guest image inspection with Docker-compatible core fields.
+  - method: DELETE
+    path: /images/{name}
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Guest image deletion with force handling.
+  - method: POST
+    path: /images/prune
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Guest image pruning with dangling filter handling.
+  - method: POST
+    path: /images/{name}/tag
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Adds a guest image reference.
+  - method: GET
+    path: /distribution/{name}/json
+    support: implemented
+    owner: DistributionJsonRoute
+    note: Registry manifest and platform inspection.
+  - method: GET
+    path: /info
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports live guest counts and host/runtime metadata with capability warnings.
+  - method: GET
+    path: /version
+    support: implemented
+    owner: VersionRoute
+    note: Glass Dock build and Docker API compatibility versions.
+  - method: POST
+    path: /volumes/create
+    support: implemented
+    owner: VolumeCreateRoute
+    note: Local persistent volume creation.
+  - method: GET
+    path: /volumes
+    support: implemented
+    owner: VolumeListRoute
+    note: Local volume listing.
+  - method: GET
+    path: /volumes/{name}
+    support: implemented
+    owner: VolumeInspectRoute
+    note: Local volume inspection.
+  - method: DELETE
+    path: /volumes/{name}
+    support: implemented
+    owner: VolumeDeleteRoute
+    note: Local volume deletion with in-use protection.
+  - method: POST
+    path: /volumes/prune
+    support: implemented
+    owner: VolumePruneRoute
+    note: Anonymous and all-volume pruning with label filters.
