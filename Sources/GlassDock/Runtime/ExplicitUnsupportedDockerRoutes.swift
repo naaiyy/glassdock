@@ -12,10 +12,6 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
     private static let endpoints = [
         Endpoint(method: .POST, pattern: "/build"),
         Endpoint(method: .POST, pattern: "/build/prune"),
-        Endpoint(method: .DELETE, pattern: "/nodes/{id:.*}"),
-        Endpoint(method: .GET, pattern: "/nodes"),
-        Endpoint(method: .GET, pattern: "/nodes/{id:.*}"),
-        Endpoint(method: .POST, pattern: "/nodes/{id:.*}/update"),
         Endpoint(method: .DELETE, pattern: "/plugins/{name:.*}"),
         Endpoint(method: .GET, pattern: "/plugins"),
         Endpoint(method: .GET, pattern: "/plugins/privileges"),
@@ -27,16 +23,7 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
         Endpoint(method: .POST, pattern: "/plugins/{name:.*}/push"),
         Endpoint(method: .POST, pattern: "/plugins/{name:.*}/set"),
         Endpoint(method: .POST, pattern: "/plugins/{name:.*}/upgrade"),
-        Endpoint(method: .DELETE, pattern: "/services/{id:.*}"),
-        Endpoint(method: .GET, pattern: "/services"),
-        Endpoint(method: .GET, pattern: "/services/{id:.*}"),
-        Endpoint(method: .GET, pattern: "/services/{id:.*}/logs"),
-        Endpoint(method: .POST, pattern: "/services/create"),
-        Endpoint(method: .POST, pattern: "/services/{id:.*}/update"),
         Endpoint(method: .POST, pattern: "/session"),
-        Endpoint(method: .GET, pattern: "/tasks"),
-        Endpoint(method: .GET, pattern: "/tasks/{id:.*}"),
-        Endpoint(method: .GET, pattern: "/tasks/{id:.*}/logs"),
         Endpoint(method: .PUT, pattern: "/volumes/{name:.*}"),
     ]
 

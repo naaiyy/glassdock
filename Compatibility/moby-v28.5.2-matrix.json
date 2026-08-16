@@ -963,23 +963,23 @@
       "method": "GET",
       "path": "/nodes",
       "operationId": "NodeList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Lists the local manager node after Swarm initialization with id and name filters."
     },
     {
       "method": "DELETE",
       "path": "/nodes/{id}",
       "operationId": "NodeDelete",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -987,15 +987,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Removes the local single-node manager and clears its control-plane state."
     },
     {
       "method": "GET",
       "path": "/nodes/{id}",
       "operationId": "NodeInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1003,15 +1003,15 @@
         503
       ],
       "responseSchema": "#/definitions/Node",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Inspects the local manager node with Docker node description and status fields."
     },
     {
       "method": "POST",
       "path": "/nodes/{id}/update",
       "operationId": "NodeUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1020,8 +1020,8 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Persists local node availability, role, name, and label metadata."
     },
     {
       "method": "GET",
@@ -1268,23 +1268,23 @@
       "method": "GET",
       "path": "/services",
       "operationId": "ServiceList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Lists service specifications and versions in the local control plane."
     },
     {
       "method": "POST",
       "path": "/services/create",
       "operationId": "ServiceCreate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 201,
       "responseStatuses": [
         201,
         400,
@@ -1294,15 +1294,15 @@
         503
       ],
       "responseSchema": "#/definitions/ServiceCreateResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Creates a service specification and a pending single-node task record."
     },
     {
       "method": "DELETE",
       "path": "/services/{id}",
       "operationId": "ServiceDelete",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1310,15 +1310,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Removes a local service and its pending task record."
     },
     {
       "method": "GET",
       "path": "/services/{id}",
       "operationId": "ServiceInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1326,15 +1326,15 @@
         503
       ],
       "responseSchema": "#/definitions/Service",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Inspects a local service specification and version."
     },
     {
       "method": "GET",
       "path": "/services/{id}/logs",
       "operationId": "ServiceLogs",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1342,15 +1342,15 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Provides Docker raw-stream semantics for service logs; pending tasks have an empty stream."
     },
     {
       "method": "POST",
       "path": "/services/{id}/update",
       "operationId": "ServiceUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1359,8 +1359,8 @@
         503
       ],
       "responseSchema": "#/definitions/ServiceUpdateResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Updates a local service specification and returns a Docker warning for unscheduled tasks."
     },
     {
       "method": "POST",
@@ -1504,23 +1504,23 @@
       "method": "GET",
       "path": "/tasks",
       "operationId": "TaskList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Lists pending task records created from local service specifications."
     },
     {
       "method": "GET",
       "path": "/tasks/{id}",
       "operationId": "TaskInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1528,15 +1528,15 @@
         503
       ],
       "responseSchema": "#/definitions/Task",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Inspects a local task record and its pending scheduler state."
     },
     {
       "method": "GET",
       "path": "/tasks/{id}/logs",
       "operationId": "TaskLogs",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1544,8 +1544,8 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Provides Docker raw-stream semantics for pending task logs."
     },
     {
       "method": "GET",

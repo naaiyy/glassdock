@@ -59,6 +59,33 @@ actor DockerControlPlane {
         }
     }
 
+    struct Node: Sendable, Equatable {
+        let id: String
+        let version: UInt64
+        let createdAt: Date
+        let updatedAt: Date
+        let spec: [String: JSONValue]
+    }
+
+    struct Service: Sendable, Equatable {
+        let id: String
+        let version: UInt64
+        let createdAt: Date
+        let updatedAt: Date
+        let spec: [String: JSONValue]
+        let taskID: String
+    }
+
+    struct Task: Sendable, Equatable {
+        let id: String
+        let version: UInt64
+        let createdAt: Date
+        let updatedAt: Date
+        let serviceID: String
+        let spec: [String: JSONValue]
+        let state: String
+    }
+
     enum JSONValue: Sendable, Equatable, Codable {
         case string(String)
         case number(Double)
@@ -108,6 +135,15 @@ actor DockerControlPlane {
     private var configs: [String: StoredObject] = [:]
     private var secrets: [String: StoredObject] = [:]
     private var swarm: Swarm?
+    private var nodeVersion: UInt64 = 1
+    private var nodeSpec: [String: JSONValue] = [
+        "Name": .string("glassdock"),
+        "Role": .string("manager"),
+        "Availability": .string("active"),
+        "Labels": .object([:]),
+    ]
+    private var services: [String: Service] = [:]
+    private var tasks: [String: Task] = [:]
 
     func createConfig(spec: Spec) -> Object {
         create(spec: spec, in: &configs)
@@ -173,6 +209,13 @@ actor DockerControlPlane {
 
     func initializeSwarm(spec: SwarmSpec) -> Swarm {
         if let swarm { return swarm }
+        nodeVersion = 1
+        nodeSpec = [
+            "Name": .string("glassdock"),
+            "Role": .string("manager"),
+            "Availability": .string("active"),
+            "Labels": .object([:]),
+        ]
         let now = Date()
         let initialized = Swarm(
             id: Self.identifier(),
@@ -219,11 +262,182 @@ actor DockerControlPlane {
 
     func leaveSwarm() {
         swarm = nil
+        nodeVersion = 1
+        nodeSpec = [:]
+        services.removeAll()
+        tasks.removeAll()
     }
 
     func unlockSwarm(key: String) -> Bool {
         guard let swarm else { return false }
         return key == swarm.unlockKey
+    }
+
+    func listNodes(filters: [String: [String]]?) -> [Node] {
+        guard let node = node() else { return [] }
+        guard matchesNode(node, filters: filters) else { return [] }
+        return [node]
+    }
+
+    func inspectNode(id: String) -> Node? {
+        guard let node = node(), node.id == id || node.id.hasPrefix(id) else { return nil }
+        return node
+    }
+
+    func updateNode(id: String, spec: [String: JSONValue]) -> Node? {
+        guard let node = inspectNode(id: id) else { return nil }
+        let updated = Node(
+            id: node.id,
+            version: node.version + 1,
+            createdAt: node.createdAt,
+            updatedAt: Date(),
+            spec: spec
+        )
+        nodeVersion = updated.version
+        nodeSpec = updated.spec
+        return updated
+    }
+
+    func removeNode(id: String) -> Bool {
+        guard inspectNode(id: id) != nil else { return false }
+        leaveSwarm()
+        return true
+    }
+
+    func createService(spec: [String: JSONValue]) -> Service? {
+        guard swarm != nil else { return nil }
+        let now = Date()
+        let serviceID = Self.identifier()
+        let taskID = Self.identifier()
+        let service = Service(
+            id: serviceID,
+            version: 1,
+            createdAt: now,
+            updatedAt: now,
+            spec: spec,
+            taskID: taskID
+        )
+        let taskSpec: [String: JSONValue] = {
+            guard case .object(let value) = spec["TaskTemplate"] else { return [:] }
+            return value
+        }()
+        let task = Task(
+            id: taskID,
+            version: 1,
+            createdAt: now,
+            updatedAt: now,
+            serviceID: serviceID,
+            spec: taskSpec,
+            state: "new"
+        )
+        services[serviceID] = service
+        tasks[taskID] = task
+        return service
+    }
+
+    func listServices(filters: [String: [String]]?) -> [Service] {
+        services.values
+            .filter { matchesService($0, filters: filters) }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func inspectService(id: String) -> Service? {
+        services[resolveServiceID(id)]
+    }
+
+    func updateService(id: String, spec: [String: JSONValue]) -> Service? {
+        let resolved = resolveServiceID(id)
+        guard let current = services[resolved] else { return nil }
+        let updated = Service(
+            id: current.id,
+            version: current.version + 1,
+            createdAt: current.createdAt,
+            updatedAt: Date(),
+            spec: spec,
+            taskID: current.taskID
+        )
+        services[resolved] = updated
+        return updated
+    }
+
+    func removeService(id: String) -> Bool {
+        let resolved = resolveServiceID(id)
+        guard let service = services.removeValue(forKey: resolved) else { return false }
+        tasks.removeValue(forKey: service.taskID)
+        return true
+    }
+
+    func listTasks(filters: [String: [String]]?) -> [Task] {
+        tasks.values
+            .filter { matchesTask($0, filters: filters) }
+            .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func inspectTask(id: String) -> Task? {
+        tasks[resolveTaskID(id)]
+    }
+
+    private func node() -> Node? {
+        guard let swarm else { return nil }
+        return Node(
+            id: swarm.nodeID,
+            version: nodeVersion,
+            createdAt: swarm.createdAt,
+            updatedAt: swarm.updatedAt,
+            spec: nodeSpec
+        )
+    }
+
+    private func matchesNode(_ node: Node, filters: [String: [String]]?) -> Bool {
+        guard let filters else { return true }
+        if let ids = filters["id"], !ids.isEmpty, !ids.contains(where: { node.id.hasPrefix($0) }) {
+            return false
+        }
+        if let names = filters["name"], !names.isEmpty {
+            guard case .string(let name) = node.spec["Name"],
+                names.contains(where: { name == $0 || name.hasPrefix($0) })
+            else { return false }
+        }
+        return true
+    }
+
+    private func matchesService(_ service: Service, filters: [String: [String]]?) -> Bool {
+        guard let filters else { return true }
+        if let ids = filters["id"], !ids.isEmpty, !ids.contains(where: { service.id.hasPrefix($0) }) {
+            return false
+        }
+        if let names = filters["name"], !names.isEmpty {
+            guard case .string(let name) = service.spec["Name"],
+                names.contains(where: { name == $0 || name.hasPrefix($0) })
+            else { return false }
+        }
+        return true
+    }
+
+    private func matchesTask(_ task: Task, filters: [String: [String]]?) -> Bool {
+        guard let filters else { return true }
+        if let ids = filters["id"], !ids.isEmpty, !ids.contains(where: { task.id.hasPrefix($0) }) {
+            return false
+        }
+        if let serviceIDs = filters["service"], !serviceIDs.isEmpty,
+            !serviceIDs.contains(where: { task.serviceID.hasPrefix($0) })
+        {
+            return false
+        }
+        if let desiredStates = filters["desired-state"], !desiredStates.isEmpty,
+            !desiredStates.contains("running")
+        {
+            return false
+        }
+        return true
+    }
+
+    private func resolveServiceID(_ id: String) -> String {
+        services[id] != nil ? id : services.keys.first { $0.hasPrefix(id) } ?? id
+    }
+
+    private func resolveTaskID(_ id: String) -> String {
+        tasks[id] != nil ? id : tasks.keys.first { $0.hasPrefix(id) } ?? id
     }
 
     private func create(spec: Spec, in storage: inout [String: StoredObject]) -> Object {
@@ -322,6 +536,19 @@ struct DockerControlPlaneRoutes: RouteCollection {
         try routes.registerVersionedRoute(.POST, pattern: "/swarm/unlock", use: unlockSwarm)
         try routes.registerVersionedRoute(.GET, pattern: "/swarm/unlockkey", use: unlockKey)
         try routes.registerVersionedRoute(.POST, pattern: "/swarm/update", use: updateSwarm)
+        try routes.registerVersionedRoute(.GET, pattern: "/nodes", use: listNodes)
+        try routes.registerVersionedRoute(.GET, pattern: "/nodes/{id:.*}", use: inspectNode)
+        try routes.registerVersionedRoute(.POST, pattern: "/nodes/{id:.*}/update", use: updateNode)
+        try routes.registerVersionedRoute(.DELETE, pattern: "/nodes/{id:.*}", use: deleteNode)
+        try routes.registerVersionedRoute(.POST, pattern: "/services/create", use: createService)
+        try routes.registerVersionedRoute(.GET, pattern: "/services", use: listServices)
+        try routes.registerVersionedRoute(.GET, pattern: "/services/{id:.*}/logs", use: serviceLogs)
+        try routes.registerVersionedRoute(.GET, pattern: "/services/{id:.*}", use: inspectService)
+        try routes.registerVersionedRoute(.POST, pattern: "/services/{id:.*}/update", use: updateService)
+        try routes.registerVersionedRoute(.DELETE, pattern: "/services/{id:.*}", use: deleteService)
+        try routes.registerVersionedRoute(.GET, pattern: "/tasks", use: listTasks)
+        try routes.registerVersionedRoute(.GET, pattern: "/tasks/{id:.*}/logs", use: taskLogs)
+        try routes.registerVersionedRoute(.GET, pattern: "/tasks/{id:.*}", use: inspectTask)
     }
 
     private func createConfig(_ req: Request) async throws -> Response {
@@ -437,6 +664,103 @@ struct DockerControlPlaneRoutes: RouteCollection {
         return Response(status: .noContent)
     }
 
+    private func listNodes(_ req: Request) async throws -> Response {
+        guard await controlPlane.currentSwarm() != nil else {
+            throw Abort(.serviceUnavailable, reason: "This node is not a swarm manager")
+        }
+        let nodes = await controlPlane.listNodes(filters: filters(req))
+        return try jsonResponse(.ok, nodes.map(NodeResponse.init))
+    }
+
+    private func inspectNode(_ req: Request) async throws -> Response {
+        let node = await controlPlane.inspectNode(id: try parameter("id", req))
+        guard let node else { throw Abort(.notFound, reason: "node not found") }
+        return try jsonResponse(.ok, NodeResponse(node))
+    }
+
+    private func updateNode(_ req: Request) async throws -> Response {
+        let node = await controlPlane.updateNode(
+            id: try parameter("id", req), spec: try await decodeObject(req, message: "node specification")
+        )
+        guard let node else { throw Abort(.notFound, reason: "node not found") }
+        return try jsonResponse(.ok, NodeResponse(node))
+    }
+
+    private func deleteNode(_ req: Request) async throws -> Response {
+        guard await controlPlane.removeNode(id: try parameter("id", req)) else {
+            throw Abort(.notFound, reason: "node not found")
+        }
+        return try jsonResponse(.ok, WarningsResponse())
+    }
+
+    private func createService(_ req: Request) async throws -> Response {
+        let spec = try await decodeObject(req, message: "service specification")
+        guard case .string(let name) = spec["Name"], !name.isEmpty else {
+            throw Abort(.badRequest, reason: "service Name is required")
+        }
+        guard let service = await controlPlane.createService(spec: spec) else {
+            throw Abort(.serviceUnavailable, reason: "This node is not a swarm manager")
+        }
+        return try jsonResponse(.created, CreateResponse(id: service.id))
+    }
+
+    private func listServices(_ req: Request) async throws -> Response {
+        guard await controlPlane.currentSwarm() != nil else {
+            throw Abort(.serviceUnavailable, reason: "This node is not a swarm manager")
+        }
+        let services = await controlPlane.listServices(filters: filters(req))
+        return try jsonResponse(.ok, services.map(ServiceResponse.init))
+    }
+
+    private func inspectService(_ req: Request) async throws -> Response {
+        let service = await controlPlane.inspectService(id: try parameter("id", req))
+        guard let service else { throw Abort(.notFound, reason: "service not found") }
+        return try jsonResponse(.ok, ServiceResponse(service))
+    }
+
+    private func updateService(_ req: Request) async throws -> Response {
+        let service = await controlPlane.updateService(
+            id: try parameter("id", req), spec: try await decodeObject(req, message: "service specification")
+        )
+        guard let service else { throw Abort(.notFound, reason: "service not found") }
+        return try jsonResponse(.ok, ServiceUpdateResponse(service: service))
+    }
+
+    private func deleteService(_ req: Request) async throws -> Response {
+        guard await controlPlane.removeService(id: try parameter("id", req)) else {
+            throw Abort(.notFound, reason: "service not found")
+        }
+        return try jsonResponse(.ok, WarningsResponse())
+    }
+
+    private func serviceLogs(_ req: Request) async throws -> Response {
+        guard await controlPlane.inspectService(id: try parameter("id", req)) != nil else {
+            throw Abort(.notFound, reason: "service not found")
+        }
+        return emptyLogResponse()
+    }
+
+    private func listTasks(_ req: Request) async throws -> Response {
+        guard await controlPlane.currentSwarm() != nil else {
+            throw Abort(.serviceUnavailable, reason: "This node is not a swarm manager")
+        }
+        let tasks = await controlPlane.listTasks(filters: filters(req))
+        return try jsonResponse(.ok, tasks.map(TaskResponse.init))
+    }
+
+    private func inspectTask(_ req: Request) async throws -> Response {
+        let task = await controlPlane.inspectTask(id: try parameter("id", req))
+        guard let task else { throw Abort(.notFound, reason: "task not found") }
+        return try jsonResponse(.ok, TaskResponse(task))
+    }
+
+    private func taskLogs(_ req: Request) async throws -> Response {
+        guard await controlPlane.inspectTask(id: try parameter("id", req)) != nil else {
+            throw Abort(.notFound, reason: "task not found")
+        }
+        return emptyLogResponse()
+    }
+
     private func decodeSpec(_ req: Request, secret: Bool) async throws -> DockerControlPlane.Spec {
         let body = try await bodyData(req)
         let value: SpecRequest
@@ -449,6 +773,15 @@ struct DockerControlPlaneRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Name is required")
         }
         return .init(name: name, labels: value.labels ?? [:], data: value.data)
+    }
+
+    private func decodeObject(_ req: Request, message: String) async throws -> [String: DockerControlPlane.JSONValue] {
+        let body = try await bodyData(req)
+        do {
+            return try JSONDecoder().decode([String: DockerControlPlane.JSONValue].self, from: body)
+        } catch {
+            throw Abort(.badRequest, reason: "Invalid \(message)")
+        }
     }
 
     private func decodeSwarmRequest(_ req: Request) async throws -> SwarmRequest {
@@ -488,6 +821,14 @@ struct DockerControlPlaneRoutes: RouteCollection {
     private func jsonResponse<T: Encodable>(_ status: HTTPResponseStatus, _ value: T) throws -> Response {
         let response = Response(status: status, body: .init(data: try JSONEncoder().encode(value)))
         response.headers.contentType = .json
+        return response
+    }
+
+    private func emptyLogResponse() -> Response {
+        let response = Response(status: .ok, body: .init(data: Data()))
+        response.headers.contentType = HTTPMediaType(
+            type: "application", subType: "vnd.docker.raw-stream"
+        )
         return response
     }
 
@@ -656,5 +997,104 @@ struct DockerControlPlaneRoutes: RouteCollection {
         let TrustRoot: String
         let CertIssuerSubject: String
         let CertIssuerPublicKey: String
+    }
+
+    private struct WarningsResponse: Encodable {
+        let Warnings: [String]
+
+        init() { Warnings = [] }
+    }
+
+    private struct NodeResponse: Encodable {
+        let ID: String
+        let Version: VersionResponse
+        let CreatedAt: String
+        let UpdatedAt: String
+        let Spec: [String: DockerControlPlane.JSONValue]
+        let Description: [String: DockerControlPlane.JSONValue]
+        let Status: [String: DockerControlPlane.JSONValue]
+        let ManagerStatus: [String: DockerControlPlane.JSONValue]
+
+        init(_ node: DockerControlPlane.Node) {
+            ID = node.id
+            Version = .init(index: node.version)
+            CreatedAt = ISO8601DateFormatter().string(from: node.createdAt)
+            UpdatedAt = ISO8601DateFormatter().string(from: node.updatedAt)
+            Spec = node.spec
+            Description = [
+                "Hostname": .string("glassdock"),
+                "Platform": .object(["Architecture": .string("arm64"), "OS": .string("linux")]),
+                "Resources": .object([
+                    "NanoCPUs": .number(Double(ProcessInfo.processInfo.activeProcessorCount) * 1_000_000_000),
+                    "MemoryBytes": .number(Double(ProcessInfo.processInfo.physicalMemory)),
+                ]),
+                "Engine": .object(["EngineVersion": .string(getBuildVersion())]),
+            ]
+            Status = [
+                "State": .string("ready"),
+                "Addr": .string("127.0.0.1"),
+            ]
+            ManagerStatus = [
+                "Leader": .bool(true),
+                "Reachability": .string("reachable"),
+                "Addr": .string("127.0.0.1:2377"),
+            ]
+        }
+    }
+
+    private struct ServiceResponse: Encodable {
+        let ID: String
+        let Version: VersionResponse
+        let CreatedAt: String
+        let UpdatedAt: String
+        let Spec: [String: DockerControlPlane.JSONValue]
+        let Endpoint: [String: DockerControlPlane.JSONValue]
+        let UpdateStatus: DockerControlPlane.JSONValue?
+
+        init(_ service: DockerControlPlane.Service) {
+            ID = service.id
+            Version = .init(index: service.version)
+            CreatedAt = ISO8601DateFormatter().string(from: service.createdAt)
+            UpdatedAt = ISO8601DateFormatter().string(from: service.updatedAt)
+            Spec = service.spec
+            Endpoint = [:]
+            UpdateStatus = nil
+        }
+    }
+
+    private struct ServiceUpdateResponse: Encodable {
+        let Warnings: [String]
+        let ID: String
+
+        init(service: DockerControlPlane.Service) {
+            Warnings = ["Service tasks remain in the pending state until a compatible scheduler is available."]
+            ID = service.id
+        }
+    }
+
+    private struct TaskResponse: Encodable {
+        let ID: String
+        let Version: VersionResponse
+        let CreatedAt: String
+        let UpdatedAt: String
+        let Spec: [String: DockerControlPlane.JSONValue]
+        let ServiceAnnotations: [String: DockerControlPlane.JSONValue]
+        let Status: [String: DockerControlPlane.JSONValue]
+        let DesiredState: String
+
+        init(_ task: DockerControlPlane.Task) {
+            ID = task.id
+            Version = .init(index: task.version)
+            CreatedAt = ISO8601DateFormatter().string(from: task.createdAt)
+            UpdatedAt = ISO8601DateFormatter().string(from: task.updatedAt)
+            Spec = task.spec
+            ServiceAnnotations = [:]
+            Status = [
+                "Timestamp": .string(ISO8601DateFormatter().string(from: task.updatedAt)),
+                "State": .string(task.state),
+                "Message": .string("service task is awaiting a compatible scheduler"),
+            ]
+            DesiredState = "running"
+        }
     }
 }
