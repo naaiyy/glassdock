@@ -734,15 +734,15 @@
       "method": "GET",
       "path": "/images/search",
       "operationId": "ImageSearch",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this image operation yet."
+      "owner": "ImageSearchRoute",
+      "note": "Docker Hub repository search with limit, official, automated, and star filters; custom registry search is not exposed."
     },
     {
       "method": "DELETE",

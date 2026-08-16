@@ -191,6 +191,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Guest image pruning with dangling filter handling.
+  - method: GET
+    path: /images/search
+    support: partial
+    owner: ImageSearchRoute
+    note: Docker Hub repository search with limit, official, automated, and star filters; custom registry search is not exposed.
   - method: POST
     path: /images/{name}/tag
     support: implemented

@@ -94,6 +94,7 @@ func configure(
     try app.register(collection: EventsRoute())
 
     try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
+    try app.register(collection: ImageSearchRoute())
     try app.register(collection: AuthRoute())
     try app.register(collection: ExplicitUnsupportedDockerRoutes())
 
