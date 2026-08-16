@@ -484,6 +484,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/exec/{id:.*}/json", use: inspectExec)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/logs", use: logs)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/attach", use: attach)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/attach/ws", use: attachWebSocket)
     }
 
     private func pullImage(_ req: Request) async throws -> Response {
@@ -1286,6 +1287,38 @@ struct DockerRuntimeRoutes: RouteCollection {
                 }
             })
         )
+    }
+
+    private func attachWebSocket(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        if Self.mobyBool(req.query[String.self, at: "stdin"]) {
+            throw Abort(.notImplemented, reason: "Interactive attach stdin is not implemented")
+        }
+        let stdout = req.query[String.self, at: "stdout"].map(Self.mobyBool) ?? false
+        let stderr = req.query[String.self, at: "stderr"].map(Self.mobyBool) ?? false
+        guard stdout || stderr else {
+            throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
+        }
+        let tty = try await inspectContainer(id: id).tty
+        let backend = self.backend
+        return req.webSocket { _, socket in
+            do {
+                let stream = try await backend.attachContainer(
+                    id: id, stdout: stdout, stderr: stderr
+                )
+                for try await frame in stream {
+                    guard frame.exitCode == nil else { continue }
+                    let data =
+                        tty
+                        ? frame.data
+                        : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
+                    try await socket.send([UInt8](data))
+                }
+                try await socket.close()
+            } catch {
+                try? await socket.close(code: .unexpectedServerError)
+            }
+        }
     }
 
     private func call<T: Sendable>(_ operation: () async throws -> T) async throws -> T {

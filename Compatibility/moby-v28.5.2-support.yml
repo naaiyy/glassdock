@@ -61,6 +61,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Read-only attach with raw stream framing; interactive stdin remains unsupported.
+  - method: GET
+    path: /containers/{id}/attach/ws
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Read-only WebSocket attach backed by the guest log stream; interactive stdin remains unsupported.
   - method: POST
     path: /containers/{id}/exec
     support: partial

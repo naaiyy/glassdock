@@ -335,8 +335,11 @@ struct DockerRuntimeRoutesTests {
                 #expect(value?["Images"] as? Int == 1)
                 #expect(value?["OSType"] as? String == "linux")
             }
-            try await app.testing().test(.GET, "/v1.51/containers/container-1/attach/ws") { response async in
-                #expect(response.status == .notImplemented)
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/attach/ws?stdout=1&stderr=1"
+            ) { response async in
+                #expect(response.status == .switchingProtocols)
             }
             for (method, path) in [
                 (HTTPMethod.GET, "/v1.51/swarm"),

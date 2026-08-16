@@ -309,8 +309,8 @@
       "method": "GET",
       "path": "/containers/{id}/attach/ws",
       "operationId": "ContainerAttachWebsocket",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         101,
         200,
@@ -319,8 +319,8 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this container operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Read-only WebSocket attach backed by the guest log stream; interactive stdin remains unsupported."
     },
     {
       "method": "GET",
