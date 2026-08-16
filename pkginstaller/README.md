@@ -28,7 +28,7 @@ Use Developer ID Application and Developer ID Installer identities, plus a
 `notarytool` keychain profile or App Store Connect API key:
 
 ```bash
-make release-artifacts BUILD_VERSION=1.3.0 \
+make release-artifacts BUILD_VERSION=1.3.1 \
   CODESIGN_IDENTITY='Developer ID Application: Example (TEAMID)' \
   INSTALLER_SIGNING_IDENTITY='Developer ID Installer: Example (TEAMID)' \
   NOTARYTOOL_PROFILE=glassdock-notary
@@ -40,6 +40,9 @@ The output directory contains:
 - `glassdock-<version>-macos-arm64.tar.gz`;
 - `SHA256SUMS`;
 - `BUILD-METADATA.txt`.
+
+The root release workflow also publishes the separately signed and notarized
+`GlassDock-<version>-macOS-arm64-notarized.zip` menu-bar app archive.
 
 The complete archive is for advanced use and future package-manager integration.
 The notarized package is the supported user installation.

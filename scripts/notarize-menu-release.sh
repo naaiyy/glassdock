@@ -8,7 +8,7 @@ keychain_profile=""
 approval=""
 
 usage() {
-    echo "Usage: $0 --archive ZIP --app APP --keychain-profile PROFILE --approval FINAL-APPROVAL" >&2
+    echo "Usage: $0 --archive ZIP --app APP [--keychain-profile PROFILE] --approval FINAL-APPROVAL" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -41,13 +41,26 @@ if [[ "$approval" != "FINAL-APPROVAL" || "${GLASSDOCK_RELEASE_APPROVED:-}" != "Y
     echo "After approval, set GLASSDOCK_RELEASE_APPROVED=YES and pass --approval FINAL-APPROVAL." >&2
     exit 1
 fi
-if [[ ! -f "$archive_path" || ! -d "$app_path" || -z "$keychain_profile" ]]; then
+if [[ ! -f "$archive_path" || ! -d "$app_path" ]]; then
     usage
     exit 2
 fi
 
+if [[ -z "$keychain_profile" && ( -z "${APPLE_API_KEY_PATH:-}" || -z "${APPLE_API_KEY_ID:-}" || -z "${APPLE_API_ISSUER_ID:-}" ) ]]; then
+    echo "Error: provide --keychain-profile or App Store Connect API key variables." >&2
+    exit 2
+fi
+
 codesign --verify --deep --strict --verbose=2 "$app_path"
-xcrun notarytool submit "$archive_path" --keychain-profile "$keychain_profile" --wait
+if [[ -n "$keychain_profile" ]]; then
+    xcrun notarytool submit "$archive_path" --keychain-profile "$keychain_profile" --wait
+else
+    xcrun notarytool submit "$archive_path" \
+        --key "$APPLE_API_KEY_PATH" \
+        --key-id "$APPLE_API_KEY_ID" \
+        --issuer "$APPLE_API_ISSUER_ID" \
+        --wait
+fi
 xcrun stapler staple "$app_path"
 xcrun stapler validate "$app_path"
 

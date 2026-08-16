@@ -157,8 +157,8 @@ preparation:
 Prepare and validate the menu app without submission:
 
 ```sh
-make menu-release APP_RELEASE_VERSION=1.3.0 APP_BUILD_NUMBER=1
-make publishing-validate APP_RELEASE_VERSION=1.3.0
+make menu-release APP_RELEASE_VERSION=1.3.1 APP_BUILD_NUMBER=1
+make publishing-validate APP_RELEASE_VERSION=1.3.1
 open .build/release/GlassDock.app
 ```
 
