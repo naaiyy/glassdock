@@ -50,7 +50,7 @@ routes:
     path: /containers/{id}/logs
     support: partial
     owner: DockerRuntimeRoutes
-    note: Stored stdout and stderr with stream framing and tail filtering; follow and timestamp modes remain unsupported.
+    note: Stored stdout and stderr with stream framing, tail filtering, and guest-backed follow mode; timestamp and time-range filters remain unsupported.
   - method: POST
     path: /containers/prune
     support: partial

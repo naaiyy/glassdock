@@ -1219,20 +1219,26 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func logs(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let unsupported =
-            Self.mobyBool(req.query[String.self, at: "follow"])
-            || Self.mobyBool(req.query[String.self, at: "timestamps"])
+            Self.mobyBool(req.query[String.self, at: "timestamps"])
             || Self.mobyBool(req.query[String.self, at: "details"])
             || req.query[String.self, at: "since"].map { $0 != "0" } == true
             || req.query[String.self, at: "until"].map { !$0.isEmpty && $0 != "0" } == true
         if unsupported {
-            throw Abort(.notImplemented, reason: "Requested Docker log filtering or follow mode is not implemented")
+            throw Abort(.notImplemented, reason: "Requested Docker log timestamps or time filtering is not implemented")
         }
         let stdout = Self.mobyBool(req.query[String.self, at: "stdout"])
         let stderr = Self.mobyBool(req.query[String.self, at: "stderr"])
         guard stdout || stderr else {
             throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
         }
+        let backend = self.backend
         let container = try await call { try await backend.inspectContainer(id: id) }
+        if Self.mobyBool(req.query[String.self, at: "follow"]) {
+            let stream = try await call {
+                try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
+            }
+            return Self.streamResponse(stream: stream, tty: container.tty, contentType: false)
+        }
         var output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
         if let tail = req.query[String.self, at: "tail"] {
             output = try Self.applyTail(output, value: tail)
@@ -1369,6 +1375,30 @@ struct DockerRuntimeRoutes: RouteCollection {
             data.append(frame(output.stderr, stream: 2))
         }
         let response = Response(status: .ok, body: .init(data: data))
+        if contentType {
+            response.headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        }
+        return response
+    }
+
+    private static func streamResponse(
+        stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>,
+        tty: Bool,
+        contentType: Bool = true
+    ) -> Response {
+        let response = Response(
+            status: .ok,
+            body: .init(managedAsyncStream: { writer in
+                for try await frame in stream {
+                    guard frame.exitCode == nil else { continue }
+                    let data =
+                        tty
+                        ? frame.data
+                        : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
+                    try await writer.writeBuffer(ByteBuffer(data: data))
+                }
+            })
+        )
         if contentType {
             response.headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
         }

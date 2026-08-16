@@ -285,6 +285,12 @@ struct DockerRuntimeRoutesTests {
                 #expect(bytes[11] == 2)
                 #expect(response.headers.first(name: "Content-Type") == nil)
             }
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/logs?stdout=1&follow=1") { response async in
+                #expect(response.status == .ok)
+                let bytes = Array(response.body.readableBytesView)
+                #expect(bytes[0] == 1)
+                #expect(String(decoding: bytes.dropFirst(8), as: UTF8.self) == "out")
+            }
             try await app.testing().test(.GET, "/v1.51/containers/missing/json") { response async in
                 #expect(response.status == .notFound)
             }
