@@ -77,6 +77,8 @@ type Backend struct {
 	metadataMu    sync.Mutex
 	statsMu       sync.Mutex
 	lastStats     map[string]api.ContainerStatsResponse
+	execMu        sync.Mutex
+	execProcesses map[string]containerd.Process
 	network       *NetworkManager
 	taskCreates   chan struct{}
 	cleanups      orderedCleanupBarrier
@@ -2081,6 +2083,17 @@ func (b *Backend) Exec(ctx context.Context, request api.ContainerExecRequest, st
 	if err != nil {
 		return 0, err
 	}
+	b.execMu.Lock()
+	if b.execProcesses == nil {
+		b.execProcesses = make(map[string]containerd.Process)
+	}
+	b.execProcesses[request.ExecID] = process
+	b.execMu.Unlock()
+	defer func() {
+		b.execMu.Lock()
+		delete(b.execProcesses, request.ExecID)
+		b.execMu.Unlock()
+	}()
 	wait, err := process.Wait(ctx)
 	if err != nil {
 		cleanupCtx, cancel := context.WithTimeout(b.ctx(context.Background()), execCleanupAttemptTimeout)
@@ -2107,4 +2120,17 @@ func (b *Backend) Exec(ctx context.Context, request api.ContainerExecRequest, st
 		return 0, err
 	}
 	return int32(code), nil
+}
+
+func (b *Backend) ResizeExec(ctx context.Context, request api.ExecResizeRequest) error {
+	if request.ID == "" || request.Width == 0 || request.Height == 0 {
+		return errors.New("id, width, and height are required")
+	}
+	b.execMu.Lock()
+	process := b.execProcesses[request.ID]
+	b.execMu.Unlock()
+	if process == nil {
+		return fmt.Errorf("exec process %s is not running", request.ID)
+	}
+	return process.Resize(b.ctx(ctx), request.Width, request.Height)
 }

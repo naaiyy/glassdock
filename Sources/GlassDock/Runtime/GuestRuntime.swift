@@ -930,6 +930,18 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         return id
     }
 
+    func resizeExec(id: String, width: UInt32, height: UInt32) async throws {
+        guard execs[id] != nil else { throw DockerRuntimeRouteError.notFound("exec (id)") }
+        _ = try await request(
+            "exec.resize",
+            [
+                "id": .string(id),
+                "width": .number(Double(width)),
+                "height": .number(Double(height)),
+            ]
+        )
+    }
+
     private func ensureNameAvailable(_ requestedName: String) throws {
         let normalized = Self.normalizedContainerName(requestedName)
         if let existing = metadata.first(where: { $0.value.name == normalized }) {

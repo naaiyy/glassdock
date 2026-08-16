@@ -151,6 +151,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Streaming exec start; detached exec and interactive stdin are unsupported.
+  - method: POST
+    path: /exec/{id}/resize
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Resizes an active guest exec terminal through containerd; exited execs return an error.
   - method: GET
     path: /exec/{id}/json
     support: partial

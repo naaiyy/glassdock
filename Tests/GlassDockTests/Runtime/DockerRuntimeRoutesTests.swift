@@ -225,6 +225,9 @@ struct DockerRuntimeRoutesTests {
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
                 #expect(value?["Id"] as? String == "exec-1")
             }
+            try await app.testing().test(.POST, "/v1.51/exec/exec-1/resize?w=100&h=30") { response async in
+                #expect(response.status == .noContent)
+            }
             try await app.testing().test(
                 .POST,
                 "/v1.51/exec/exec-1/start",
@@ -243,6 +246,9 @@ struct DockerRuntimeRoutesTests {
             }
         }
         #expect(await backend.lastExec?.command == ["printf", "hello"])
+        let execResize = await backend.lastExecResize
+        #expect(execResize?.0 == 100)
+        #expect(execResize?.1 == 30)
     }
 
     @Test("logs use Docker framing and backend not-found maps to 404")
@@ -579,6 +585,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastListShowAll: Bool?
     private(set) var lastDelete: Delete?
     private(set) var lastExec: DockerRuntimeExecCreate?
+    private(set) var lastExecResize: (UInt32, UInt32)?
     private(set) var lastImageDeleteForce: Bool?
     private(set) var lastTagTarget: String?
     private(set) var lastPruneAll: Bool?
@@ -775,6 +782,10 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {
         lastExec = request
         return "exec-1"
+    }
+
+    func resizeExec(id: String, width: UInt32, height: UInt32) async throws {
+        lastExecResize = (width, height)
     }
 
     func startExec(id: String, detach: Bool, tty: Bool) async throws -> DockerRuntimeProcessOutput {

@@ -42,6 +42,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func putContainerArchive(id: String, path: String, data: Data, noOverwriteDirNonDir: Bool) async throws
     func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange]
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String
+    func resizeExec(id: String, width: UInt32, height: UInt32) async throws
     func startExec(id: String, detach: Bool, tty: Bool) async throws -> DockerRuntimeProcessOutput
     func streamExec(id: String, tty: Bool) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput
@@ -91,6 +92,9 @@ extension DockerRuntimeRouteBackend {
     }
     func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {
         throw DockerRuntimeRouteError.invalidRequest("container changes are not supported")
+    }
+    func resizeExec(id: String, width: UInt32, height: UInt32) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("exec resize is not supported")
     }
 
     func containerAutoRemove(id: String) async throws -> Bool { false }
@@ -443,6 +447,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.PUT, pattern: "/containers/{id:.*}/archive", use: putArchive)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/changes", use: containerChanges)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/exec", use: createExec)
+        try routes.registerVersionedRoute(.POST, pattern: "/exec/{id:.*}/resize", use: resizeExec)
         try routes.registerVersionedRoute(.POST, pattern: "/exec/{id:.*}/start", use: startExec)
         try routes.registerVersionedRoute(.GET, pattern: "/exec/{id:.*}/json", use: inspectExec)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/logs", use: logs)
@@ -975,7 +980,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         let id = try requiredParameter("id", request: req)
         let path = try requiredQuery("path", request: req)
         let info = try await call { try await backend.archiveContainerInfo(id: id, path: path) }
-        var response = Response(status: .ok)
+        let response = Response(status: .ok)
         response.headers.replaceOrAdd(name: "X-Docker-Container-Path-Stat", value: try Self.archivePathStatHeader(info))
         return response
     }
@@ -1028,6 +1033,17 @@ struct DockerRuntimeRoutes: RouteCollection {
         let id = try await call { try await backend.createExec(request) }
         execState.insert(id: id, request: request)
         return try jsonResponse(.created, CreateExecResponse(Id: id))
+    }
+
+    private func resizeExec(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        guard let width = req.query[UInt32.self, at: "w"],
+            let height = req.query[UInt32.self, at: "h"], width > 0, height > 0
+        else {
+            throw Abort(.badRequest, reason: "Both w and h must be positive integers")
+        }
+        try await call { try await backend.resizeExec(id: id, width: width, height: height) }
+        return Response(status: .noContent)
     }
 
     private func startExec(_ req: Request) async throws -> Response {

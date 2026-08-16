@@ -510,6 +510,17 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, ExitCode: &code})
+	case api.MethodExecResize:
+		body, err := decode[api.ExecResizeRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.ResizeExec(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
 	case api.MethodContainerAttach:
 		body, err := decode[api.ContainerLogsRequest](request)
 		if err != nil {

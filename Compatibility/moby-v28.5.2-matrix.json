@@ -632,8 +632,8 @@
       "method": "POST",
       "path": "/exec/{id}/resize",
       "operationId": "ExecResize",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -641,8 +641,8 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Resizes an active guest exec terminal through containerd; exited execs return an error."
     },
     {
       "method": "POST",

@@ -17,7 +17,6 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
         Endpoint(method: .POST, pattern: "/configs/{id:.*}/update"),
         Endpoint(method: .GET, pattern: "/containers/{id:.*}/attach/ws"),
         Endpoint(method: .POST, pattern: "/containers/{id:.*}/update"),
-        Endpoint(method: .POST, pattern: "/exec/{id:.*}/resize"),
         Endpoint(method: .GET, pattern: "/images/search"),
         Endpoint(method: .POST, pattern: "/images/load"),
         Endpoint(method: .POST, pattern: "/build"),

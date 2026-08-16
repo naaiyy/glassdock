@@ -37,6 +37,7 @@ const (
 	MethodContainerExec           = "container.exec"
 	MethodContainerAttach         = "container.attach"
 	MethodContainerMetadataUpdate = "container.metadata.update"
+	MethodExecResize              = "exec.resize"
 	EventContainerExit            = "container.exit"
 )
 
@@ -308,6 +309,11 @@ type ContainerExecRequest struct {
 	Cwd      string   `json:"cwd,omitempty"`
 	User     string   `json:"user,omitempty"`
 	Terminal bool     `json:"terminal,omitempty"`
+}
+type ExecResizeRequest struct {
+	ID     string `json:"id"`
+	Width  uint32 `json:"width"`
+	Height uint32 `json:"height"`
 }
 type Container struct {
 	ID             string            `json:"id"`
