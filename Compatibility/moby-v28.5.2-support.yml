@@ -237,6 +237,16 @@ routes:
     owner: DockerRuntimeRoutes
     note: Commits a guest container diff as a new image layer; supported Dockerfile changes update image configuration, while filesystem-executing changes remain unsupported.
   - method: GET
+    path: /networks
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Lists the guest runtime's private bridge and prepared container endpoints; custom network objects are unsupported.
+  - method: GET
+    path: /networks/{id}
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Inspects the guest runtime's private bridge by name or ID; custom network objects are unsupported.
+  - method: GET
     path: /distribution/{name}/json
     support: implemented
     owner: DistributionJsonRoute

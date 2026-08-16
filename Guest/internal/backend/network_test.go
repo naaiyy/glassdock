@@ -117,6 +117,27 @@ func TestNetworkManagerReportsPreparedPublication(t *testing.T) {
 	}
 }
 
+func TestNetworkManagerReportsSortedContainerEndpoints(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	for _, id := range []string{"container-b", "container-a"} {
+		if _, err := manager.Create(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	endpoints := manager.Endpoints()
+	if len(endpoints) != 2 {
+		t.Fatalf("endpoint count = %d, want 2", len(endpoints))
+	}
+	if endpoints[0].ContainerID != "container-a" || endpoints[1].ContainerID != "container-b" {
+		t.Fatalf("endpoints are not sorted: %#v", endpoints)
+	}
+	if endpoints[0].Address != "10.88.0.3" || endpoints[1].Address != "10.88.0.2" || endpoints[0].EndpointID == "" {
+		t.Fatalf("endpoint metadata = %#v", endpoints[0])
+	}
+}
+
 func TestNetworkManagerInstallsTCPKernelForwardingRules(t *testing.T) {
 	runner := &recordingNetworkRunner{}
 	manager := newTestNetworkManager(runner)

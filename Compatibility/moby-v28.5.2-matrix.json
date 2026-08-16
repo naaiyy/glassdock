@@ -657,7 +657,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Streaming exec start; detached exec and interactive stdin are unsupported."
+      "note": "Streaming and detached exec start through the guest; interactive stdin remains unsupported."
     },
     {
       "method": "POST",
@@ -854,15 +854,15 @@
       "method": "GET",
       "path": "/networks",
       "operationId": "NetworkList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Lists the guest runtime's private bridge and prepared container endpoints; custom network objects are unsupported."
     },
     {
       "method": "POST",
@@ -915,16 +915,16 @@
       "method": "GET",
       "path": "/networks/{id}",
       "operationId": "NetworkInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "#/definitions/Network",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Inspects the guest runtime's private bridge by name or ID; custom network objects are unsupported."
     },
     {
       "method": "POST",
@@ -1498,7 +1498,7 @@
       ],
       "responseSchema": "object",
       "owner": "DockerRuntimeRoutes",
-      "note": "Reports guest image and container accounting; volume and build-cache accounting are empty."
+      "note": "Reports guest-backed images, containers, and persistent volumes; build-cache accounting and container filesystem sizes remain unavailable."
     },
     {
       "method": "GET",

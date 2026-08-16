@@ -326,6 +326,28 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("guest-backed network listing and inspection return Docker fields")
+    func networkInspection() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.GET, "/v1.51/networks") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.first?["Id"] as? String == "glassdock0")
+                #expect(values?.first?["Name"] as? String == "bridge")
+                #expect(values?.first?["Driver"] as? String == "bridge")
+            }
+            try await app.testing().test(.GET, "/v1.51/networks/bridge") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Id"] as? String == "glassdock0")
+            }
+            try await app.testing().test(.GET, "/v1.51/networks/missing") { response async in
+                #expect(response.status == .notFound)
+            }
+        }
+    }
+
     @Test("runtime and unsupported routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -841,6 +863,17 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         return [container()]
     }
 
+    func listNetworks() async throws -> [DockerRuntimeNetwork] {
+        [network()]
+    }
+
+    func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork {
+        guard id == "bridge" || id == "glassdock0" else {
+            throw DockerRuntimeRouteError.notFound("No such network: \(id)")
+        }
+        return network()
+    }
+
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         lastTopArguments = psArguments
         return DockerRuntimeTop(Titles: ["PID", "CMD"], Processes: [["42", "/bin/sh"]])
@@ -939,6 +972,35 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             labels: ["test": "true"],
             tty: false,
             ports: [.init(containerPort: 80, proto: "tcp", hostIP: "127.0.0.1", hostPort: 18080)]
+        )
+    }
+
+    private func network() -> DockerRuntimeNetwork {
+        DockerRuntimeNetwork(
+            id: "glassdock0",
+            name: "bridge",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            scope: "local",
+            driver: "bridge",
+            enableIPv4: true,
+            enableIPv6: false,
+            internalNetwork: false,
+            attachable: false,
+            ingress: false,
+            ipam: NetworkIPAM(
+                Driver: "default",
+                Config: [
+                    NetworkIPAMConfig(
+                        Subnet: "10.88.0.0/16",
+                        IPRange: nil,
+                        Gateway: "10.88.0.1",
+                        AuxiliaryAddresses: nil
+                    )
+                ]
+            ),
+            options: [:],
+            containers: [:],
+            labels: [:]
         )
     }
 }

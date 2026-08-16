@@ -634,6 +634,53 @@ func (b *Backend) List(ctx context.Context) ([]api.Container, error) {
 	return out, nil
 }
 
+func (b *Backend) Networks(ctx context.Context) ([]api.NetworkSummary, error) {
+	containers, err := b.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	containerNames := make(map[string]string, len(containers))
+	for _, container := range containers {
+		name := container.Metadata.Name
+		if name == "" {
+			name = container.ID
+		}
+		containerNames[container.ID] = name
+	}
+
+	attached := make(map[string]api.NetworkContainer)
+	for _, endpoint := range b.network.Endpoints() {
+		name := containerNames[endpoint.ContainerID]
+		if name == "" {
+			name = endpoint.ContainerID
+		}
+		attached[endpoint.ContainerID] = api.NetworkContainer{
+			Name:        name,
+			EndpointID:  endpoint.EndpointID,
+			IPv4Address: endpoint.Address + "/16",
+		}
+	}
+	createdAt := b.network.CreatedAt()
+	if createdAt.IsZero() {
+		createdAt = time.Unix(0, 0).UTC()
+	}
+	return []api.NetworkSummary{{
+		ID:         bridgeName,
+		Name:       "bridge",
+		CreatedAt:  createdAt,
+		Scope:      "local",
+		Driver:     "bridge",
+		EnableIPv4: true,
+		IPAM: api.NetworkIPAM{
+			Driver: "default",
+			Config: []api.NetworkIPAMConfig{{Subnet: networkCIDR, Gateway: "10.88.0.1"}},
+		},
+		Options:    map[string]string{},
+		Containers: attached,
+		Labels:     map[string]string{},
+	}}, nil
+}
+
 func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error) {
 	container, err := b.client.LoadContainer(b.ctx(ctx), id)
 	if err != nil {

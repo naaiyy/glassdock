@@ -153,6 +153,59 @@ private struct GuestContainerChangesPayload: Decodable {
     let changes: [GuestContainerChangePayload]
 }
 
+private struct GuestNetworkListPayload: Decodable {
+    let networks: [GuestNetworkPayload]
+}
+
+private struct GuestNetworkPayload: Decodable {
+    let id: String
+    let name: String
+    let createdAt: Date
+    let scope: String
+    let driver: String
+    let enableIPv4: Bool
+    let enableIPv6: Bool
+    let internalNetwork: Bool
+    let attachable: Bool
+    let ingress: Bool
+    let ipam: NetworkIPAMPayload
+    let options: [String: String]
+    let containers: [String: GuestNetworkContainerPayload]
+    let labels: [String: String]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, createdAt, scope, driver, enableIPv4, enableIPv6
+        case internalNetwork = "internal"
+        case attachable, ingress, ipam, options, containers, labels
+    }
+}
+
+private struct NetworkIPAMPayload: Decodable {
+    let driver: String
+    let config: [NetworkIPAMConfigPayload]
+}
+
+private struct NetworkIPAMConfigPayload: Decodable {
+    let subnet: String?
+    let ipRange: String?
+    let gateway: String?
+    let auxiliaryAddresses: [String: String]?
+}
+
+private struct GuestNetworkContainerPayload: Decodable {
+    let name: String
+    let endpointID: String?
+    let macAddress: String?
+    let ipv4Address: String
+    let ipv6Address: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case endpointID = "endpointId"
+        case macAddress, ipv4Address, ipv6Address
+    }
+}
+
 protocol GuestRuntimeEventConnecting: Sendable {
     func connect() async throws -> AsyncStream<GuestFrame>
 }
@@ -903,6 +956,20 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         }
     }
 
+    func listNetworks() async throws -> [DockerRuntimeNetwork] {
+        let response = try await request("network.list", [:])
+        let payload: GuestNetworkListPayload = try decode(response)
+        return payload.networks.map(Self.dockerNetwork)
+    }
+
+    func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork {
+        let networks = try await listNetworks()
+        guard let network = networks.first(where: { $0.id == id || $0.name == id }) else {
+            throw DockerRuntimeRouteError.notFound("No such network: \(id)")
+        }
+        return network
+    }
+
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         let resolved = try await resolve(id)
         let response = try await request(
@@ -1223,6 +1290,43 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
             command: meta?.command ?? [], createdAt: guest.createdAt, state: state,
             exitCode: guest.exitCode.map(Int32.init), labels: meta?.labels ?? [:],
             tty: meta?.tty ?? false, ports: meta?.ports ?? []
+        )
+    }
+
+    private static func dockerNetwork(_ guest: GuestNetworkPayload) -> DockerRuntimeNetwork {
+        DockerRuntimeNetwork(
+            id: guest.id,
+            name: guest.name,
+            createdAt: guest.createdAt,
+            scope: guest.scope,
+            driver: guest.driver,
+            enableIPv4: guest.enableIPv4,
+            enableIPv6: guest.enableIPv6,
+            internalNetwork: guest.internalNetwork,
+            attachable: guest.attachable,
+            ingress: guest.ingress,
+            ipam: NetworkIPAM(
+                Driver: guest.ipam.driver,
+                Config: guest.ipam.config.map {
+                    NetworkIPAMConfig(
+                        Subnet: $0.subnet,
+                        IPRange: $0.ipRange,
+                        Gateway: $0.gateway,
+                        AuxiliaryAddresses: $0.auxiliaryAddresses
+                    )
+                }
+            ),
+            options: guest.options,
+            containers: guest.containers.mapValues {
+                DockerRuntimeNetworkContainer(
+                    name: $0.name,
+                    endpointID: $0.endpointID,
+                    macAddress: $0.macAddress,
+                    ipv4Address: $0.ipv4Address,
+                    ipv6Address: $0.ipv6Address
+                )
+            },
+            labels: guest.labels
         )
     }
 

@@ -301,6 +301,13 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = writePayload(w, request.ID, api.ContainerListResponse{Containers: items})
+	case api.MethodNetworkList:
+		items, err := s.backend.Networks(ctx)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkListResponse{Networks: items})
 	case api.MethodContainerInspect:
 		body, err := decode[api.IDRequest](request)
 		if err != nil {

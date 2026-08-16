@@ -40,6 +40,7 @@ const (
 	MethodContainerAttach         = "container.attach"
 	MethodContainerMetadataUpdate = "container.metadata.update"
 	MethodExecResize              = "exec.resize"
+	MethodNetworkList             = "network.list"
 	EventContainerExit            = "container.exit"
 )
 
@@ -213,6 +214,42 @@ type Mount struct {
 type Network struct {
 	Mode string `json:"mode,omitempty"`
 	Path string `json:"path,omitempty"`
+}
+type NetworkIPAMConfig struct {
+	Subnet             string            `json:"subnet,omitempty"`
+	IPRange            string            `json:"ipRange,omitempty"`
+	Gateway            string            `json:"gateway,omitempty"`
+	AuxiliaryAddresses map[string]string `json:"auxiliaryAddresses,omitempty"`
+}
+type NetworkIPAM struct {
+	Driver string              `json:"driver"`
+	Config []NetworkIPAMConfig `json:"config"`
+}
+type NetworkContainer struct {
+	Name        string `json:"name"`
+	EndpointID  string `json:"endpointId,omitempty"`
+	MacAddress  string `json:"macAddress,omitempty"`
+	IPv4Address string `json:"ipv4Address"`
+	IPv6Address string `json:"ipv6Address,omitempty"`
+}
+type NetworkSummary struct {
+	ID         string                      `json:"id"`
+	Name       string                      `json:"name"`
+	CreatedAt  time.Time                   `json:"createdAt"`
+	Scope      string                      `json:"scope"`
+	Driver     string                      `json:"driver"`
+	EnableIPv4 bool                        `json:"enableIPv4"`
+	EnableIPv6 bool                        `json:"enableIPv6"`
+	Internal   bool                        `json:"internal"`
+	Attachable bool                        `json:"attachable"`
+	Ingress    bool                        `json:"ingress"`
+	IPAM       NetworkIPAM                 `json:"ipam"`
+	Options    map[string]string           `json:"options"`
+	Containers map[string]NetworkContainer `json:"containers"`
+	Labels     map[string]string           `json:"labels"`
+}
+type NetworkListResponse struct {
+	Networks []NetworkSummary `json:"networks"`
 }
 type ContainerDeleteRequest struct {
 	ID       string `json:"id"`

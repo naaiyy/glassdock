@@ -50,6 +50,8 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer]
+    func listNetworks() async throws -> [DockerRuntimeNetwork]
+    func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop
     func statsContainer(id: String) async throws -> DockerRuntimeStats
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error>
@@ -359,6 +361,31 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let ports: [DockerRuntimePortBinding]
 }
 
+struct DockerRuntimeNetworkContainer: Sendable {
+    let name: String
+    let endpointID: String?
+    let macAddress: String?
+    let ipv4Address: String
+    let ipv6Address: String?
+}
+
+struct DockerRuntimeNetwork: Sendable {
+    let id: String
+    let name: String
+    let createdAt: Date
+    let scope: String
+    let driver: String
+    let enableIPv4: Bool
+    let enableIPv6: Bool
+    let internalNetwork: Bool
+    let attachable: Bool
+    let ingress: Bool
+    let ipam: NetworkIPAM
+    let options: [String: String]
+    let containers: [String: DockerRuntimeNetworkContainer]
+    let labels: [String: String]
+}
+
 struct DockerRuntimeExecCreate: Sendable, Equatable {
     let containerID: String
     let command: [String]
@@ -457,6 +484,8 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.POST, pattern: "/commit", use: commitImage)
         try routes.registerVersionedRoute(.GET, pattern: "/info", use: info)
         try routes.registerVersionedRoute(.GET, pattern: "/system/df", use: systemDataUsage)
+        try routes.registerVersionedRoute(.GET, pattern: "/networks", use: listNetworks)
+        try routes.registerVersionedRoute(.GET, pattern: "/networks/{id:.*}", use: inspectNetwork)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: pruneContainers)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/start", use: startContainer)
@@ -987,6 +1016,27 @@ struct DockerRuntimeRoutes: RouteCollection {
         return try jsonResponse(.ok, containers.map(ListResponse.init))
     }
 
+    private func listNetworks(_ req: Request) async throws -> Response {
+        let networks = try await call { try await backend.listNetworks() }
+        let filters = try DockerNetworkFilterUtility.parseNetworkFilters(
+            filtersParam: req.query[String.self, at: "filters"],
+            defaultDangling: false,
+            logger: req.logger
+        )
+        let filtersData = try JSONEncoder().encode(filters)
+        let filtersJSON = String(data: filtersData, encoding: .utf8)
+        let summaries = ClientNetworkService.applyFilters(
+            networks.map(Self.networkSummary), filters: filtersJSON, logger: req.logger
+        )
+        return try jsonResponse(.ok, summaries)
+    }
+
+    private func inspectNetwork(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let network = try await call { try await backend.inspectNetwork(id: id) }
+        return try jsonResponse(.ok, Self.networkSummary(network))
+    }
+
     private func topContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let arguments =
@@ -1484,6 +1534,37 @@ struct DockerRuntimeRoutes: RouteCollection {
         let references = raw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         guard !references.isEmpty else { throw Abort(.badRequest, reason: "names is required") }
         return references
+    }
+
+    private static func networkSummary(_ network: DockerRuntimeNetwork) -> RESTNetworkSummary {
+        let ipamConfig = network.ipam.Config.first
+        return RESTNetworkSummary(
+            Name: network.name,
+            Id: network.id,
+            Created: ISO8601DateFormatter().string(from: network.createdAt),
+            Scope: network.scope,
+            Driver: network.driver,
+            EnableIPv4: network.enableIPv4,
+            EnableIPv6: network.enableIPv6,
+            Internal: network.internalNetwork,
+            Attachable: network.attachable,
+            Ingress: network.ingress,
+            IPAM: network.ipam,
+            Options: network.options,
+            Containers: network.containers.mapValues {
+                NetworkContainer(
+                    Name: $0.name,
+                    EndpointID: $0.endpointID,
+                    MacAddress: $0.macAddress,
+                    IPv4Address: $0.ipv4Address,
+                    IPv6Address: $0.ipv6Address
+                )
+            },
+            ConfigFrom: nil,
+            Labels: network.labels,
+            Subnet: ipamConfig?.Subnet,
+            Gateway: ipamConfig?.Gateway
+        )
     }
 
     private static func archivePathStatHeader(_ info: DockerRuntimeArchivePath) throws -> String {

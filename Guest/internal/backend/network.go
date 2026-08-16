@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/glassdock/glassdock/guest/internal/api"
 )
@@ -44,6 +46,12 @@ type containerNetwork struct {
 	guestPorts []api.PublishedPort
 }
 
+type NetworkEndpoint struct {
+	ContainerID string
+	EndpointID  string
+	Address     string
+}
+
 // NetworkManager owns one bridge and one preconfigured network namespace per
 // container. The namespace exists before runc starts the process, so outbound
 // networking is ready when the process executes its first instruction.
@@ -54,6 +62,7 @@ type NetworkManager struct {
 	initialized bool
 	nextAddress uint32
 	nextPort    uint16
+	createdAt   time.Time
 	containers  map[string]*containerNetwork
 }
 
@@ -202,6 +211,32 @@ func (m *NetworkManager) Published(id string) []api.PublishedPort {
 	return nil
 }
 
+func (m *NetworkManager) Endpoints() []NetworkEndpoint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.containers))
+	for id := range m.containers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	endpoints := make([]NetworkEndpoint, 0, len(ids))
+	for _, id := range ids {
+		network := m.containers[id]
+		endpoints = append(endpoints, NetworkEndpoint{
+			ContainerID: id,
+			EndpointID:  network.name,
+			Address:     network.address,
+		})
+	}
+	return endpoints
+}
+
+func (m *NetworkManager) CreatedAt() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createdAt
+}
+
 func (m *NetworkManager) PublishedTCPDestination(guestPort uint16) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -252,6 +287,7 @@ func (m *NetworkManager) initialize() error {
 		return err
 	}
 	m.initialized = true
+	m.createdAt = time.Now().UTC()
 	return nil
 }
 
