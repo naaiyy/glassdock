@@ -170,6 +170,25 @@ jobs:
             CODESIGN_IDENTITY="${CODESIGN_IDENTITY}" \
             INSTALLER_SIGNING_IDENTITY="${INSTALLER_SIGNING_IDENTITY}"
 
+      - name: Build and notarize menu-bar app
+        env:
+          GLASSDOCK_SIGNING_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          GLASSDOCK_RELEASE_APPROVED: YES
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          make menu-release \
+            APP_RELEASE_VERSION="${version}" \
+            APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+          bash scripts/notarize-menu-release.sh \
+            --archive ".build/release-distribution/GlassDock-${version}-macOS-arm64.zip" \
+            --app ".build/release/GlassDock.app" \
+            --approval FINAL-APPROVAL
+          test -s ".build/release-distribution/GlassDock-${version}-macOS-arm64-notarized.zip"
+          unzip -tq ".build/release-distribution/GlassDock-${version}-macOS-arm64-notarized.zip" >/dev/null
+
       - name: Verify reproducible guest artifacts
         run: make -C Guest reproducibility-test
 
@@ -182,6 +201,7 @@ jobs:
             pkginstaller/out/*.tar.gz
             pkginstaller/out/SHA256SUMS
             pkginstaller/out/BUILD-METADATA.txt
+            .build/release-distribution/*-notarized.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -226,6 +246,7 @@ jobs:
             dist/*.tar.gz
             dist/SHA256SUMS
             dist/BUILD-METADATA.txt
+            dist/*.zip
 
       - name: Create or update draft release
         env:

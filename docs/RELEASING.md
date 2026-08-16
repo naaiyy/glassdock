@@ -2,8 +2,8 @@
 
 Glass Dock releases one complete Apple Silicon runtime. The signed and notarized
 `.pkg` is the user installation. The `.tar.gz` is for advanced use and future
-package-manager formulas. Every release also contains `SHA256SUMS` and a GitHub
-artifact attestation.
+package-manager formulas. Every release also contains the signed and notarized
+native menu-bar app ZIP, `SHA256SUMS`, and a GitHub artifact attestation.
 
 ## Distribution decisions
 
@@ -16,8 +16,8 @@ artifact attestation.
 - Do not submit a Homebrew Core formula until the project has a stable release
   cadence and the formula installs the complete runtime. A project tap can use the
   complete archive first. Package-manager publication stays outside this workflow.
-- Do not add a DMG. It adds no value for a command-line package. A future menu-bar
-  app should use a signed app bundle and an app-owned per-user service.
+- Do not add a DMG. It adds no value for a command-line package. The menu-bar app
+  ships as a separate signed and notarized asset beside the runtime package.
 
 ## Service and future app model
 
@@ -54,15 +54,15 @@ time.
 
 The release workflow validates the existing tag and changelog section. It does not
 create a tag. It builds on the trusted Apple Silicon runner, signs and notarizes the
-runtime package, creates checksums, tests the artifacts, and creates a draft GitHub
-release. It does not publish the draft.
+runtime package and menu-bar app, creates checksums, attests the artifacts, tests
+the artifacts, and creates a draft GitHub release. It does not publish the draft.
 
-## First-release gates
+## Release gates
 
-Do not publish the first release until both gates are complete:
+Before publishing a release:
 
-- Fix the live smoke-test failure where `docker run --rm` exits successfully but
-  does not return the attached standard output.
+- Run the live Docker API smoke test and verify that `docker run --rm` returns
+  attached standard output.
 - Configure and validate the protected signing environment and Apple credentials
   described below. The unsigned local build does not validate signing or
   notarization.
