@@ -38,6 +38,7 @@ const (
 	MethodContainerDelete         = "container.delete"
 	MethodContainerExec           = "container.exec"
 	MethodContainerAttach         = "container.attach"
+	MethodContainerUpdate         = "container.update"
 	MethodContainerMetadataUpdate = "container.metadata.update"
 	MethodExecResize              = "exec.resize"
 	MethodNetworkList             = "network.list"
@@ -197,6 +198,23 @@ type ContainerMetadataUpdateRequest struct {
 	ID           string              `json:"id"`
 	Name         string              `json:"name,omitempty"`
 	PortBindings []DockerPortBinding `json:"portBindings,omitempty"`
+}
+
+type ContainerUpdateRequest struct {
+	ID                string  `json:"id"`
+	CPUShares         *uint64 `json:"cpuShares,omitempty"`
+	Memory            *int64  `json:"memory,omitempty"`
+	MemorySwap        *int64  `json:"memorySwap,omitempty"`
+	MemoryReservation *int64  `json:"memoryReservation,omitempty"`
+	CPUPeriod         *uint64 `json:"cpuPeriod,omitempty"`
+	CPUQuota          *int64  `json:"cpuQuota,omitempty"`
+	CPUSetCPUs        *string `json:"cpusetCpus,omitempty"`
+	CPUSetMems        *string `json:"cpusetMems,omitempty"`
+	PidsLimit         *int64  `json:"pidsLimit,omitempty"`
+}
+
+type ContainerUpdateResponse struct {
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Mount maps directly to an OCI mount. Supported types are bind, tmpfs,

@@ -39,6 +39,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
         pause: Bool,
         changes: String?
     ) async throws -> DockerRuntimeImage
+    func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String]
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer
     func startContainer(id: String) async throws
     func pauseContainer(id: String) async throws
@@ -103,6 +104,9 @@ extension DockerRuntimeRouteBackend {
     }
     func importImages(data: Data) async throws -> [DockerRuntimeImage] {
         throw DockerRuntimeRouteError.invalidRequest("image import is not supported")
+    }
+    func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String] {
+        throw DockerRuntimeRouteError.invalidRequest("container resource updates are not supported")
     }
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         throw DockerRuntimeRouteError.invalidRequest("container top is not supported")
@@ -300,6 +304,10 @@ private struct DockerRuntimeNetworkPruneResponse: Encodable {
     let Errors: [String: String]
 }
 
+private struct DockerRuntimeContainerUpdateResponse: Encodable {
+    let Warnings: [String]
+}
+
 struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let source: String
     let target: String
@@ -364,6 +372,56 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let labels: [String: String]
     let tty: Bool
     let ports: [DockerRuntimePortBinding]
+}
+
+struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
+    let cpuShares: Int64?
+    let memory: Int64?
+    let memorySwap: Int64?
+    let memoryReservation: Int64?
+    let cpuPeriod: Int64?
+    let cpuQuota: Int64?
+    let cpusetCpus: String?
+    let cpusetMems: String?
+    let pidsLimit: Int64?
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case cpuShares = "CpuShares"
+        case memory = "Memory"
+        case memorySwap = "MemorySwap"
+        case memoryReservation = "MemoryReservation"
+        case cpuPeriod = "CpuPeriod"
+        case cpuQuota = "CpuQuota"
+        case cpusetCpus = "CpusetCpus"
+        case cpusetMems = "CpusetMems"
+        case pidsLimit = "PidsLimit"
+    }
+
+    static let supportedDockerFields = Set(CodingKeys.allCases.map(\.stringValue))
+
+    func validate() throws {
+        if let cpuShares, cpuShares < 0 {
+            throw DockerRuntimeRouteError.invalidRequest("CpuShares must be non-negative")
+        }
+        if let memory, memory < 0 {
+            throw DockerRuntimeRouteError.invalidRequest("Memory must be non-negative")
+        }
+        if let memorySwap, memorySwap < -1 {
+            throw DockerRuntimeRouteError.invalidRequest("MemorySwap must be -1 or non-negative")
+        }
+        if let memoryReservation, memoryReservation < 0 {
+            throw DockerRuntimeRouteError.invalidRequest("MemoryReservation must be non-negative")
+        }
+        if let cpuPeriod, cpuPeriod < 0 {
+            throw DockerRuntimeRouteError.invalidRequest("CpuPeriod must be non-negative")
+        }
+        if let cpuQuota, cpuQuota < -1 {
+            throw DockerRuntimeRouteError.invalidRequest("CpuQuota must be -1 or non-negative")
+        }
+        if let pidsLimit, pidsLimit < -1 {
+            throw DockerRuntimeRouteError.invalidRequest("PidsLimit must be -1 or non-negative")
+        }
+    }
 }
 
 struct DockerRuntimeNetworkContainer: Sendable {
@@ -494,6 +552,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.POST, pattern: "/networks/prune", use: pruneNetworks)
         try routes.registerVersionedRoute(.DELETE, pattern: "/networks/{id:.*}", use: deleteNetwork)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/update", use: updateContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: pruneContainers)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/start", use: startContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/pause", use: pauseContainer)
@@ -845,6 +904,18 @@ struct DockerRuntimeRoutes: RouteCollection {
             }
         }
         return try jsonResponse(.created, RESTContainerCreate(Id: container.id, Warnings: []))
+    }
+
+    private func updateContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let update = try await decodeContainerUpdate(req)
+        let warnings = try await call {
+            try await backend.updateContainer(id: id, update: update)
+        }
+        return try jsonResponse(
+            .ok,
+            DockerRuntimeContainerUpdateResponse(Warnings: warnings)
+        )
     }
 
     private func startContainer(_ req: Request) async throws -> Response {
@@ -1477,6 +1548,40 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Missing \(name)")
         }
         return value
+    }
+
+    private func decodeContainerUpdate(_ req: Request) async throws -> DockerRuntimeContainerUpdate {
+        do {
+            guard
+                let buffer = try await req.body.collect(
+                    max: req.application.routes.defaultMaxBodySize.value
+                ).get(),
+                let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                throw Abort(.badRequest, reason: "Container update request body is required")
+            }
+            let unsupported = Set(object.keys).subtracting(
+                DockerRuntimeContainerUpdate.supportedDockerFields
+            )
+            guard unsupported.isEmpty else {
+                throw Abort(
+                    .notImplemented,
+                    reason: "Container update option(s) \(unsupported.sorted().joined(separator: ", ")) are not supported"
+                )
+            }
+            let update = try JSONDecoder().decode(
+                DockerRuntimeContainerUpdate.self, from: data
+            )
+            try update.validate()
+            return update
+        } catch let abort as Abort {
+            throw abort
+        } catch let error as DockerRuntimeRouteError {
+            throw error
+        } catch {
+            throw Abort(.badRequest, reason: "Invalid container update request: \(error)")
+        }
     }
 
     private func jsonResponse<T: Encodable>(_ status: HTTPResponseStatus, _ value: T) throws -> Response {

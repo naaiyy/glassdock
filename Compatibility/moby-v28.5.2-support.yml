@@ -57,6 +57,11 @@ routes:
     owner: DockerRuntimeRoutes
     note: Removes non-running containers with label and until filters; guest snapshot byte accounting reports zero.
   - method: POST
+    path: /containers/{id}/update
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Updates live guest OCI CPU, memory, cpuset, and PIDs limits; restart policy and other Docker resource fields remain unsupported.
+  - method: POST
     path: /containers/{id}/attach
     support: partial
     owner: DockerRuntimeRoutes

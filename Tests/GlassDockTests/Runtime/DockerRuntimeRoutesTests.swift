@@ -234,6 +234,44 @@ struct DockerRuntimeRoutesTests {
         #expect(create.mounts == [.init(source: canonicalSource, target: "/data", readOnly: false)])
     }
 
+    @Test("container update forwards supported live resource limits")
+    func containerUpdate() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/update",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string:
+                        #"{"CpuShares":512,"Memory":268435456,"MemorySwap":-1,"MemoryReservation":134217728,"CpuPeriod":100000,"CpuQuota":50000,"CpusetCpus":"0","CpusetMems":"","PidsLimit":64}"#
+                )
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Warnings"] as? [String] == [])
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/update",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"RestartPolicy":{"Name":"always"}}"#)
+            ) { response async in
+                #expect(response.status == .notImplemented)
+            }
+        }
+        let update = try #require(await backend.lastUpdate)
+        #expect(update.cpuShares == 512)
+        #expect(update.memory == 268_435_456)
+        #expect(update.memorySwap == -1)
+        #expect(update.memoryReservation == 134_217_728)
+        #expect(update.cpuPeriod == 100000)
+        #expect(update.cpuQuota == 50000)
+        #expect(update.cpusetCpus == "0")
+        #expect(update.cpusetMems == "")
+        #expect(update.pidsLimit == 64)
+    }
+
     @Test("exec start returns stdcopy frames and records the exit code")
     func execLifecycle() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -740,6 +778,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
     private(set) var lastResize: (UInt32, UInt32)?
+    private(set) var lastUpdate: DockerRuntimeContainerUpdate?
     private(set) var startCount = 0
     private var running = false
     private var paused = false
@@ -835,6 +874,11 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
         lastCreate = request
         return container()
+    }
+
+    func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String] {
+        lastUpdate = update
+        return []
     }
 
     func startContainer(id: String) async throws {

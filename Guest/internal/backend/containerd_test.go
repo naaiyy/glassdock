@@ -11,7 +11,62 @@ import (
 
 	containerrecords "github.com/containerd/containerd/v2/core/containers"
 	"github.com/glassdock/glassdock/guest/internal/api"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestContainerUpdateResourcesMapsAndPersistsOCIFields(t *testing.T) {
+	shares := uint64(512)
+	memory := int64(268435456)
+	memorySwap := int64(-1)
+	memoryReservation := int64(134217728)
+	period := uint64(100000)
+	quota := int64(50000)
+	cpus := "0"
+	mems := ""
+	pids := int64(64)
+	request := api.ContainerUpdateRequest{
+		CPUShares:         &shares,
+		Memory:            &memory,
+		MemorySwap:        &memorySwap,
+		MemoryReservation: &memoryReservation,
+		CPUPeriod:         &period,
+		CPUQuota:          &quota,
+		CPUSetCPUs:        &cpus,
+		CPUSetMems:        &mems,
+		PidsLimit:         &pids,
+	}
+
+	resources, ok := containerUpdateResources(request)
+	if !ok || resources.CPU == nil || resources.Memory == nil || resources.Pids == nil {
+		t.Fatal("resource update did not produce all requested OCI sections")
+	}
+	if *resources.CPU.Shares != shares || *resources.CPU.Period != period || *resources.CPU.Quota != quota {
+		t.Fatalf("unexpected CPU resources: %+v", resources.CPU)
+	}
+	if resources.CPU.Cpus != cpus || resources.CPU.Mems != mems {
+		t.Fatalf("unexpected cpuset resources: %+v", resources.CPU)
+	}
+	if *resources.Memory.Limit != memory || *resources.Memory.Swap != memorySwap ||
+		*resources.Memory.Reservation != memoryReservation {
+		t.Fatalf("unexpected memory resources: %+v", resources.Memory)
+	}
+	if resources.Pids.Limit != pids {
+		t.Fatalf("unexpected PID limit: %d", resources.Pids.Limit)
+	}
+
+	spec := &specs.Spec{Linux: &specs.Linux{}}
+	if err := applyContainerUpdateToSpec(spec, request); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Linux.Resources == nil || spec.Linux.Resources.CPU == nil ||
+		spec.Linux.Resources.Memory == nil || spec.Linux.Resources.Pids == nil {
+		t.Fatal("resource update was not persisted to the OCI specification")
+	}
+	if spec.Linux.Resources.CPU.Cpus != cpus || *spec.Linux.Resources.Memory.Limit != memory ||
+		spec.Linux.Resources.Pids.Limit != pids {
+		t.Fatalf("unexpected persisted resources: %+v", spec.Linux.Resources)
+	}
+}
 
 func TestExecCleanupRetriesUntilSuccess(t *testing.T) {
 	t.Parallel()

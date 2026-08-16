@@ -81,6 +81,10 @@ private struct GuestContainerMetadata: Decodable {
     let publishedPorts: [GuestPublishedPort]?
 }
 
+private struct GuestContainerUpdatePayload: Decodable {
+    let warnings: [String]?
+}
+
 private struct GuestPublishedPort: Decodable {
     let containerPort: Int
     let guestPort: Int
@@ -691,6 +695,40 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         return dockerContainer(guest.container)
     }
 
+    func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String] {
+        let resolved = try await resolve(id)
+        var payload: [String: JSONValue] = ["id": .string(resolved)]
+        if let value = update.cpuShares {
+            payload["cpuShares"] = .number(Double(value))
+        }
+        if let value = update.memory {
+            payload["memory"] = .number(Double(value))
+        }
+        if let value = update.memorySwap {
+            payload["memorySwap"] = .number(Double(value))
+        }
+        if let value = update.memoryReservation {
+            payload["memoryReservation"] = .number(Double(value))
+        }
+        if let value = update.cpuPeriod {
+            payload["cpuPeriod"] = .number(Double(value))
+        }
+        if let value = update.cpuQuota {
+            payload["cpuQuota"] = .number(Double(value))
+        }
+        if let value = update.cpusetCpus {
+            payload["cpusetCpus"] = .string(value)
+        }
+        if let value = update.cpusetMems {
+            payload["cpusetMems"] = .string(value)
+        }
+        if let value = update.pidsLimit {
+            payload["pidsLimit"] = .number(Double(value))
+        }
+        let response = try await request("container.update", payload)
+        return (try? decode(response, as: GuestContainerUpdatePayload.self).warnings) ?? []
+    }
+
     static func lowestAvailableGuestPorts(
         count: Int,
         range: ClosedRange<Int>,
@@ -1247,9 +1285,13 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
             if error.code.contains("not_found") || error.message.contains("not found") {
                 throw DockerRuntimeRouteError.notFound(error.message)
             }
+            if error.code == "invalid_argument" {
+                throw DockerRuntimeRouteError.invalidRequest(error.message)
+            }
             if error.message.contains("used by container") || error.message.contains("multiple tags")
                 || error.message.contains("already exists") || error.message.contains("already in use")
                 || error.message.contains("running container")
+                || error.message.contains("container is not running")
             {
                 throw DockerRuntimeRouteError.conflict(error.message)
             }

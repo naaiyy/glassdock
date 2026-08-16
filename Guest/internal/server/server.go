@@ -517,6 +517,19 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerUpdate:
+		body, err := decode[api.ContainerUpdateRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		warnings, err := s.backend.UpdateContainer(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, api.ContainerUpdateResponse{Warnings: warnings})
 	case api.MethodContainerDelete:
 		body, err := decode[api.ContainerDeleteRequest](request)
 		if err != nil {
