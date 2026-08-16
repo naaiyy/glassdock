@@ -113,6 +113,29 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastPush?.platform == "linux/arm64")
     }
 
+    @Test("image commit forwards Docker metadata to the guest runtime")
+    func imageCommit() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/commit?container=container-1&repo=example.test%2Fcopy&tag=snapshot&pause=0&comment=checkpoint%20one&author=tester&changes=CMD%20echo%20ok"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Id"] as? String == "sha256:committed")
+            }
+        }
+        let commit = try #require(await backend.lastCommit)
+        #expect(commit.container == "container-1")
+        #expect(commit.repository == "example.test/copy")
+        #expect(commit.tag == "snapshot")
+        #expect(commit.comment == "checkpoint one")
+        #expect(commit.author == "tester")
+        #expect(commit.pause == false)
+        #expect(commit.changes == "CMD echo ok")
+    }
+
     @Test("container lifecycle maps Docker create fields and status codes")
     func containerLifecycle() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -578,6 +601,15 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         let target: String
         let platform: String?
     }
+    struct Commit: Equatable {
+        let container: String
+        let repository: String?
+        let tag: String?
+        let comment: String?
+        let author: String?
+        let pause: Bool
+        let changes: String?
+    }
 
     private(set) var lastPull: Pull?
     private(set) var lastCreate: DockerRuntimeContainerCreate?
@@ -591,6 +623,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastPruneAll: Bool?
     private(set) var lastExportReferences: [String]?
     private(set) var lastPush: Push?
+    private(set) var lastCommit: Commit?
     private(set) var lastTopArguments: [String]?
     private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
@@ -651,6 +684,27 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     ) async throws -> DockerRuntimeImage {
         lastPush = Push(source: source, target: target, platform: platform)
         return DockerRuntimeImage(reference: target, digest: "sha256:pushed")
+    }
+
+    func commitImage(
+        container: String,
+        repository: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        pause: Bool,
+        changes: String?
+    ) async throws -> DockerRuntimeImage {
+        lastCommit = Commit(
+            container: container,
+            repository: repository,
+            tag: tag,
+            comment: comment,
+            author: author,
+            pause: pause,
+            changes: changes
+        )
+        return DockerRuntimeImage(reference: repository ?? "glassdock/commit", digest: "sha256:committed")
     }
 
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {

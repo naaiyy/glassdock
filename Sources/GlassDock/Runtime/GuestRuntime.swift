@@ -502,6 +502,32 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         )
     }
 
+    func commitImage(
+        container: String,
+        repository: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        pause: Bool,
+        changes: String?
+    ) async throws -> DockerRuntimeImage {
+        let resolved = try await resolve(container)
+        var payload: [String: JSONValue] = [
+            "container": .string(resolved),
+            "pause": .bool(pause),
+        ]
+        if let repository, !repository.isEmpty {
+            payload["repository"] = .string(Self.normalizedRegistryReference(repository))
+        }
+        if let tag, !tag.isEmpty { payload["tag"] = .string(tag) }
+        if let comment, !comment.isEmpty { payload["comment"] = .string(comment) }
+        if let author, !author.isEmpty { payload["author"] = .string(author) }
+        if let changes, !changes.isEmpty { payload["changes"] = .string(changes) }
+        let response = try await request("image.commit", payload)
+        let result: GuestImagePayload = try decode(response)
+        return DockerRuntimeImage(reference: result.name, digest: result.digest)
+    }
+
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
         let id = Self.makeID()
         let containerName = request.name.map(Self.normalizedContainerName) ?? id

@@ -23,6 +23,15 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func tagImage(source: String, target: String) async throws
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error>
+    func commitImage(
+        container: String,
+        repository: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        pause: Bool,
+        changes: String?
+    ) async throws -> DockerRuntimeImage
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer
     func startContainer(id: String) async throws
     func pauseContainer(id: String) async throws
@@ -71,6 +80,17 @@ extension DockerRuntimeRouteBackend {
     }
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
         throw DockerRuntimeRouteError.invalidRequest("image export is not supported")
+    }
+    func commitImage(
+        container: String,
+        repository: String?,
+        tag: String?,
+        comment: String?,
+        author: String?,
+        pause: Bool,
+        changes: String?
+    ) async throws -> DockerRuntimeImage {
+        throw DockerRuntimeRouteError.invalidRequest("image commit is not supported")
     }
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         throw DockerRuntimeRouteError.invalidRequest("container top is not supported")
@@ -423,6 +443,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/get", use: exportNamedImage)
         try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/history", use: imageHistory)
         try routes.registerVersionedRoute(.POST, pattern: "/images/{name:.*}/push", use: pushImage)
+        try routes.registerVersionedRoute(.POST, pattern: "/commit", use: commitImage)
         try routes.registerVersionedRoute(.GET, pattern: "/info", use: info)
         try routes.registerVersionedRoute(.GET, pattern: "/system/df", use: systemDataUsage)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
@@ -612,6 +633,25 @@ struct DockerRuntimeRoutes: RouteCollection {
         let response = Response(status: .ok, body: .init(data: body))
         response.headers.contentType = .json
         return response
+    }
+
+    private func commitImage(_ req: Request) async throws -> Response {
+        let container = try requiredQuery("container", request: req)
+        let image = try await call {
+            try await backend.commitImage(
+                container: container,
+                repository: req.query[String.self, at: "repo"],
+                tag: req.query[String.self, at: "tag"],
+                comment: req.query[String.self, at: "comment"],
+                author: req.query[String.self, at: "author"],
+                pause: req.query[String.self, at: "pause"].map(Self.mobyBool) ?? true,
+                changes: req.query[String.self, at: "changes"]
+            )
+        }
+        struct CommitResponse: Encodable {
+            let Id: String
+        }
+        return try jsonResponse(.ok, CommitResponse(Id: image.digest))
     }
 
     private func imageHistory(_ req: Request) async throws -> Response {

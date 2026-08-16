@@ -20,7 +20,6 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
         Endpoint(method: .POST, pattern: "/images/load"),
         Endpoint(method: .POST, pattern: "/build"),
         Endpoint(method: .POST, pattern: "/build/prune"),
-        Endpoint(method: .POST, pattern: "/commit"),
         Endpoint(method: .DELETE, pattern: "/networks/{id:.*}"),
         Endpoint(method: .GET, pattern: "/networks"),
         Endpoint(method: .GET, pattern: "/networks/{id:.+}"),

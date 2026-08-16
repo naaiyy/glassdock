@@ -16,6 +16,7 @@ const (
 	MethodImageTag                = "image.tag"
 	MethodImagePush               = "image.push"
 	MethodImageExport             = "image.export"
+	MethodImageCommit             = "image.commit"
 	MethodContainerList           = "container.list"
 	MethodContainerInspect        = "container.inspect"
 	MethodContainerLogs           = "container.logs"
@@ -75,6 +76,15 @@ type ImagePushRequest struct {
 }
 type ImageExportRequest struct {
 	References []string `json:"references"`
+}
+type ImageCommitRequest struct {
+	Container  string `json:"container"`
+	Repository string `json:"repository,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	Comment    string `json:"comment,omitempty"`
+	Author     string `json:"author,omitempty"`
+	Pause      bool   `json:"pause,omitempty"`
+	Changes    string `json:"changes,omitempty"`
 }
 type Image struct {
 	ID           string            `json:"id"`

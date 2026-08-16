@@ -268,6 +268,19 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		payload, _ := protocol.NewPayload(api.Empty{})
 		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodImageCommit:
+		body, err := decode[api.ImageCommitRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		image, err := s.backend.CommitImage(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, image)
 	case api.MethodContainerList:
 		items, err := s.backend.List(ctx)
 		if err != nil {

@@ -221,6 +221,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Pushes a guest image through containerd with optional registry credentials and platform selection.
+  - method: POST
+    path: /commit
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Commits a guest container diff as a new image layer; supported Dockerfile changes update image configuration, while filesystem-executing changes remain unsupported.
   - method: GET
     path: /distribution/{name}/json
     support: implemented
