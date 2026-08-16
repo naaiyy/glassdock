@@ -1344,9 +1344,13 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
             return $0.id == reference || $0.id.hasPrefix(reference) || name == normalized
         }.map(\.id)
         guard guestMatches.count == 1, let id = guestMatches.first else {
-            throw DockerRuntimeRouteError.notFound("container \(reference)")
+            throw DockerRuntimeRouteError.notFound(Self.missingContainerMessage(reference))
         }
         return id
+    }
+
+    static func missingContainerMessage(_ reference: String) -> String {
+        "No such container: \(reference)"
     }
 
     private func request(_ method: String, _ payload: [String: JSONValue]) async throws -> GuestFrame {

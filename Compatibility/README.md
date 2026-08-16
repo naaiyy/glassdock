@@ -10,7 +10,7 @@ Run the drift check with:
 make api-compatibility-check
 ```
 
-The matrix contains 107 Moby operations. It currently classifies 15 as implemented, 17 as partial, and 75 as explicitly unsupported. Every unsupported operation must have a registered route that returns HTTP 501 with a Docker error body. This keeps unsupported runtime features visible to clients instead of presenting fake success responses.
+The matrix contains 107 Moby operations. It currently classifies 18 as implemented, 36 as partial, and 53 as explicitly unsupported. Every unsupported operation must have a registered route that returns HTTP 501 with a Docker error body. This keeps unsupported runtime features visible to clients instead of presenting fake success responses.
 
 Probe a running daemon with:
 

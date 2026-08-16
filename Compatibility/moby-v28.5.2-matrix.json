@@ -504,7 +504,7 @@
       ],
       "responseSchema": "#/definitions/ContainerStatsResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Reports guest process, memory, CPU, network, and PID samples; cgroup details vary by guest runtime."
+      "note": "Reports guest process, memory, CPU, network, and PID samples with streaming and one-shot modes; cgroup details vary by guest runtime."
     },
     {
       "method": "POST",
@@ -700,7 +700,7 @@
       ],
       "responseSchema": "array",
       "owner": "DockerRuntimeRoutes",
-      "note": "Image listing with reference filtering."
+      "note": "Image listing with reference, dangling, label, and date filters."
     },
     {
       "method": "POST",

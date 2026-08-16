@@ -29,7 +29,14 @@ struct DockerRuntimeRoutesTests {
             ) { response async in
                 #expect(response.status == .ok)
                 #expect(response.headers.contentType == .json)
-                #expect(response.body.string.contains("Downloaded newer image"))
+                let progress =
+                    try? JSONSerialization.jsonObject(
+                        with: Data(buffer: response.body)
+                    ) as? [String: Any]
+                #expect(
+                    progress?["status"] as? String
+                        == "Status: Downloaded newer image for example.test/fixture:sha256-deadbeef"
+                )
                 #expect(response.body.string.hasSuffix("\n"))
             }
         }
@@ -408,6 +415,75 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("image list honors reference, dangling, and label filters")
+    func imageListFilters() async throws {
+        let backend = DockerRuntimeBackendMock(
+            images: [
+                DockerRuntimeImage(
+                    reference: "docker.io/library/alpine:latest",
+                    digest: "sha256:alpine",
+                    references: ["docker.io/library/alpine:latest"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                    labels: ["role": "base"]
+                ),
+                DockerRuntimeImage(
+                    reference: "sha256:untagged",
+                    digest: "sha256:untagged",
+                    references: ["sha256:untagged"],
+                    createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+                ),
+            ]
+        )
+        try await withRuntimeRoutes(backend) { app in
+            let reference = "%7B%22reference%22:%5B%22alpine%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(reference)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:alpine"])
+            }
+
+            let dangling = "%7B%22dangling%22:%5B%22true%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(dangling)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:untagged"])
+            }
+
+            let label = "%7B%22label%22:%5B%22role%3Dbase%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(label)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:alpine"])
+            }
+
+            let before = "%7B%22before%22:%5B%22sha256%3Aalpine%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(before)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:untagged"])
+            }
+
+            let since = "%7B%22since%22:%5B%22sha256%3Auntagged%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(since)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:alpine"])
+            }
+
+            let until = "%7B%22until%22:%5B%221700000000.5%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(until)") { response async throws in
+                #expect(response.status == .ok)
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Id"] as? String } == ["sha256:untagged"])
+            }
+
+            let invalid = "%7B%22unsupported%22:%5B%22value%22%5D%7D"
+            try await app.testing().test(.GET, "/v1.51/images/json?filters=\(invalid)") { response async in
+                #expect(response.status == .badRequest)
+            }
+        }
+    }
+
     @Test("runtime and unsupported routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -488,6 +564,59 @@ struct DockerRuntimeRoutesTests {
                 #expect(usage?["RefCount"] as? Int == 0)
             }
         }
+    }
+
+    @Test("system df rejects an unknown object type")
+    func systemDataUsageRejectsUnknownType() async throws {
+        try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
+            try await app.testing().test(.GET, "/v1.51/system/df?type=unknown") { response async in
+                #expect(response.status == .badRequest)
+            }
+        }
+    }
+
+    @Test("system df limits output to requested object types")
+    func systemDataUsageSelectsTypes() async throws {
+        try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
+            try await app.testing().test(.GET, "/v1.51/system/df?type=image") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect((value?["Images"] as? [[String: Any]])?.count == 1)
+                #expect((value?["Containers"] as? [[String: Any]])?.isEmpty == true)
+                #expect((value?["Volumes"] as? [[String: Any]])?.isEmpty == true)
+            }
+        }
+    }
+
+    @Test("stats one-shot returns one sample when streaming is enabled")
+    func statsOneShot() async throws {
+        try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
+            try await app.testing().test(
+                .GET, "/v1.51/containers/container-1/stats?stream=1&one-shot=1"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                #expect(response.body.readableBytes > 0)
+                #expect(response.body.string.hasSuffix("\n"))
+            }
+        }
+    }
+
+    @Test("exec create honors the configured route body limit")
+    func execCreateHonorsConfiguredBodyLimit() async throws {
+        let backend = DockerRuntimeBackendMock()
+        let value = String(repeating: "x", count: 20_000)
+        try await withRuntimeRoutes(backend) { app in
+            app.routes.defaultMaxBodySize = "64kb"
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/exec",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Cmd":["true"],"Env":["LARGE=\#(value)"]}"#)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+        #expect(await backend.lastExec?.environment.first?.hasPrefix("LARGE=") == true)
     }
 
     @Test("container state and metadata operations use Docker response statuses")
@@ -831,9 +960,14 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private var running = false
     private var paused = false
     private let logOutput: String?
+    private let imageRows: [DockerRuntimeImage]
 
-    init(logOutput: String? = nil) {
+    init(logOutput: String? = nil, images: [DockerRuntimeImage]? = nil) {
         self.logOutput = logOutput
+        self.imageRows =
+            images ?? [
+                DockerRuntimeImage(reference: "example.test/fixture:latest", digest: "sha256:abc")
+            ]
     }
 
     func pullImage(
@@ -844,7 +978,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     }
 
     func listImages() async throws -> [DockerRuntimeImage] {
-        [DockerRuntimeImage(reference: "example.test/fixture:latest", digest: "sha256:abc")]
+        imageRows
     }
 
     func inspectImage(reference: String) async throws -> DockerRuntimeImage {

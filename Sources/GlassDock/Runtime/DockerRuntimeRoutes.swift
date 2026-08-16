@@ -662,7 +662,9 @@ struct DockerRuntimeRoutes: RouteCollection {
             let status: String
             let id: String
         }
-        var body = try JSONEncoder().encode(PullProgress(status: "Downloaded newer image for \(image.reference)", id: image.digest))
+        var body = try JSONEncoder().encode(
+            PullProgress(status: "Status: Downloaded newer image for \(image.reference)", id: image.digest)
+        )
         body.append(0x0A)
         let response = Response(status: .ok, body: .init(data: body))
         response.headers.contentType = .json
@@ -734,19 +736,11 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func listImages(_ req: Request) async throws -> Response {
-        var images = try await call { try await backend.listImages() }
-        if let raw = req.query[String.self, at: "filters"],
-            let data = raw.data(using: .utf8),
-            let filters = try? JSONDecoder().decode([String: [String: Bool]].self, from: data),
-            let references = filters["reference"], !references.isEmpty
-        {
-            images = images.filter { image in
-                image.references.contains { candidate in
-                    references.keys.contains { Self.matchesReference(candidate, pattern: $0) }
-                }
-            }
-        }
-        return try jsonResponse(.ok, images.map(ImageSummary.init))
+        let filters = try Self.imageFilters(req.query[String.self, at: "filters"])
+        try Self.validateImageFilters(filters)
+        let images = try await call { try await backend.listImages() }
+        let filtered = try Self.applyImageFilters(images, filters: filters)
+        return try jsonResponse(.ok, filtered.map(ImageSummary.init))
     }
 
     private func inspectImage(_ req: Request) async throws -> Response {
@@ -1289,6 +1283,7 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func statsContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let stream = req.query[String.self, at: "stream"].map(Self.mobyBool) ?? true
+        let oneShot = req.query[String.self, at: "one-shot"].map(Self.mobyBool) ?? false
         let backend = self.backend
         var headers = HTTPHeaders()
         headers.contentType = .json
@@ -1301,7 +1296,7 @@ struct DockerRuntimeRoutes: RouteCollection {
                     var data = try JSONEncoder().encode(stats)
                     if stream { data.append(0x0A) }
                     try await writer.writeBuffer(ByteBuffer(data: data))
-                    if !stream { break }
+                    if !stream || oneShot { break }
                     try await Task.sleep(for: .seconds(1))
                 } while !Task.isCancelled
             })
@@ -1383,7 +1378,19 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func createExec(_ req: Request) async throws -> Response {
         let containerID = try requiredParameter("id", request: req)
-        let body = try req.content.decode(ExecCreateRequest.self)
+        guard
+            let buffer = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get(),
+            let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+            !data.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "Request body is required")
+        }
+        let body: ExecCreateRequest
+        do {
+            body = try JSONDecoder().decode(ExecCreateRequest.self, from: data)
+        } catch {
+            throw Abort(.badRequest, reason: "Invalid exec create request: \(error)")
+        }
         guard let command = body.Cmd, !command.isEmpty else {
             throw Abort(.badRequest, reason: "No exec command specified")
         }
@@ -1510,10 +1517,20 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func systemDataUsage(_ req: Request) async throws -> Response {
-        let images = try await call { try await backend.listImages() }
-        let containers = try await call { try await backend.listContainers(showAll: true) }
+        let query = try req.query.decode(SystemDataUsageQuery.self)
+        let types = query.type ?? []
+        try Self.validateSystemDataUsageTypes(types)
+        let includeAll = types.isEmpty
+        let images =
+            includeAll || types.contains("image")
+            ? try await call { try await backend.listImages() }
+            : []
+        let containers =
+            includeAll || types.contains("container")
+            ? try await call { try await backend.listContainers(showAll: true) }
+            : []
         let volumes: [Volume]
-        if let volumeClient {
+        if includeAll || types.contains("volume"), let volumeClient {
             volumes = try await call {
                 try await volumeClient.list(filters: nil, logger: req.logger)
             }
@@ -1949,11 +1966,207 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private static func matchesReference(_ reference: String, pattern: String) -> Bool {
-        if pattern == reference { return true }
-        if pattern.hasSuffix("*") {
-            return reference.hasPrefix(String(pattern.dropLast()))
+        let forms = familiarReferenceForms(reference)
+        return forms.contains { candidate in
+            globMatch(pattern: pattern, candidate: candidate)
         }
-        return reference.contains(pattern)
+    }
+
+    private static let imageFilterKeys: Set<String> = [
+        "before", "dangling", "label", "reference", "since", "until",
+    ]
+
+    private static func imageFilters(_ raw: String?) throws -> [String: [String]] {
+        guard let raw, !raw.isEmpty, let data = raw.data(using: .utf8) else {
+            return [:]
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Abort(.badRequest, reason: "invalid filter")
+        }
+        var filters: [String: [String]] = [:]
+        for (key, value) in object {
+            guard imageFilterKeys.contains(key) else {
+                throw Abort(.badRequest, reason: "invalid filter '\(key)'")
+            }
+            if let values = value as? [String: Any] {
+                guard values.values.allSatisfy(isJSONBool) else {
+                    throw Abort(.badRequest, reason: "invalid filter")
+                }
+                filters[key] = values.compactMap { key, value in
+                    guard (value as? Bool) == true else { return nil }
+                    return key
+                }
+            } else if let values = value as? [Any] {
+                guard values.allSatisfy({ $0 is String }) else {
+                    throw Abort(.badRequest, reason: "invalid filter")
+                }
+                filters[key] = values.compactMap { $0 as? String }
+            } else if let value = value as? String {
+                filters[key] = [value]
+            } else {
+                throw Abort(.badRequest, reason: "invalid filter")
+            }
+        }
+        return filters
+    }
+
+    private static func isJSONBool(_ value: Any) -> Bool {
+        guard let number = value as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    private static func applyImageFilters(
+        _ images: [DockerRuntimeImage],
+        filters: [String: [String]]
+    ) throws -> [DockerRuntimeImage] {
+        var result = images
+        if let values = filters["dangling"] {
+            let isTrue = try Self.danglingFilterValue(values)
+            result = result.filter { Self.isDangling($0) == isTrue }
+        }
+        if let patterns = filters["reference"] {
+            result = result.filter { image in
+                image.references.contains { reference in
+                    patterns.contains { Self.matchesReference(reference, pattern: $0) }
+                }
+            }
+        }
+        if let values = filters["label"] {
+            result = result.filter { image in
+                values.contains { Self.matchesImageLabel($0, labels: image.labels) }
+            }
+        }
+        if let values = filters["before"] {
+            guard let boundary = Self.imageFilterDate(values, images: images) else {
+                throw Abort(.badRequest, reason: "invalid filter 'before'")
+            }
+            result = result.filter { $0.createdAt < boundary }
+        }
+        if let values = filters["since"] {
+            guard let boundary = Self.imageFilterDate(values, images: images) else {
+                throw Abort(.badRequest, reason: "invalid filter 'since'")
+            }
+            result = result.filter { $0.createdAt > boundary }
+        }
+        if let values = filters["until"] {
+            guard let raw = values.first, let boundary = parseDate(raw) else {
+                throw Abort(.badRequest, reason: "invalid filter 'until'")
+            }
+            result = result.filter { $0.createdAt < boundary }
+        }
+        return result
+    }
+
+    private static func validateImageFilters(_ filters: [String: [String]]) throws {
+        if let values = filters["dangling"] {
+            _ = try danglingFilterValue(values)
+        }
+    }
+
+    private static func danglingFilterValue(_ values: [String]) throws -> Bool {
+        guard !values.isEmpty else {
+            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
+        }
+        let isTrue = values.contains { $0 == "1" || $0 == "true" }
+        let isFalse = values.contains { $0 == "0" || $0 == "false" }
+        guard isTrue != isFalse else {
+            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
+        }
+        return isTrue
+    }
+
+    private static func isDangling(_ image: DockerRuntimeImage) -> Bool {
+        image.references.allSatisfy {
+            $0 == "<none>:<none>" || $0.hasPrefix("sha256:") || $0.contains("@sha256:")
+        }
+    }
+
+    private static func matchesImageLabel(_ expression: String, labels: [String: String]) -> Bool {
+        let parts = expression.split(separator: "=", maxSplits: 1).map(String.init)
+        guard let key = parts.first, !key.isEmpty, let value = labels[key] else { return false }
+        return parts.count == 1 || value == parts[1]
+    }
+
+    private static func imageFilterDate(
+        _ values: [String],
+        images: [DockerRuntimeImage]
+    ) -> Date? {
+        guard let value = values.first, !value.isEmpty else { return nil }
+        if let image = images.first(where: {
+            $0.digest == value || $0.reference == value || $0.references.contains(value)
+        }) {
+            return image.createdAt
+        }
+        return parseDate(value)
+    }
+
+    private static func familiarReferenceForms(_ reference: String) -> [String] {
+        let familiar = familiarizeReference(reference)
+        var name = familiar
+        if let at = name.firstIndex(of: "@") {
+            name = String(name[..<at])
+        }
+        if let colon = name.lastIndex(of: ":"),
+            !name[name.index(after: colon)...].contains("/")
+        {
+            name = String(name[..<colon])
+        }
+        return name == familiar ? [familiar] : [familiar, name]
+    }
+
+    private static func familiarizeReference(_ reference: String) -> String {
+        for prefix in ["docker.io/library/", "docker.io/"] where reference.hasPrefix(prefix) {
+            return String(reference.dropFirst(prefix.count))
+        }
+        return reference
+    }
+
+    private static func globMatch(pattern: String, candidate: String) -> Bool {
+        let patternSegments = pattern.split(separator: "/", omittingEmptySubsequences: false)
+        let candidateSegments = candidate.split(separator: "/", omittingEmptySubsequences: false)
+        guard patternSegments.count == candidateSegments.count else { return false }
+        return zip(patternSegments, candidateSegments).allSatisfy {
+            wildcardMatch(pattern: Array($0), candidate: Array($1))
+        }
+    }
+
+    private static func wildcardMatch(pattern: [Character], candidate: [Character]) -> Bool {
+        var patternIndex = 0
+        var candidateIndex = 0
+        var starIndex = -1
+        var starCandidateIndex = 0
+        while candidateIndex < candidate.count {
+            if patternIndex < pattern.count,
+                pattern[patternIndex] == "?" || pattern[patternIndex] == candidate[candidateIndex]
+            {
+                patternIndex += 1
+                candidateIndex += 1
+            } else if patternIndex < pattern.count, pattern[patternIndex] == "*" {
+                starIndex = patternIndex
+                starCandidateIndex = candidateIndex
+                patternIndex += 1
+            } else if starIndex >= 0 {
+                patternIndex = starIndex + 1
+                starCandidateIndex += 1
+                candidateIndex = starCandidateIndex
+            } else {
+                return false
+            }
+        }
+        while patternIndex < pattern.count, pattern[patternIndex] == "*" {
+            patternIndex += 1
+        }
+        return patternIndex == pattern.count
+    }
+
+    private static let systemDataUsageTypes: Set<String> = [
+        "container", "image", "volume", "build-cache",
+    ]
+
+    private static func validateSystemDataUsageTypes(_ types: [String]) throws {
+        if let unknown = types.first(where: { !systemDataUsageTypes.contains($0) }) {
+            throw Abort(.badRequest, reason: "unknown object type: \(unknown)")
+        }
     }
 
     private static func pruneAll(_ rawFilters: String?) -> Bool {
@@ -2310,6 +2523,10 @@ private struct CreateRequest: Content {
 
 private struct RenameRequest: Content {
     let Name: String
+}
+
+private struct SystemDataUsageQuery: Content {
+    let type: [String]?
 }
 
 private struct CreateHostConfig: Content {
