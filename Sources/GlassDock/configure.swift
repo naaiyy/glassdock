@@ -1,3 +1,4 @@
+import ContainerPersistence
 import ContainerResource
 import Vapor
 
@@ -95,6 +96,7 @@ func configure(
 
     try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
     try app.register(collection: ImageSearchRoute())
+    try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())
     try app.register(collection: ExplicitUnsupportedDockerRoutes())
 
