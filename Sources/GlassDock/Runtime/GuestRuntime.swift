@@ -130,6 +130,23 @@ private struct GuestLogsPayload: Decodable {
     let stderr: Data?
 }
 
+private struct GuestArchivePathPayload: Decodable {
+    let name: String
+    let size: Int64
+    let mode: Int64
+    let modifiedAt: Date
+    let linkTarget: String?
+}
+
+private struct GuestContainerChangePayload: Decodable {
+    let path: String
+    let kind: Int
+}
+
+private struct GuestContainerChangesPayload: Decodable {
+    let changes: [GuestContainerChangePayload]
+}
+
 protocol GuestRuntimeEventConnecting: Sendable {
     func connect() async throws -> AsyncStream<GuestFrame>
 }
@@ -858,6 +875,52 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
         let resolved = try await resolve(id)
         return try await streamRequest(method: "container.export", payload: ["id": .string(resolved)])
+    }
+
+    func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error> {
+        let resolved = try await resolve(id)
+        return try await streamRequest(
+            method: "container.archive",
+            payload: ["id": .string(resolved), "path": .string(path)]
+        )
+    }
+
+    func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath {
+        let resolved = try await resolve(id)
+        let response = try await request(
+            "container.archive.info",
+            ["id": .string(resolved), "path": .string(path)]
+        )
+        let payload = try decode(response, as: GuestArchivePathPayload.self)
+        return DockerRuntimeArchivePath(
+            name: payload.name,
+            size: payload.size,
+            mode: payload.mode,
+            modifiedAt: payload.modifiedAt,
+            linkTarget: payload.linkTarget ?? ""
+        )
+    }
+
+    func putContainerArchive(
+        id: String, path: String, data: Data, noOverwriteDirNonDir: Bool
+    ) async throws {
+        let resolved = try await resolve(id)
+        _ = try await request(
+            "container.archive.put",
+            [
+                "id": .string(resolved),
+                "path": .string(path),
+                "data": .string(data.base64EncodedString()),
+                "noOverwriteDirNonDir": .bool(noOverwriteDirNonDir),
+            ]
+        )
+    }
+
+    func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {
+        let resolved = try await resolve(id)
+        let response = try await request("container.changes", ["id": .string(resolved)])
+        let payload = try decode(response, as: GuestContainerChangesPayload.self)
+        return payload.changes.map { DockerRuntimeContainerChange(path: $0.path, kind: $0.kind) }
     }
 
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {

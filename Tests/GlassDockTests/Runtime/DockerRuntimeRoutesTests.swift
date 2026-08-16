@@ -306,9 +306,6 @@ struct DockerRuntimeRoutesTests {
                 #expect(value?["Images"] as? Int == 1)
                 #expect(value?["OSType"] as? String == "linux")
             }
-            try await app.testing().test(.HEAD, "/v1.51/containers/container-1/archive") { response async in
-                #expect(response.status == .notImplemented)
-            }
             try await app.testing().test(.GET, "/v1.51/containers/container-1/attach/ws") { response async in
                 #expect(response.status == .notImplemented)
             }
@@ -389,8 +386,38 @@ struct DockerRuntimeRoutesTests {
                 #expect(response.headers.contentType == HTTPMediaType(type: "application", subType: "octet-stream"))
                 #expect(Data(buffer: response.body) == Data("rootfs-tar".utf8))
             }
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/archive?path=%2Fetc"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: "X-Docker-Container-Path-Stat") != nil)
+                #expect(Data(buffer: response.body) == Data("container-tar".utf8))
+            }
+            try await app.testing().test(
+                .HEAD,
+                "/v1.51/containers/container-1/archive?path=%2Fetc"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.first(name: "X-Docker-Container-Path-Stat") != nil)
+                #expect(response.body.readableBytes == 0)
+            }
+            try await app.testing().test(
+                .PUT,
+                "/v1.51/containers/container-1/archive?path=%2Ftmp",
+                body: ByteBuffer(string: "container-tar")
+            ) { response async in
+                #expect(response.status == .ok)
+            }
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/changes") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(value?.first?["Path"] as? String == "/etc/fixture")
+                #expect(value?.first?["Kind"] as? Int == 0)
+            }
         }
         #expect(await backend.lastTopArguments == ["-ef"])
+        #expect(await backend.lastArchiveData == Data("container-tar".utf8))
     }
 
     @Test("container prune removes stopped containers and reports Docker fields")
@@ -558,6 +585,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastExportReferences: [String]?
     private(set) var lastPush: Push?
     private(set) var lastTopArguments: [String]?
+    private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
     private(set) var lastResize: (UInt32, UInt32)?
     private(set) var startCount = 0
@@ -715,6 +743,33 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             continuation.yield(Data("rootfs-tar".utf8))
             continuation.finish()
         }
+    }
+
+    func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data("container-tar".utf8))
+            continuation.finish()
+        }
+    }
+
+    func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath {
+        DockerRuntimeArchivePath(
+            name: "etc",
+            size: 4,
+            mode: 0o755,
+            modifiedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            linkTarget: ""
+        )
+    }
+
+    func putContainerArchive(
+        id: String, path: String, data: Data, noOverwriteDirNonDir: Bool
+    ) async throws {
+        lastArchiveData = data
+    }
+
+    func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {
+        [DockerRuntimeContainerChange(path: "/etc/fixture", kind: 0)]
     }
 
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {

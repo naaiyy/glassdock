@@ -111,6 +111,26 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Streams a tar archive of the guest container root filesystem.
+  - method: GET
+    path: /containers/{id}/archive
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reads a path from the guest root filesystem as a tar stream and returns Docker path-stat metadata.
+  - method: HEAD
+    path: /containers/{id}/archive
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports Docker path-stat metadata for a guest filesystem path.
+  - method: PUT
+    path: /containers/{id}/archive
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Applies a bounded tar request to a guest root filesystem directory.
+  - method: GET
+    path: /containers/{id}/changes
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Computes guest snapshot changes against the image parent snapshot.
   - method: POST
     path: /containers/{id}/stop
     support: partial

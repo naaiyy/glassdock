@@ -338,6 +338,56 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		payload, _ := protocol.NewPayload(api.Empty{})
 		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodContainerArchive:
+		body, err := decode[api.ContainerArchiveRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		err = s.backend.ArchiveContainer(ctx, body, func(name string, data []byte) error {
+			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
+		})
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		payload, _ := protocol.NewPayload(api.Empty{})
+		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodContainerArchiveInfo:
+		body, err := decode[api.ContainerArchiveRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		info, err := s.backend.ArchiveInfo(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, info)
+	case api.MethodContainerArchivePut:
+		body, err := decode[api.ContainerArchivePutRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.PutArchive(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerChanges:
+		body, err := decode[api.IDRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		changes, err := s.backend.Changes(ctx, body.ID)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.ContainerChangesResponse{Changes: changes})
 	case api.MethodContainerCreate:
 		body, err := decode[api.ContainerCreateRequest](request)
 		if err != nil {

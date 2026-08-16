@@ -22,6 +22,10 @@ const (
 	MethodContainerTop            = "container.top"
 	MethodContainerStats          = "container.stats"
 	MethodContainerExport         = "container.export"
+	MethodContainerArchive        = "container.archive"
+	MethodContainerArchiveInfo    = "container.archive.info"
+	MethodContainerArchivePut     = "container.archive.put"
+	MethodContainerChanges        = "container.changes"
 	MethodContainerCreate         = "container.create"
 	MethodContainerStart          = "container.start"
 	MethodContainerWait           = "container.wait"
@@ -217,6 +221,30 @@ type ContainerTopResponse struct {
 }
 type ContainerStatsRequest struct {
 	ID string `json:"id"`
+}
+type ContainerArchiveRequest struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+type ContainerArchivePutRequest struct {
+	ID                   string `json:"id"`
+	Path                 string `json:"path"`
+	Data                 []byte `json:"data"`
+	NoOverwriteDirNonDir bool   `json:"noOverwriteDirNonDir,omitempty"`
+}
+type ContainerArchivePath struct {
+	Name       string    `json:"name"`
+	Size       int64     `json:"size"`
+	Mode       int64     `json:"mode"`
+	ModifiedAt time.Time `json:"modifiedAt"`
+	LinkTarget string    `json:"linkTarget,omitempty"`
+}
+type ContainerChange struct {
+	Path string `json:"path"`
+	Kind int    `json:"kind"`
+}
+type ContainerChangesResponse struct {
+	Changes []ContainerChange `json:"changes"`
 }
 type ContainerStatsResponse struct {
 	ID          string              `json:"id"`

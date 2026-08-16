@@ -27,6 +27,8 @@ import (
 	containerarchive "github.com/containerd/containerd/v2/core/images/archive"
 	containermount "github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	rootfsarchive "github.com/containerd/containerd/v2/pkg/archive"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -1462,31 +1464,307 @@ func readNetworkStats(processes []containerd.ProcessInfo) map[string]api.NetStat
 }
 
 func (b *Backend) ExportContainer(ctx context.Context, id string, stream StreamFunc) error {
-	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	root, cleanup, err := b.mountContainerRoot(ctx, id, "glassdock-export-")
 	if err != nil {
 		return err
 	}
-	info, err := container.Info(b.ctx(ctx))
+	defer cleanup()
+	return writeRootfsTar(b.ctx(ctx), root, streamWriter{stream: "stdout", send: stream})
+}
+
+func (b *Backend) ArchiveContainer(ctx context.Context, request api.ContainerArchiveRequest, stream StreamFunc) error {
+	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-")
 	if err != nil {
 		return err
+	}
+	defer cleanup()
+	target, relative, err := resolveContainerPath(root, request.Path)
+	if err != nil {
+		return err
+	}
+	if err := validateExistingContainerPath(root, target); err != nil {
+		return err
+	}
+	return writeArchivePath(b.ctx(ctx), target, relative, streamWriter{stream: "stdout", send: stream})
+}
+
+func (b *Backend) ArchiveInfo(ctx context.Context, request api.ContainerArchiveRequest) (api.ContainerArchivePath, error) {
+	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-info-")
+	if err != nil {
+		return api.ContainerArchivePath{}, err
+	}
+	defer cleanup()
+	target, relative, err := resolveContainerPath(root, request.Path)
+	if err != nil {
+		return api.ContainerArchivePath{}, err
+	}
+	if err := validateExistingContainerPath(root, target); err != nil {
+		return api.ContainerArchivePath{}, err
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return api.ContainerArchivePath{}, err
+	}
+	linkTarget := ""
+	if info.Mode()&os.ModeSymlink != 0 {
+		linkTarget, err = os.Readlink(target)
+		if err != nil {
+			return api.ContainerArchivePath{}, err
+		}
+	}
+	return api.ContainerArchivePath{
+		Name: relative, Size: info.Size(), Mode: int64(info.Mode()),
+		ModifiedAt: info.ModTime(), LinkTarget: linkTarget,
+	}, nil
+}
+
+func (b *Backend) PutArchive(ctx context.Context, request api.ContainerArchivePutRequest) error {
+	if len(request.Data) == 0 {
+		return errors.New("archive data is empty")
+	}
+	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-put-")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	target, _, err := resolveContainerPath(root, request.Path)
+	if err != nil {
+		return err
+	}
+	if err := validateExistingContainerPath(root, target); err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("archive destination %q is not a directory", request.Path)
+	}
+	_, err = rootfsarchive.Apply(
+		b.ctx(ctx), target, bytes.NewReader(request.Data), rootfsarchive.WithNoSameOwner(),
+	)
+	return err
+}
+
+func (b *Backend) Changes(ctx context.Context, id string) ([]api.ContainerChange, error) {
+	ctx = b.ctx(ctx)
+	container, err := b.client.LoadContainer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	info, err := container.Info(ctx)
+	if err != nil {
+		return nil, err
 	}
 	if info.SnapshotKey == "" || info.Snapshotter == "" {
-		return errors.New("container root filesystem is unavailable")
+		return nil, errors.New("container root filesystem is unavailable")
 	}
-	mounts, err := b.client.SnapshotService(info.Snapshotter).Mounts(b.ctx(ctx), info.SnapshotKey)
+	service := b.client.SnapshotService(info.Snapshotter)
+	currentMounts, err := service.Mounts(ctx, info.SnapshotKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	root, err := os.MkdirTemp("", "glassdock-export-")
+	currentRoot, err := os.MkdirTemp("", "glassdock-changes-current-")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer os.RemoveAll(root)
+	defer os.RemoveAll(currentRoot)
+	if err := containermount.All(currentMounts, currentRoot); err != nil {
+		return nil, err
+	}
+	defer func() { _ = containermount.UnmountMounts(currentMounts, currentRoot, 0) }()
+
+	snapshotInfo, err := service.Stat(ctx, info.SnapshotKey)
+	if err != nil {
+		return nil, err
+	}
+	parentRoot, parentCleanup, err := b.mountSnapshotParent(ctx, service, snapshotInfo.Parent)
+	if err != nil {
+		return nil, err
+	}
+	defer parentCleanup()
+
+	diff := rootfsarchive.Diff(ctx, parentRoot, currentRoot)
+	defer diff.Close()
+	return parseContainerChanges(parentRoot, diff)
+}
+
+func (b *Backend) mountContainerRoot(ctx context.Context, id, prefix string) (string, func(), error) {
+	ctx = b.ctx(ctx)
+	container, err := b.client.LoadContainer(ctx, id)
+	if err != nil {
+		return "", func() {}, err
+	}
+	info, err := container.Info(ctx)
+	if err != nil {
+		return "", func() {}, err
+	}
+	if info.SnapshotKey == "" || info.Snapshotter == "" {
+		return "", func() {}, errors.New("container root filesystem is unavailable")
+	}
+	mounts, err := b.client.SnapshotService(info.Snapshotter).Mounts(ctx, info.SnapshotKey)
+	if err != nil {
+		return "", func() {}, err
+	}
+	root, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		return "", func() {}, err
+	}
 	if err := containermount.All(mounts, root); err != nil {
+		_ = os.RemoveAll(root)
+		return "", func() {}, err
+	}
+	cleanup := func() {
+		_ = containermount.UnmountMounts(mounts, root, 0)
+		_ = os.RemoveAll(root)
+	}
+	return root, cleanup, nil
+}
+
+func (b *Backend) mountSnapshotParent(ctx context.Context, service snapshots.Snapshotter, parent string) (string, func(), error) {
+	root, err := os.MkdirTemp("", "glassdock-changes-parent-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	if parent == "" {
+		return root, func() { _ = os.RemoveAll(root) }, nil
+	}
+	key := fmt.Sprintf("glassdock-changes-view-%d", time.Now().UnixNano())
+	mounts, err := service.View(ctx, key, parent)
+	if err != nil {
+		_ = os.RemoveAll(root)
+		return "", func() {}, err
+	}
+	if err := containermount.All(mounts, root); err != nil {
+		_ = service.Remove(ctx, key)
+		_ = os.RemoveAll(root)
+		return "", func() {}, err
+	}
+	return root, func() {
+		_ = containermount.UnmountMounts(mounts, root, 0)
+		_ = service.Remove(ctx, key)
+		_ = os.RemoveAll(root)
+	}, nil
+}
+
+func resolveContainerPath(root, requested string) (string, string, error) {
+	if requested == "" || strings.IndexByte(requested, 0) >= 0 || !strings.HasPrefix(requested, "/") {
+		return "", "", errors.New("container path must be an absolute path")
+	}
+	clean := filepath.Clean(requested)
+	relative := strings.TrimPrefix(filepath.ToSlash(clean), "/")
+	if relative == "" {
+		relative = "."
+	}
+	target := filepath.Join(root, filepath.FromSlash(relative))
+	if !pathContains(root, target) {
+		return "", "", errors.New("container path escapes the root filesystem")
+	}
+	return target, relative, nil
+}
+
+func validateExistingContainerPath(root, target string) error {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = containermount.UnmountMounts(mounts, root, 0) }()
-	return writeRootfsTar(b.ctx(ctx), root, streamWriter{stream: "stdout", send: stream})
+	probe := target
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(probe)
+		if resolveErr == nil {
+			if !pathContains(resolvedRoot, resolved) {
+				return errors.New("container path escapes the root filesystem")
+			}
+			return nil
+		}
+		if !os.IsNotExist(resolveErr) || filepath.Dir(probe) == probe {
+			return resolveErr
+		}
+		probe = filepath.Dir(probe)
+	}
+}
+
+func writeArchivePath(ctx context.Context, target, relative string, writer io.Writer) error {
+	tarWriter := tar.NewWriter(writer)
+	defer tarWriter.Close()
+	return filepath.Walk(target, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relativePath := relative
+		if path != target {
+			child, err := filepath.Rel(target, path)
+			if err != nil {
+				return err
+			}
+			relativePath = filepath.Join(relative, child)
+		}
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			var err error
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(relativePath)
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(tarWriter, file)
+		return err
+	})
+}
+
+func parseContainerChanges(parentRoot string, diff io.Reader) ([]api.ContainerChange, error) {
+	reader := tar.NewReader(diff)
+	changes := make([]api.ContainerChange, 0)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.ToSlash(filepath.Clean(header.Name))
+		if name == "." || name == "" || strings.HasPrefix(name, "../") {
+			continue
+		}
+		kind := 2
+		pathName := "/" + strings.TrimPrefix(name, "./")
+		base := filepath.Base(name)
+		if strings.HasPrefix(base, ".wh.") {
+			if base == ".wh..wh..opq" {
+				pathName = "/" + filepath.ToSlash(filepath.Dir(name))
+				kind = 2
+			} else {
+				pathName = "/" + filepath.ToSlash(filepath.Join(filepath.Dir(name), strings.TrimPrefix(base, ".wh.")))
+				kind = 1
+			}
+		} else if _, err := os.Lstat(filepath.Join(parentRoot, filepath.FromSlash(name))); os.IsNotExist(err) {
+			kind = 0
+		}
+		changes = append(changes, api.ContainerChange{Path: pathName, Kind: kind})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes, nil
 }
 
 func writeRootfsTar(ctx context.Context, root string, writer io.Writer) error {

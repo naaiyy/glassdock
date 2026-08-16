@@ -37,6 +37,10 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop
     func statsContainer(id: String) async throws -> DockerRuntimeStats
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error>
+    func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error>
+    func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath
+    func putContainerArchive(id: String, path: String, data: Data, noOverwriteDirNonDir: Bool) async throws
+    func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange]
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String
     func startExec(id: String, detach: Bool, tty: Bool) async throws -> DockerRuntimeProcessOutput
     func streamExec(id: String, tty: Bool) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
@@ -75,6 +79,18 @@ extension DockerRuntimeRouteBackend {
     }
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
         throw DockerRuntimeRouteError.invalidRequest("container export is not supported")
+    }
+    func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error> {
+        throw DockerRuntimeRouteError.invalidRequest("container archive is not supported")
+    }
+    func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath {
+        throw DockerRuntimeRouteError.invalidRequest("container archive inspection is not supported")
+    }
+    func putContainerArchive(id: String, path: String, data: Data, noOverwriteDirNonDir: Bool) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("container archive upload is not supported")
+    }
+    func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {
+        throw DockerRuntimeRouteError.invalidRequest("container changes are not supported")
     }
 
     func containerAutoRemove(id: String) async throws -> Bool { false }
@@ -222,6 +238,19 @@ struct DockerRuntimeStats: Sendable, Equatable, Codable {
     let networks: [String: NetworkStats]?
     let blkio_stats: BlkioStats
     let pids_stats: PidsStats
+}
+
+struct DockerRuntimeArchivePath: Sendable, Equatable {
+    let name: String
+    let size: Int64
+    let mode: Int64
+    let modifiedAt: Date
+    let linkTarget: String
+}
+
+struct DockerRuntimeContainerChange: Sendable, Equatable {
+    let path: String
+    let kind: Int
 }
 
 struct DockerRuntimeImageDelete: Sendable, Equatable {
@@ -409,6 +438,10 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/top", use: topContainer)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/stats", use: statsContainer)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/export", use: exportContainer)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/archive", use: archiveContainer)
+        try routes.registerVersionedRoute(.HEAD, pattern: "/containers/{id:.*}/archive", use: archiveInfo)
+        try routes.registerVersionedRoute(.PUT, pattern: "/containers/{id:.*}/archive", use: putArchive)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/changes", use: containerChanges)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/exec", use: createExec)
         try routes.registerVersionedRoute(.POST, pattern: "/exec/{id:.*}/start", use: startExec)
         try routes.registerVersionedRoute(.GET, pattern: "/exec/{id:.*}/json", use: inspectExec)
@@ -919,6 +952,63 @@ struct DockerRuntimeRoutes: RouteCollection {
         )
     }
 
+    private func archiveContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let path = try requiredQuery("path", request: req)
+        let info = try await call { try await backend.archiveContainerInfo(id: id, path: path) }
+        let stream = try await call { try await backend.archiveContainer(id: id, path: path) }
+        var headers = HTTPHeaders()
+        headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
+        headers.replaceOrAdd(name: "X-Docker-Container-Path-Stat", value: try Self.archivePathStatHeader(info))
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(managedAsyncStream: { writer in
+                for try await data in stream {
+                    try await writer.writeBuffer(ByteBuffer(data: data))
+                }
+            })
+        )
+    }
+
+    private func archiveInfo(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let path = try requiredQuery("path", request: req)
+        let info = try await call { try await backend.archiveContainerInfo(id: id, path: path) }
+        var response = Response(status: .ok)
+        response.headers.replaceOrAdd(name: "X-Docker-Container-Path-Stat", value: try Self.archivePathStatHeader(info))
+        return response
+    }
+
+    private func putArchive(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let path = try requiredQuery("path", request: req)
+        guard let buffer = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get(),
+            let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
+        else {
+            throw Abort(.badRequest, reason: "archive request body is required")
+        }
+        try await call {
+            try await backend.putContainerArchive(
+                id: id,
+                path: path,
+                data: data,
+                noOverwriteDirNonDir: Self.mobyBool(req.query[String.self, at: "noOverwriteDirNonDir"])
+            )
+        }
+        return Response(status: .ok)
+    }
+
+    private func containerChanges(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let changes = try await call { try await backend.containerChanges(id: id) }
+        struct Change: Encodable {
+            let Path: String
+            let Kind: Int
+        }
+        return try jsonResponse(.ok, changes.map { Change(Path: $0.path, Kind: $0.kind) })
+    }
+
     private func createExec(_ req: Request) async throws -> Response {
         let containerID = try requiredParameter("id", request: req)
         let body = try req.content.decode(ExecCreateRequest.self)
@@ -1214,6 +1304,28 @@ struct DockerRuntimeRoutes: RouteCollection {
         let references = raw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         guard !references.isEmpty else { throw Abort(.badRequest, reason: "names is required") }
         return references
+    }
+
+    private static func archivePathStatHeader(_ info: DockerRuntimeArchivePath) throws -> String {
+        struct PathStat: Encodable {
+            let name: String
+            let size: Int64
+            let mode: Int64
+            let mtime: Date
+            let linkTarget: String
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(
+            PathStat(
+                name: info.name,
+                size: info.size,
+                mode: info.mode,
+                mtime: info.modifiedAt,
+                linkTarget: info.linkTarget
+            )
+        )
+        return data.base64EncodedString()
     }
 
     private static func validateCreateOptions(_ data: Data) throws {
