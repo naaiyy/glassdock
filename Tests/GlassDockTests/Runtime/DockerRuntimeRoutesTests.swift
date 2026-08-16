@@ -365,6 +365,50 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("info separates paused containers from stopped containers")
+    func infoCountsPausedContainers() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/pause") { response async in
+                #expect(response.status == .noContent)
+            }
+            try await app.testing().test(.GET, "/v1.51/info") { response async throws in
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["ContainersRunning"] as? Int == 0)
+                #expect(value?["ContainersPaused"] as? Int == 1)
+                #expect(value?["ContainersStopped"] as? Int == 0)
+            }
+        }
+    }
+
+    @Test("system df reports guest volume accounting")
+    func systemDataUsageVolumes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let volumes = RuntimeVolumeService(root: root)
+        let volume = try await volumes.create(
+            request: RESTVolumeCreate(Name: "cache", Driver: "local", Options: [:], Labels: nil)
+        )
+        try Data("guest-data".utf8).write(
+            to: URL(fileURLWithPath: volume.Mountpoint).appendingPathComponent("payload")
+        )
+
+        try await withRuntimeRoutes(
+            DockerRuntimeBackendMock(), volumeClient: volumes
+        ) { app in
+            try await app.testing().test(.GET, "/v1.51/system/df") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let rows = value?["Volumes"] as? [[String: Any]]
+                let usage = rows?.first?["UsageData"] as? [String: Any]
+                #expect(rows?.first?["Name"] as? String == "cache")
+                #expect(usage?["Size"] as? Int == 10)
+                #expect(usage?["RefCount"] as? Int == 0)
+            }
+        }
+    }
+
     @Test("container state and metadata operations use Docker response statuses")
     func containerStateOperations() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -599,12 +643,13 @@ struct DockerRuntimeRoutesTests {
 
 private func withRuntimeRoutes(
     _ backend: DockerRuntimeBackendMock,
+    volumeClient: (any ClientVolumeProtocol)? = nil,
     test: @escaping (Application) async throws -> Void
 ) async throws {
     try await withApp(configure: { _ in }) { app in
         let router = app.regexRouter(with: app.logger)
         app.setRegexRouter(router)
-        try app.register(collection: DockerRuntimeRoutes(backend: backend))
+        try app.register(collection: DockerRuntimeRoutes(backend: backend, volumeClient: volumeClient))
         try await test(app)
     }
 }

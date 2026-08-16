@@ -544,12 +544,13 @@ struct DockerRuntimeRoutes: RouteCollection {
         let containers = try await call { try await backend.listContainers(showAll: true) }
         let images = try await call { try await backend.listImages() }
         let running = containers.filter { $0.state == .running }.count
-        let stopped = containers.count - running
+        let paused = containers.filter { $0.state == .paused }.count
+        let stopped = containers.count - running - paused
         let environment = ProcessInfo.processInfo.environment
         let info = SystemInfo(
             Containers: containers.count,
             ContainersRunning: running,
-            ContainersPaused: 0,
+            ContainersPaused: paused,
             ContainersStopped: stopped,
             Images: images.count,
             DockerRootDir: GlassDockDirectories.engineStateDirectory.path,
@@ -1213,7 +1214,18 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func systemDataUsage(_ req: Request) async throws -> Response {
         let images = try await call { try await backend.listImages() }
         let containers = try await call { try await backend.listContainers(showAll: true) }
-        return try jsonResponse(.ok, SystemDataUsageResponse(images: images, containers: containers))
+        let volumes: [Volume]
+        if let volumeClient {
+            volumes = try await call {
+                try await volumeClient.list(filters: nil, logger: req.logger)
+            }
+        } else {
+            volumes = []
+        }
+        return try jsonResponse(
+            .ok,
+            SystemDataUsageResponse(images: images, containers: containers, volumes: volumes)
+        )
     }
 
     private func logs(_ req: Request) async throws -> Response {
@@ -1842,10 +1854,14 @@ private struct SystemDataUsageResponse: Encodable {
     let LayersSize: Int64
     let Images: [ImageUsage]
     let Containers: [ContainerUsage]
-    let Volumes: [String] = []
+    let Volumes: [Volume]
     let BuildCache: [String] = []
 
-    init(images: [DockerRuntimeImage], containers: [DockerRuntimeContainer]) {
+    init(
+        images: [DockerRuntimeImage],
+        containers: [DockerRuntimeContainer],
+        volumes: [Volume] = []
+    ) {
         let counts = containers.reduce(into: [String: Int64]()) { counts, container in
             counts[container.image, default: 0] += 1
         }
@@ -1854,6 +1870,7 @@ private struct SystemDataUsageResponse: Encodable {
         }
         Images = images.map { ImageUsage($0, containerCount: counts[$0.reference, default: -1]) }
         Containers = containers.map(ContainerUsage.init)
+        Volumes = volumes
     }
 }
 

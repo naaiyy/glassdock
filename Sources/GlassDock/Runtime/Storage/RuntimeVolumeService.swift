@@ -208,6 +208,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         if let sync = labels.removeValue(forKey: Filesystem.SyncMode.glassdockLabel) {
             options["sync"] = sync
         }
+        let usage = volumeUsage(at: data)
         return Volume(
             Name: metadata.name,
             Driver: metadata.driver,
@@ -218,8 +219,34 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             Scope: "local",
             ClusterVolume: nil,
             Options: options,
-            UsageData: VolumeUsageData()
+            UsageData: VolumeUsageData(
+                Size: usage,
+                RefCount: Int64(metadata.referencedContainers.count)
+            )
         )
+    }
+
+    private func volumeUsage(at directory: URL) -> Int64 {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: [.skipsPackageDescendants]
+            )
+        else { return 0 }
+
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            guard
+                let values = try? file.resourceValues(
+                    forKeys: [.isRegularFileKey, .fileSizeKey]
+                ),
+                values.isRegularFile == true,
+                let size = values.fileSize
+            else { continue }
+            total = min(Int64.max - Int64(size), total) + Int64(size)
+        }
+        return total
     }
 
     private static func validate(_ name: String) throws {

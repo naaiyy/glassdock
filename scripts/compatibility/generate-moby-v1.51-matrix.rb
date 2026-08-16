@@ -73,7 +73,7 @@ def unsupported_reason(path)
   when %r{\A/networks(/|\z)}
     "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
   when "/system/df"
-    "The guest runtime does not expose complete Docker system disk accounting."
+    "Reports guest-backed images, containers, and persistent volumes; build-cache accounting and container filesystem sizes remain unavailable."
   when "/session"
     "Interactive sessions require a guest terminal handoff that is not implemented."
   when %r{/archive\z}, %r{/attach/ws\z}, %r{/export\z}, %r{/stats\z}, %r{/top\z}, %r{/changes\z}

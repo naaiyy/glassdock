@@ -26,6 +26,8 @@ struct RuntimeVolumeServiceTests {
         #expect(restored.Name == "database")
         #expect(restored.Labels == ["purpose": "test"])
         #expect(restored.Options == ["sync": "fsync"])
+        #expect(restored.UsageData?.Size == 7)
+        #expect(restored.UsageData?.RefCount == 0)
         #expect(
             try String(
                 contentsOf: URL(fileURLWithPath: restored.Mountpoint).appendingPathComponent("value"),
@@ -63,6 +65,7 @@ struct RuntimeVolumeServiceTests {
             request: RESTVolumeCreate(Name: "database", Driver: "local", Options: [:], Labels: nil)
         )
         try await service.retain(names: ["database"], containerID: "container-1")
+        #expect(try await service.inspect(name: "database").UsageData?.RefCount == 1)
         await service.setReferenceValidator { $0 == "container-1" }
 
         await #expect(throws: (any Error).self) {
