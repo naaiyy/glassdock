@@ -277,6 +277,91 @@ routes:
     owner: DockerRuntimeRoutes
     note: Disconnects guest network endpoints from stopped containers and protects the default bridge network.
   - method: GET
+    path: /configs
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Lists persistent single-daemon config objects with Docker name, id, label, and id filters.
+  - method: POST
+    path: /configs/create
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Creates persistent config metadata and base64 data outside the guest scheduler.
+  - method: DELETE
+    path: /configs/{id}
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Deletes a persistent config by full or unique id prefix.
+  - method: GET
+    path: /configs/{id}
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Inspects a persistent config with Docker object and spec fields.
+  - method: POST
+    path: /configs/{id}/update
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Updates config spec and increments its object version.
+  - method: GET
+    path: /secrets
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Lists persistent secret metadata without exposing secret data.
+  - method: POST
+    path: /secrets/create
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Creates persistent secret data with Docker create response semantics.
+  - method: DELETE
+    path: /secrets/{id}
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Deletes a persistent secret by full or unique id prefix.
+  - method: GET
+    path: /secrets/{id}
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Inspects persistent secret metadata without returning its data.
+  - method: POST
+    path: /secrets/{id}/update
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Updates secret metadata and increments its object version.
+  - method: GET
+    path: /swarm
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Reports the local single-node control-plane state; multi-node scheduling remains unavailable.
+  - method: POST
+    path: /swarm/init
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Initializes a local single-node control plane with Docker join and unlock tokens.
+  - method: POST
+    path: /swarm/join
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Validates local join tokens and returns the single node identity; remote managers are unavailable.
+  - method: POST
+    path: /swarm/leave
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Leaves the local control plane and clears its manager state.
+  - method: POST
+    path: /swarm/unlock
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Validates the local unlock key and returns Docker's empty success response.
+  - method: GET
+    path: /swarm/unlockkey
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Returns the local control-plane unlock key after initialization.
+  - method: POST
+    path: /swarm/update
+    support: partial
+    owner: DockerControlPlaneRoutes
+    note: Updates local Swarm spec metadata and increments the object version.
+  - method: GET
     path: /distribution/{name}/json
     support: implemented
     owner: DistributionJsonRoute

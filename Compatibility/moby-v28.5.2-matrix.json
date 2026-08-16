@@ -100,23 +100,23 @@
       "method": "GET",
       "path": "/configs",
       "operationId": "ConfigList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Lists persistent single-daemon config objects with Docker name, id, label, and id filters."
     },
     {
       "method": "POST",
       "path": "/configs/create",
       "operationId": "ConfigCreate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 201,
       "responseStatuses": [
         201,
         409,
@@ -124,15 +124,15 @@
         503
       ],
       "responseSchema": "#/definitions/IDResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Creates persistent config metadata and base64 data outside the guest scheduler."
     },
     {
       "method": "DELETE",
       "path": "/configs/{id}",
       "operationId": "ConfigDelete",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
@@ -140,15 +140,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Deletes a persistent config by full or unique id prefix."
     },
     {
       "method": "GET",
       "path": "/configs/{id}",
       "operationId": "ConfigInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -156,15 +156,15 @@
         503
       ],
       "responseSchema": "#/definitions/Config",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Inspects a persistent config with Docker object and spec fields."
     },
     {
       "method": "POST",
       "path": "/configs/{id}/update",
       "operationId": "ConfigUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -173,8 +173,8 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Updates config spec and increments its object version."
     },
     {
       "method": "POST",
@@ -1188,23 +1188,23 @@
       "method": "GET",
       "path": "/secrets",
       "operationId": "SecretList",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Lists persistent secret metadata without exposing secret data."
     },
     {
       "method": "POST",
       "path": "/secrets/create",
       "operationId": "SecretCreate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 201,
       "responseStatuses": [
         201,
         409,
@@ -1212,15 +1212,15 @@
         503
       ],
       "responseSchema": "#/definitions/IDResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Creates persistent secret data with Docker create response semantics."
     },
     {
       "method": "DELETE",
       "path": "/secrets/{id}",
       "operationId": "SecretDelete",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
@@ -1228,15 +1228,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Deletes a persistent secret by full or unique id prefix."
     },
     {
       "method": "GET",
       "path": "/secrets/{id}",
       "operationId": "SecretInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1244,15 +1244,15 @@
         503
       ],
       "responseSchema": "#/definitions/Secret",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Inspects persistent secret metadata without returning its data."
     },
     {
       "method": "POST",
       "path": "/secrets/{id}/update",
       "operationId": "SecretUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1261,8 +1261,8 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Updates secret metadata and increments its object version."
     },
     {
       "method": "GET",
@@ -1381,8 +1381,8 @@
       "method": "GET",
       "path": "/swarm",
       "operationId": "SwarmInspect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
@@ -1390,15 +1390,15 @@
         503
       ],
       "responseSchema": "#/definitions/Swarm",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Reports the local single-node control-plane state; multi-node scheduling remains unavailable."
     },
     {
       "method": "POST",
       "path": "/swarm/init",
       "operationId": "SwarmInit",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1406,15 +1406,15 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Initializes a local single-node control plane with Docker join and unlock tokens."
     },
     {
       "method": "POST",
       "path": "/swarm/join",
       "operationId": "SwarmJoin",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1422,60 +1422,60 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Validates local join tokens and returns the single node identity; remote managers are unavailable."
     },
     {
       "method": "POST",
       "path": "/swarm/leave",
       "operationId": "SwarmLeave",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Leaves the local control plane and clears its manager state."
     },
     {
       "method": "POST",
       "path": "/swarm/unlock",
       "operationId": "SwarmUnlock",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Validates the local unlock key and returns Docker's empty success response."
     },
     {
       "method": "GET",
       "path": "/swarm/unlockkey",
       "operationId": "SwarmUnlockkey",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "object",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Returns the local control-plane unlock key after initialization."
     },
     {
       "method": "POST",
       "path": "/swarm/update",
       "operationId": "SwarmUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1483,8 +1483,8 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Docker Swarm is not supported by the single-host Apple container runtime."
+      "owner": "DockerControlPlaneRoutes",
+      "note": "Updates local Swarm spec metadata and increments the object version."
     },
     {
       "method": "GET",

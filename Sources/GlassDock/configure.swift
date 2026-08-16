@@ -95,6 +95,7 @@ func configure(
     try app.register(collection: EventsRoute())
 
     try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
+    try app.register(collection: DockerControlPlaneRoutes(controlPlane: DockerControlPlane()))
     try app.register(collection: ImageSearchRoute())
     try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())

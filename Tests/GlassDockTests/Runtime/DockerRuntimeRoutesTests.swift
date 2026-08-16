@@ -430,7 +430,6 @@ struct DockerRuntimeRoutesTests {
                 #expect(response.status == .switchingProtocols)
             }
             for (method, path) in [
-                (HTTPMethod.GET, "/v1.51/swarm"),
                 (HTTPMethod.GET, "/v1.51/plugins"),
                 (HTTPMethod.POST, "/v1.51/session"),
             ] {
