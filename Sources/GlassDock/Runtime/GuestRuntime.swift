@@ -98,6 +98,16 @@ private struct GuestImageDetailPayload: Decodable {
     let size: Int64
     let labels: [String: String]?
     let rootFSLayers: [String]?
+    let history: [GuestImageHistoryPayload]?
+}
+
+private struct GuestImageHistoryPayload: Decodable {
+    let created: Date
+    let createdBy: String?
+    let tags: [String]?
+    let size: Int64
+    let comment: String?
+    let emptyLayer: Bool?
 }
 
 private struct GuestImageListPayload: Decodable {
@@ -332,7 +342,7 @@ actor GuestRemovalGate {
 /// snapshots, and lifecycle state.
 actor GuestRuntime: DockerRuntimeRouteBackend {
     private struct Metadata: Sendable {
-        let name: String
+        var name: String
         let command: [String]
         let labels: [String: String]
         let tty: Bool
@@ -446,6 +456,32 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
                 "source": .string(Self.normalizedRegistryReference(source)),
                 "target": .string(Self.normalizedRegistryReference(target)),
             ]
+        )
+    }
+
+    func pushImage(
+        source: String, target: String, platform: String?, auth: DockerRegistryAuth?
+    ) async throws -> DockerRuntimeImage {
+        var payload: [String: JSONValue] = [
+            "source": .string(Self.normalizedRegistryReference(source)),
+            "target": .string(Self.normalizedRegistryReference(target)),
+        ]
+        if let platform, !platform.isEmpty { payload["platform"] = .string(platform) }
+        if let username = auth?.username, !username.isEmpty {
+            payload["username"] = .string(username)
+            if let secret = auth?.password ?? auth?.identitytoken, !secret.isEmpty {
+                payload["secret"] = .string(secret)
+            }
+        }
+        let response = try await request("image.push", payload)
+        let result: GuestImagePayload = try decode(response)
+        return DockerRuntimeImage(reference: result.name, digest: result.digest)
+    }
+
+    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
+        try await streamRequest(
+            method: "image.export",
+            payload: ["references": .array(references.map { .string(Self.normalizedRegistryReference($0)) })]
         )
     }
 
@@ -630,6 +666,47 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         await broadcastContainer("start", id: resolved)
     }
 
+    func pauseContainer(id: String) async throws {
+        let resolved = try await resolve(id)
+        _ = try await request("container.pause", ["id": .string(resolved)])
+        metadata[resolved]?.state = .paused
+        await broadcastContainer("pause", id: resolved)
+    }
+
+    func resumeContainer(id: String) async throws {
+        let resolved = try await resolve(id)
+        _ = try await request("container.resume", ["id": .string(resolved)])
+        metadata[resolved]?.state = .running
+        await broadcastContainer("unpause", id: resolved)
+    }
+
+    func resizeContainer(id: String, width: UInt32, height: UInt32) async throws {
+        let resolved = try await resolve(id)
+        _ = try await request(
+            "container.resize",
+            [
+                "id": .string(resolved),
+                "width": .number(Double(width)),
+                "height": .number(Double(height)),
+            ]
+        )
+    }
+
+    func renameContainer(id: String, name: String) async throws {
+        let resolved = try await resolve(id)
+        guard metadata.values.filter({ $0.name == name }).isEmpty else {
+            throw DockerRuntimeRouteError.conflict(
+                "Conflict. The container name /\(name) is already in use."
+            )
+        }
+        _ = try await request(
+            "container.metadata.update",
+            ["id": .string(resolved), "name": .string(name)]
+        )
+        metadata[resolved]?.name = name
+        await broadcastContainer("rename", id: resolved, extra: ["name": name])
+    }
+
     static func requiresPortPublicationRetry(
         state: EngineContainerState, publicationPending: Bool
     ) -> Bool {
@@ -763,6 +840,26 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         }
     }
 
+    func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
+        let resolved = try await resolve(id)
+        let response = try await request(
+            "container.top",
+            ["id": .string(resolved), "args": .array(psArguments.map(JSONValue.string))]
+        )
+        return try decode(response, as: DockerRuntimeTop.self)
+    }
+
+    func statsContainer(id: String) async throws -> DockerRuntimeStats {
+        let resolved = try await resolve(id)
+        let response = try await request("container.stats", ["id": .string(resolved)])
+        return try decode(response, as: DockerRuntimeStats.self)
+    }
+
+    func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
+        let resolved = try await resolve(id)
+        return try await streamRequest(method: "container.export", payload: ["id": .string(resolved)])
+    }
+
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {
         _ = try await resolve(request.containerID)
         let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -894,6 +991,36 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         }
     }
 
+    private func streamRequest(
+        method: String, payload: [String: JSONValue]
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        let connection = try await engine.readyConnection()
+        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
+            let control = GuestStreamRequestControl()
+            let request = Task {
+                do {
+                    _ = try await connection.request(method: method, payload: .object(payload)) { frame in
+                        guard let data = frame.data else { return }
+                        let result = continuation.yield(data)
+                        if case .dropped = result {
+                            continuation.finish(
+                                throwing: DockerRuntimeRouteError.invalidRequest(
+                                    "guest export client is too slow for the bounded stream buffer"
+                                )
+                            )
+                            control.cancel()
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            control.set(request)
+            continuation.onTermination = { _ in control.cancel() }
+        }
+    }
+
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {
         let resolved = try await resolve(id)
         let response = try await request(
@@ -966,6 +1093,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         let state: EngineContainerState
         switch guest.status {
         case "running": state = .running
+        case "paused": state = .paused
         case "stopped", "exited": state = .exited
         default: state = .created
         }
@@ -1097,6 +1225,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
     private static func state(for status: String) -> EngineContainerState {
         switch status {
         case "running": .running
+        case "paused": .paused
         case "stopped", "exited": .exited
         default: .created
         }
@@ -1127,7 +1256,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
             createdAt: image.createdAt,
             size: image.size,
             labels: image.labels ?? [:],
-            rootFSLayers: image.rootFSLayers ?? []
+            rootFSLayers: image.rootFSLayers ?? [],
+            history: image.history?.map {
+                DockerRuntimeImageHistory(
+                    created: $0.created,
+                    createdBy: $0.createdBy ?? "",
+                    tags: $0.tags ?? [],
+                    size: $0.size,
+                    comment: $0.comment ?? "",
+                    emptyLayer: $0.emptyLayer ?? false
+                )
+            } ?? []
         )
     }
 

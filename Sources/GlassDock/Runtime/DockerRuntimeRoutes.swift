@@ -5,6 +5,7 @@ import Vapor
 enum EngineContainerState: String, Sendable, Equatable {
     case created
     case running
+    case paused
     case exited
 }
 
@@ -20,13 +21,22 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func deleteImage(reference: String, force: Bool) async throws -> DockerRuntimeImageDelete
     func pruneImages(all: Bool) async throws -> DockerRuntimeImageDelete
     func tagImage(source: String, target: String) async throws
+    func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage
+    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error>
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer
     func startContainer(id: String) async throws
+    func pauseContainer(id: String) async throws
+    func resumeContainer(id: String) async throws
+    func resizeContainer(id: String, width: UInt32, height: UInt32) async throws
+    func renameContainer(id: String, name: String) async throws
     func killContainer(id: String, signal: UInt32) async throws
     func waitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer]
+    func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop
+    func statsContainer(id: String) async throws -> DockerRuntimeStats
+    func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error>
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String
     func startExec(id: String, detach: Bool, tty: Bool) async throws -> DockerRuntimeProcessOutput
     func streamExec(id: String, tty: Bool) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
@@ -51,7 +61,35 @@ struct DockerRegistryAuth: Codable, Sendable, Equatable {
 }
 
 extension DockerRuntimeRouteBackend {
+    func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage {
+        throw DockerRuntimeRouteError.invalidRequest("image push is not supported")
+    }
+    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
+        throw DockerRuntimeRouteError.invalidRequest("image export is not supported")
+    }
+    func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
+        throw DockerRuntimeRouteError.invalidRequest("container top is not supported")
+    }
+    func statsContainer(id: String) async throws -> DockerRuntimeStats {
+        throw DockerRuntimeRouteError.invalidRequest("container stats are not supported")
+    }
+    func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
+        throw DockerRuntimeRouteError.invalidRequest("container export is not supported")
+    }
+
     func containerAutoRemove(id: String) async throws -> Bool { false }
+    func pauseContainer(id: String) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("container pause is not supported")
+    }
+    func resumeContainer(id: String) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("container resume is not supported")
+    }
+    func resizeContainer(id: String, width: UInt32, height: UInt32) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("container resize is not supported")
+    }
+    func renameContainer(id: String, name: String) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("container rename is not supported")
+    }
     func killContainer(id: String, signal: UInt32) async throws {
         throw DockerRuntimeRouteError.invalidRequest("container signals are not supported")
     }
@@ -97,11 +135,13 @@ struct DockerRuntimeImage: Sendable, Equatable {
     let size: Int64
     let labels: [String: String]
     let rootFSLayers: [String]
+    let history: [DockerRuntimeImageHistory]
 
     init(
         reference: String, digest: String, references: [String] = [],
         createdAt: Date = Date(timeIntervalSince1970: 0), size: Int64 = 0,
-        labels: [String: String] = [:], rootFSLayers: [String] = []
+        labels: [String: String] = [:], rootFSLayers: [String] = [],
+        history: [DockerRuntimeImageHistory] = []
     ) {
         self.reference = reference
         self.digest = digest
@@ -110,7 +150,78 @@ struct DockerRuntimeImage: Sendable, Equatable {
         self.size = size
         self.labels = labels
         self.rootFSLayers = rootFSLayers
+        self.history = history
     }
+}
+
+struct DockerRuntimeImageHistory: Sendable, Equatable {
+    let created: Date
+    let createdBy: String
+    let tags: [String]
+    let size: Int64
+    let comment: String
+    let emptyLayer: Bool
+}
+
+struct DockerRuntimeTop: Sendable, Equatable, Codable {
+    let Titles: [String]
+    let Processes: [[String]]
+}
+
+struct DockerRuntimeStats: Sendable, Equatable, Codable {
+    struct CPUUsage: Sendable, Equatable, Codable {
+        let total_usage: UInt64
+        let usage_in_kernelmode: UInt64
+        let usage_in_usermode: UInt64
+    }
+    struct ThrottlingData: Sendable, Equatable, Codable {
+        let throttled_periods: UInt64
+        let throttled_time: UInt64
+        let throttling_periods: UInt64
+    }
+    struct CPUStats: Sendable, Equatable, Codable {
+        let cpu_usage: CPUUsage
+        let system_cpu_usage: UInt64
+        let online_cpus: Int
+        let throttling_data: ThrottlingData
+    }
+    struct MemoryStats: Sendable, Equatable, Codable {
+        let usage: UInt64
+        let limit: UInt64
+        let stats: [String: UInt64]?
+    }
+    struct NetworkStats: Sendable, Equatable, Codable {
+        let rx_bytes: UInt64
+        let rx_packets: UInt64
+        let rx_errors: UInt64
+        let rx_dropped: UInt64
+        let tx_bytes: UInt64
+        let tx_packets: UInt64
+        let tx_errors: UInt64
+        let tx_dropped: UInt64
+    }
+    struct BlkioStats: Sendable, Equatable, Codable {
+        struct Entry: Sendable, Equatable, Codable {
+            let major: UInt64
+            let minor: UInt64
+            let op: String
+            let value: UInt64
+        }
+        let io_service_bytes_recursive: [Entry]?
+    }
+    struct PidsStats: Sendable, Equatable, Codable {
+        let current: UInt64?
+    }
+
+    let id: String
+    let read: String
+    let preread: String
+    let cpu_stats: CPUStats
+    let precpu_stats: CPUStats
+    let memory_stats: MemoryStats
+    let networks: [String: NetworkStats]?
+    let blkio_stats: BlkioStats
+    let pids_stats: PidsStats
 }
 
 struct DockerRuntimeImageDelete: Sendable, Equatable {
@@ -275,16 +386,29 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.DELETE, pattern: "/images/{name:.*}", use: deleteImage)
         try routes.registerVersionedRoute(.POST, pattern: "/images/prune", use: pruneImages)
         try routes.registerVersionedRoute(.POST, pattern: "/images/{name:.*}/tag", use: tagImage)
+        try routes.registerVersionedRoute(.GET, pattern: "/images/get", use: exportImages)
+        try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/get", use: exportNamedImage)
+        try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/history", use: imageHistory)
+        try routes.registerVersionedRoute(.POST, pattern: "/images/{name:.*}/push", use: pushImage)
         try routes.registerVersionedRoute(.GET, pattern: "/info", use: info)
+        try routes.registerVersionedRoute(.GET, pattern: "/system/df", use: systemDataUsage)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: pruneContainers)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/start", use: startContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/pause", use: pauseContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/unpause", use: unpauseContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/rename", use: renameContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/resize", use: resizeContainer)
+        try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/restart", use: restartContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/stop", use: stopContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/kill", use: killContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/wait", use: waitContainer)
         try routes.registerVersionedRoute(.DELETE, pattern: "/containers/{id:.*}", use: deleteContainer)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/json", use: inspectContainer)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/json", use: listContainers)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/top", use: topContainer)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/stats", use: statsContainer)
+        try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/export", use: exportContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/exec", use: createExec)
         try routes.registerVersionedRoute(.POST, pattern: "/exec/{id:.*}/start", use: startExec)
         try routes.registerVersionedRoute(.GET, pattern: "/exec/{id:.*}/json", use: inspectExec)
@@ -428,6 +552,100 @@ struct DockerRuntimeRoutes: RouteCollection {
         return Response(status: .created)
     }
 
+    private func pushImage(_ req: Request) async throws -> Response {
+        let source = try requiredParameter("name", request: req)
+        let tag = req.query[String.self, at: "tag"]
+        let target = Self.imageReference(fromImage: source, tag: tag)
+        let auth = try Self.registryAuth(req.headers.first(name: "X-Registry-Auth"))
+        let image = try await call {
+            try await backend.pushImage(
+                source: source,
+                target: target,
+                platform: req.query[String.self, at: "platform"],
+                auth: auth
+            )
+        }
+        struct PushProgress: Encodable {
+            let status: String
+            let id: String
+        }
+        var body = try JSONEncoder().encode(PushProgress(status: "Pushed (target)", id: image.digest))
+        body.append(0x0A)
+        let response = Response(status: .ok, body: .init(data: body))
+        response.headers.contentType = .json
+        return response
+    }
+
+    private func imageHistory(_ req: Request) async throws -> Response {
+        let reference = try requiredParameter("name", request: req)
+        let image = try await call { try await backend.inspectImage(reference: reference) }
+        let tags = image.references.filter { !$0.contains("@sha256:") }
+        let history: [ImageHistoryResponseItem]
+        if image.history.isEmpty {
+            history = [
+                ImageHistoryResponseItem(
+                    Id: image.digest,
+                    Created: Int64(image.createdAt.timeIntervalSince1970),
+                    CreatedBy: "",
+                    Tags: tags,
+                    Size: image.size,
+                    Comment: ""
+                )
+            ]
+        } else {
+            var layerIndex = 0
+            history = image.history.reversed().map { entry in
+                let id: String
+                let size: Int64
+                if entry.emptyLayer {
+                    id = "<missing>"
+                    size = 0
+                } else if layerIndex < image.rootFSLayers.count {
+                    id = image.rootFSLayers[image.rootFSLayers.count - layerIndex - 1]
+                    size = entry.size
+                    layerIndex += 1
+                } else {
+                    id = "<missing>"
+                    size = entry.size
+                }
+                return ImageHistoryResponseItem(
+                    Id: id,
+                    Created: Int64(entry.created.timeIntervalSince1970),
+                    CreatedBy: entry.createdBy,
+                    Tags: layerIndex == 1 ? tags : entry.tags,
+                    Size: size,
+                    Comment: entry.comment
+                )
+            }
+        }
+        return try jsonResponse(.ok, history)
+    }
+
+    private func exportImages(_ req: Request) async throws -> Response {
+        let references = try Self.imageExportReferences(req.query[String.self, at: "names"])
+        return try await imageExportResponse(references: references)
+    }
+
+    private func exportNamedImage(_ req: Request) async throws -> Response {
+        let reference = try requiredParameter("name", request: req)
+        return try await imageExportResponse(references: [reference])
+    }
+
+    private func imageExportResponse(references: [String]) async throws -> Response {
+        let stream = try await call { try await backend.exportImages(references: references) }
+        var headers = HTTPHeaders()
+        headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(managedAsyncStream: { writer in
+                for try await data in stream {
+                    try await writer.writeBuffer(ByteBuffer(data: data))
+                }
+            })
+        )
+    }
+
     private func createContainer(_ req: Request) async throws -> Response {
         let body: CreateRequest
         do {
@@ -477,6 +695,75 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func startContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
+        try await call { try await backend.startContainer(id: id) }
+        return Response(status: .noContent)
+    }
+
+    private func pauseContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        try await call { try await backend.pauseContainer(id: id) }
+        return Response(status: .noContent)
+    }
+
+    private func unpauseContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        try await call { try await backend.resumeContainer(id: id) }
+        return Response(status: .noContent)
+    }
+
+    private func renameContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let body = try req.content.decode(RenameRequest.self)
+        let name = body.Name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !name.isEmpty else { throw Abort(.badRequest, reason: "Container name cannot be empty") }
+        guard DockerContainerMetadataStore.isValid(name) else {
+            throw Abort(.badRequest, reason: "Invalid container name: \(body.Name)")
+        }
+        try await call { try await backend.renameContainer(id: id, name: name) }
+        return Response(status: .noContent)
+    }
+
+    private func resizeContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        guard let width = req.query[UInt32.self, at: "w"],
+            let height = req.query[UInt32.self, at: "h"], width > 0, height > 0
+        else {
+            throw Abort(.badRequest, reason: "Both w and h must be positive integers")
+        }
+        try await call { try await backend.resizeContainer(id: id, width: width, height: height) }
+        return Response(status: .noContent)
+    }
+
+    private func restartContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let timeout = max(0, req.query[Int.self, at: "t"] ?? 10)
+        let container = try await call { try await backend.inspectContainer(id: id) }
+        if container.state == .running || container.state == .paused {
+            if container.state == .paused {
+                try await call { try await backend.resumeContainer(id: id) }
+            }
+            let signalText = req.query[String.self, at: "signal"] ?? "TERM"
+            guard let signal = DockerSignal.number(signalText) else {
+                throw Abort(.badRequest, reason: "Invalid restart signal: \(signalText)")
+            }
+            try await call { try await backend.killContainer(id: id, signal: signal) }
+            let wait = Task { try await backend.waitContainer(id: id, condition: .notRunning) }
+            do {
+                _ = try await withThrowingTaskGroup(of: Int32.self) { group in
+                    group.addTask { try await wait.value }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(timeout))
+                        throw DockerStopTimeout()
+                    }
+                    defer { group.cancelAll() }
+                    guard let result = try await group.next() else { throw DockerStopTimeout() }
+                    return result
+                }
+            } catch is DockerStopTimeout {
+                try await call { try await backend.killContainer(id: id, signal: 9) }
+                _ = try await wait.value
+            }
+        }
         try await call { try await backend.startContainer(id: id) }
         return Response(status: .noContent)
     }
@@ -580,6 +867,56 @@ struct DockerRuntimeRoutes: RouteCollection {
             containers = containers.filter { Self.matches($0, filters: filters) }
         }
         return try jsonResponse(.ok, containers.map(ListResponse.init))
+    }
+
+    private func topContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let arguments =
+            req.query[String.self, at: "ps_args"]?
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .map(String.init) ?? []
+        let top = try await call {
+            try await backend.topContainer(id: id, psArguments: arguments)
+        }
+        return try jsonResponse(.ok, top)
+    }
+
+    private func statsContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let stream = req.query[String.self, at: "stream"].map(Self.mobyBool) ?? true
+        let backend = self.backend
+        var headers = HTTPHeaders()
+        headers.contentType = .json
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(managedAsyncStream: { writer in
+                repeat {
+                    let stats = try await backend.statsContainer(id: id)
+                    var data = try JSONEncoder().encode(stats)
+                    if stream { data.append(0x0A) }
+                    try await writer.writeBuffer(ByteBuffer(data: data))
+                    if !stream { break }
+                    try await Task.sleep(for: .seconds(1))
+                } while !Task.isCancelled
+            })
+        )
+    }
+
+    private func exportContainer(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let stream = try await call { try await backend.exportContainer(id: id) }
+        var headers = HTTPHeaders()
+        headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(managedAsyncStream: { writer in
+                for try await data in stream {
+                    try await writer.writeBuffer(ByteBuffer(data: data))
+                }
+            })
+        )
     }
 
     private func createExec(_ req: Request) async throws -> Response {
@@ -686,6 +1023,12 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.notFound, reason: "Exec instance not found: \(id)")
         }
         return try jsonResponse(.ok, ExecInspectResponse(id: id, entry: entry))
+    }
+
+    private func systemDataUsage(_ req: Request) async throws -> Response {
+        let images = try await call { try await backend.listImages() }
+        let containers = try await call { try await backend.listContainers(showAll: true) }
+        return try jsonResponse(.ok, SystemDataUsageResponse(images: images, containers: containers))
     }
 
     private func logs(_ req: Request) async throws -> Response {
@@ -864,6 +1207,13 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard let tag, !tag.isEmpty, !fromImage.contains("@") else { return fromImage }
         if tag.hasPrefix("sha256:") { return "\(fromImage)@\(tag)" }
         return "\(fromImage):\(tag)"
+    }
+
+    private static func imageExportReferences(_ raw: String?) throws -> [String] {
+        guard let raw else { throw Abort(.badRequest, reason: "names is required") }
+        let references = raw.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        guard !references.isEmpty else { throw Abort(.badRequest, reason: "names is required") }
+        return references
     }
 
     private static func validateCreateOptions(_ data: Data) throws {
@@ -1098,6 +1448,15 @@ private struct ImagePruneResponse: Encodable {
     let SpaceReclaimed: Int64
 }
 
+private struct ImageHistoryResponseItem: Encodable {
+    let Id: String
+    let Created: Int64
+    let CreatedBy: String
+    let Tags: [String]
+    let Size: Int64
+    let Comment: String
+}
+
 private struct ContainerPruneResponse: Encodable {
     let ContainersDeleted: [String]
     let SpaceReclaimed: Int64
@@ -1156,6 +1515,75 @@ private struct ImageInspectResponse: Encodable {
     }
 }
 
+private struct SystemDataUsageResponse: Encodable {
+    struct ImageUsage: Encodable {
+        let Id: String
+        let ParentId = ""
+        let RepoTags: [String]
+        let RepoDigests: [String]
+        let Created: Int64
+        let Size: Int64
+        let SharedSize: Int64 = -1
+        let VirtualSize: Int64
+        let Labels: [String: String]
+        let Containers: Int64
+
+        init(_ image: DockerRuntimeImage, containerCount: Int64) {
+            Id = image.digest
+            RepoTags = image.references.filter { !$0.contains("@sha256:") }
+            RepoDigests = image.references.filter { $0.contains("@sha256:") }
+            Created = Int64(image.createdAt.timeIntervalSince1970)
+            Size = image.size
+            VirtualSize = image.size
+            Labels = image.labels
+            Containers = containerCount
+        }
+    }
+
+    struct ContainerUsage: Encodable {
+        let Id: String
+        let Names: [String]
+        let Image: String
+        let ImageID: String
+        let Command: String
+        let Created: Int64
+        let SizeRw: Int64 = -1
+        let SizeRootFs: Int64 = -1
+        let Labels: [String: String]
+        let State: String
+        let Status: String
+
+        init(_ container: DockerRuntimeContainer) {
+            Id = container.id
+            Names = [container.name.hasPrefix("/") ? container.name : "/\(container.name)"]
+            Image = container.image
+            ImageID = container.image
+            Command = container.command.joined(separator: " ")
+            Created = Int64(container.createdAt.timeIntervalSince1970)
+            Labels = container.labels
+            State = container.state.rawValue
+            Status = container.state.rawValue
+        }
+    }
+
+    let LayersSize: Int64
+    let Images: [ImageUsage]
+    let Containers: [ContainerUsage]
+    let Volumes: [String] = []
+    let BuildCache: [String] = []
+
+    init(images: [DockerRuntimeImage], containers: [DockerRuntimeContainer]) {
+        let counts = containers.reduce(into: [String: Int64]()) { counts, container in
+            counts[container.image, default: 0] += 1
+        }
+        LayersSize = images.reduce(into: Int64(0)) { total, image in
+            total += max(image.size, 0)
+        }
+        Images = images.map { ImageUsage($0, containerCount: counts[$0.reference, default: -1]) }
+        Containers = containers.map(ContainerUsage.init)
+    }
+}
+
 private struct CreateRequest: Content {
     let Image: String
     let Cmd: [String]?
@@ -1167,6 +1595,10 @@ private struct CreateRequest: Content {
     let Labels: [String: String]?
     let Tty: Bool?
     let HostConfig: CreateHostConfig?
+}
+
+private struct RenameRequest: Content {
+    let Name: String
 }
 
 private struct CreateHostConfig: Content {

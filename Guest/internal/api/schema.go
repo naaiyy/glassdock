@@ -14,13 +14,21 @@ const (
 	MethodImageDelete             = "image.delete"
 	MethodImagePrune              = "image.prune"
 	MethodImageTag                = "image.tag"
+	MethodImagePush               = "image.push"
+	MethodImageExport             = "image.export"
 	MethodContainerList           = "container.list"
 	MethodContainerInspect        = "container.inspect"
 	MethodContainerLogs           = "container.logs"
+	MethodContainerTop            = "container.top"
+	MethodContainerStats          = "container.stats"
+	MethodContainerExport         = "container.export"
 	MethodContainerCreate         = "container.create"
 	MethodContainerStart          = "container.start"
 	MethodContainerWait           = "container.wait"
 	MethodContainerKill           = "container.kill"
+	MethodContainerPause          = "container.pause"
+	MethodContainerResume         = "container.resume"
+	MethodContainerResize         = "container.resize"
 	MethodContainerDelete         = "container.delete"
 	MethodContainerExec           = "container.exec"
 	MethodContainerAttach         = "container.attach"
@@ -53,6 +61,16 @@ type ImageTagRequest struct {
 	Source string `json:"source"`
 	Target string `json:"target"`
 }
+type ImagePushRequest struct {
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	Username string `json:"username,omitempty"`
+	Secret   string `json:"secret,omitempty"`
+	Platform string `json:"platform,omitempty"`
+}
+type ImageExportRequest struct {
+	References []string `json:"references"`
+}
 type Image struct {
 	ID           string            `json:"id"`
 	Digest       string            `json:"digest"`
@@ -61,6 +79,15 @@ type Image struct {
 	Size         int64             `json:"size"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	RootFSLayers []string          `json:"rootfsLayers,omitempty"`
+	History      []ImageHistory    `json:"history,omitempty"`
+}
+type ImageHistory struct {
+	Created   time.Time `json:"created"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+	Tags      []string  `json:"tags,omitempty"`
+	Size      int64     `json:"size"`
+	Comment   string    `json:"comment,omitempty"`
+	Empty     bool      `json:"emptyLayer,omitempty"`
 }
 type ImageListResponse struct {
 	Images []Image `json:"images"`
@@ -92,6 +119,11 @@ type PublishedPort struct {
 type ContainerKillRequest struct {
 	ID     string `json:"id"`
 	Signal uint32 `json:"signal,omitempty"`
+}
+type ContainerResizeRequest struct {
+	ID     string `json:"id"`
+	Width  uint32 `json:"width"`
+	Height uint32 `json:"height"`
 }
 type ContainerCreateRequest struct {
 	ID             string            `json:"id"`
@@ -140,7 +172,8 @@ type ContainerMetadata struct {
 }
 type ContainerMetadataUpdateRequest struct {
 	ID           string              `json:"id"`
-	PortBindings []DockerPortBinding `json:"portBindings"`
+	Name         string              `json:"name,omitempty"`
+	PortBindings []DockerPortBinding `json:"portBindings,omitempty"`
 }
 
 // Mount maps directly to an OCI mount. Supported types are bind, tmpfs,
@@ -173,6 +206,71 @@ type ContainerLogsResponse struct {
 	Stdout    []byte `json:"stdout,omitempty"`
 	Stderr    []byte `json:"stderr,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+}
+type ContainerTopRequest struct {
+	ID   string   `json:"id"`
+	Args []string `json:"args,omitempty"`
+}
+type ContainerTopResponse struct {
+	Titles    []string   `json:"titles"`
+	Processes [][]string `json:"processes"`
+}
+type ContainerStatsRequest struct {
+	ID string `json:"id"`
+}
+type ContainerStatsResponse struct {
+	ID          string              `json:"id"`
+	Read        time.Time           `json:"read"`
+	PreRead     time.Time           `json:"preread"`
+	CPUStats    CPUStats            `json:"cpu_stats"`
+	PreCPUStats CPUStats            `json:"precpu_stats"`
+	MemoryStats MemoryStats         `json:"memory_stats"`
+	Networks    map[string]NetStats `json:"networks,omitempty"`
+	BlkioStats  BlkioStats          `json:"blkio_stats"`
+	PidsStats   PidsStats           `json:"pids_stats"`
+}
+type CPUStats struct {
+	CPUUsage       CPUUsage       `json:"cpu_usage"`
+	SystemCPUUsage uint64         `json:"system_cpu_usage"`
+	OnlineCPUs     int            `json:"online_cpus"`
+	ThrottlingData ThrottlingData `json:"throttling_data"`
+}
+type CPUUsage struct {
+	TotalUsage   uint64 `json:"total_usage"`
+	InKernelMode uint64 `json:"usage_in_kernelmode"`
+	InUserMode   uint64 `json:"usage_in_usermode"`
+}
+type ThrottlingData struct {
+	ThrottledPeriods  uint64 `json:"throttled_periods"`
+	ThrottledTime     uint64 `json:"throttled_time"`
+	ThrottlingPeriods uint64 `json:"throttling_periods"`
+}
+type MemoryStats struct {
+	Usage uint64            `json:"usage,omitempty"`
+	Limit uint64            `json:"limit,omitempty"`
+	Stats map[string]uint64 `json:"stats,omitempty"`
+}
+type NetStats struct {
+	RXBytes   uint64 `json:"rx_bytes"`
+	RXPackets uint64 `json:"rx_packets"`
+	RXErrors  uint64 `json:"rx_errors"`
+	RXDropped uint64 `json:"rx_dropped"`
+	TXBytes   uint64 `json:"tx_bytes"`
+	TXPackets uint64 `json:"tx_packets"`
+	TXErrors  uint64 `json:"tx_errors"`
+	TXDropped uint64 `json:"tx_dropped"`
+}
+type BlkioStats struct {
+	IOServiceBytesRecursive []BlkioEntry `json:"io_service_bytes_recursive,omitempty"`
+}
+type BlkioEntry struct {
+	Major uint64 `json:"major"`
+	Minor uint64 `json:"minor"`
+	Op    string `json:"op"`
+	Value uint64 `json:"value"`
+}
+type PidsStats struct {
+	Current uint64 `json:"current,omitempty"`
 }
 type ContainerExecRequest struct {
 	ID       string   `json:"id"`

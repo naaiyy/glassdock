@@ -72,6 +72,46 @@ routes:
     owner: DockerRuntimeRoutes
     note: Starts a persistent guest container and republishes ports.
   - method: POST
+    path: /containers/{id}/pause
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Pauses a running guest task through containerd.
+  - method: POST
+    path: /containers/{id}/unpause
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Resumes a paused guest task through containerd.
+  - method: POST
+    path: /containers/{id}/rename
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Persists the Docker-facing container name in guest metadata.
+  - method: POST
+    path: /containers/{id}/resize
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Resizes a running TTY container through containerd.
+  - method: POST
+    path: /containers/{id}/restart
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Stops and starts a guest container with Docker timeout and signal handling.
+  - method: GET
+    path: /containers/{id}/top
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports guest task PIDs and command names from the container process namespace.
+  - method: GET
+    path: /containers/{id}/stats
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports guest process, memory, CPU, network, and PID samples; cgroup details vary by guest runtime.
+  - method: GET
+    path: /containers/{id}/export
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Streams a tar archive of the guest container root filesystem.
+  - method: POST
     path: /containers/{id}/stop
     support: partial
     owner: DockerRuntimeRoutes
@@ -132,6 +172,26 @@ routes:
     owner: DockerRuntimeRoutes
     note: Adds a guest image reference.
   - method: GET
+    path: /images/get
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Exports one or more guest images as an OCI/containerd tar archive.
+  - method: GET
+    path: /images/{name}/get
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Exports one guest image as an OCI/containerd tar archive.
+  - method: GET
+    path: /images/{name}/history
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports history from the guest image OCI configuration and layer metadata.
+  - method: POST
+    path: /images/{name}/push
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Pushes a guest image through containerd with optional registry credentials and platform selection.
+  - method: GET
     path: /distribution/{name}/json
     support: implemented
     owner: DistributionJsonRoute
@@ -141,6 +201,11 @@ routes:
     support: partial
     owner: DockerRuntimeRoutes
     note: Reports live guest counts and host/runtime metadata with capability warnings.
+  - method: GET
+    path: /system/df
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports guest image and container accounting; volume and build-cache accounting are empty.
   - method: GET
     path: /version
     support: implemented

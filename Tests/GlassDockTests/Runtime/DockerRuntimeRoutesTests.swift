@@ -77,6 +77,42 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastPruneAll == true)
     }
 
+    @Test("image export, history, and push use Docker response shapes")
+    func imageTransferRoutes() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .GET,
+                "/v1.51/images/get?names=example.test%2Ffixture:latest"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.contentType == HTTPMediaType(type: "application", subType: "x-tar"))
+                #expect(Data(buffer: response.body) == Data("image-tar".utf8))
+            }
+            try await app.testing().test(
+                .GET,
+                "/v1.51/images/example.test%2Ffixture:latest/history"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let history = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(history?.first?["Id"] as? String == "sha256:layer")
+                #expect(history?.first?["Tags"] as? [String] == ["example.test/fixture:latest"])
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/images/example.test%2Ffixture/push?tag=v2&platform=linux%2Farm64",
+                headers: ["X-Registry-Auth": Data(#"{"username":"user","password":"secret"}"#.utf8).base64EncodedString()]
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.body.string.contains("Pushed"))
+            }
+        }
+        #expect(await backend.lastExportReferences == ["example.test/fixture:latest"])
+        #expect(await backend.lastPush?.source == "example.test/fixture")
+        #expect(await backend.lastPush?.target == "example.test/fixture:v2")
+        #expect(await backend.lastPush?.platform == "linux/arm64")
+    }
+
     @Test("container lifecycle maps Docker create fields and status codes")
     func containerLifecycle() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -270,9 +306,6 @@ struct DockerRuntimeRoutesTests {
                 #expect(value?["Images"] as? Int == 1)
                 #expect(value?["OSType"] as? String == "linux")
             }
-            try await app.testing().test(.POST, "/v1.51/containers/container-1/restart") { response async in
-                #expect(response.status == .notImplemented)
-            }
             try await app.testing().test(.HEAD, "/v1.51/containers/container-1/archive") { response async in
                 #expect(response.status == .notImplemented)
             }
@@ -283,14 +316,81 @@ struct DockerRuntimeRoutesTests {
                 (HTTPMethod.GET, "/v1.51/swarm"),
                 (HTTPMethod.GET, "/v1.51/plugins"),
                 (HTTPMethod.POST, "/v1.51/session"),
-                (HTTPMethod.GET, "/v1.51/networks"),
-                (HTTPMethod.GET, "/v1.51/system/df"),
             ] {
                 try await app.testing().test(method, path) { response async in
                     #expect(response.status == .notImplemented)
                 }
             }
+            try await app.testing().test(.GET, "/v1.51/system/df") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Images"] is [[String: Any]])
+                #expect(value?["Containers"] is [[String: Any]])
+            }
         }
+    }
+
+    @Test("container state and metadata operations use Docker response statuses")
+    func containerStateOperations() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/container-1/rename",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Name":"renamed"}"#)
+            ) { response async in
+                #expect(response.status == .noContent)
+            }
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/pause") { response async in
+                #expect(response.status == .noContent)
+            }
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/unpause") { response async in
+                #expect(response.status == .noContent)
+            }
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/resize?w=120&h=40") { response async in
+                #expect(response.status == .noContent)
+            }
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/restart?t=0") { response async in
+                #expect(response.status == .noContent)
+            }
+        }
+        #expect(await backend.lastRename == "renamed")
+        let resize = await backend.lastResize
+        #expect(resize?.0 == 120)
+        #expect(resize?.1 == 40)
+    }
+
+    @Test("top, non-streaming stats, and export map guest data")
+    func processAndFilesystemRoutes() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/top?ps_args=-ef"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Titles"] as? [String] == ["PID", "CMD"])
+                #expect(value?["Processes"] as? [[String]] == [["42", "/bin/sh"]])
+            }
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/stats?stream=0"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["id"] as? String == "container-1")
+                #expect(value?["pids_stats"] is [String: Any])
+                #expect(!response.body.string.hasSuffix("\n"))
+            }
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/export") { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.contentType == HTTPMediaType(type: "application", subType: "octet-stream"))
+                #expect(Data(buffer: response.body) == Data("rootfs-tar".utf8))
+            }
+        }
+        #expect(await backend.lastTopArguments == ["-ef"])
     }
 
     @Test("container prune removes stopped containers and reports Docker fields")
@@ -440,6 +540,11 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         let force: Bool
         let volumes: Bool
     }
+    struct Push: Equatable {
+        let source: String
+        let target: String
+        let platform: String?
+    }
 
     private(set) var lastPull: Pull?
     private(set) var lastCreate: DockerRuntimeContainerCreate?
@@ -450,8 +555,14 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastImageDeleteForce: Bool?
     private(set) var lastTagTarget: String?
     private(set) var lastPruneAll: Bool?
+    private(set) var lastExportReferences: [String]?
+    private(set) var lastPush: Push?
+    private(set) var lastTopArguments: [String]?
+    private(set) var lastRename: String?
+    private(set) var lastResize: (UInt32, UInt32)?
     private(set) var startCount = 0
     private var running = false
+    private var paused = false
     private let logOutput: String?
 
     init(logOutput: String? = nil) {
@@ -471,7 +582,21 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
 
     func inspectImage(reference: String) async throws -> DockerRuntimeImage {
         guard reference != "missing" else { throw DockerRuntimeRouteError.notFound("No such image: missing") }
-        return DockerRuntimeImage(reference: reference, digest: "sha256:abc")
+        return DockerRuntimeImage(
+            reference: reference,
+            digest: "sha256:abc",
+            rootFSLayers: ["sha256:layer"],
+            history: [
+                DockerRuntimeImageHistory(
+                    created: Date(timeIntervalSince1970: 1_700_000_000),
+                    createdBy: "/bin/sh -c fixture",
+                    tags: [],
+                    size: 12,
+                    comment: "",
+                    emptyLayer: false
+                )
+            ]
+        )
     }
 
     func deleteImage(reference: String, force: Bool) async throws -> DockerRuntimeImageDelete {
@@ -486,6 +611,21 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
 
     func tagImage(source: String, target: String) async throws { lastTagTarget = target }
 
+    func pushImage(
+        source: String, target: String, platform: String?, auth: DockerRegistryAuth?
+    ) async throws -> DockerRuntimeImage {
+        lastPush = Push(source: source, target: target, platform: platform)
+        return DockerRuntimeImage(reference: target, digest: "sha256:pushed")
+    }
+
+    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
+        lastExportReferences = references
+        return AsyncThrowingStream { continuation in
+            continuation.yield(Data("image-tar".utf8))
+            continuation.finish()
+        }
+    }
+
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
         lastCreate = request
         return container()
@@ -494,6 +634,30 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     func startContainer(id: String) async throws {
         startCount += 1
         running = true
+        paused = false
+    }
+
+    func pauseContainer(id: String) async throws {
+        paused = true
+        running = false
+    }
+
+    func resumeContainer(id: String) async throws {
+        paused = false
+        running = true
+    }
+
+    func resizeContainer(id: String, width: UInt32, height: UInt32) async throws {
+        lastResize = (width, height)
+    }
+
+    func renameContainer(id: String, name: String) async throws {
+        lastRename = name
+    }
+
+    func killContainer(id: String, signal: UInt32) async throws {
+        running = false
+        paused = false
     }
 
     func waitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32 {
@@ -513,6 +677,44 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer] {
         lastListShowAll = showAll
         return [container()]
+    }
+
+    func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
+        lastTopArguments = psArguments
+        return DockerRuntimeTop(Titles: ["PID", "CMD"], Processes: [["42", "/bin/sh"]])
+    }
+
+    func statsContainer(id: String) async throws -> DockerRuntimeStats {
+        let cpuUsage = DockerRuntimeStats.CPUUsage(
+            total_usage: 10, usage_in_kernelmode: 4, usage_in_usermode: 6
+        )
+        let throttling = DockerRuntimeStats.ThrottlingData(
+            throttled_periods: 0, throttled_time: 0, throttling_periods: 0
+        )
+        let cpu = DockerRuntimeStats.CPUStats(
+            cpu_usage: cpuUsage,
+            system_cpu_usage: 100,
+            online_cpus: 1,
+            throttling_data: throttling
+        )
+        return DockerRuntimeStats(
+            id: id,
+            read: "2026-08-16T00:00:00Z",
+            preread: "2026-08-15T23:59:59Z",
+            cpu_stats: cpu,
+            precpu_stats: cpu,
+            memory_stats: .init(usage: 1, limit: 2, stats: nil),
+            networks: nil,
+            blkio_stats: .init(io_service_bytes_recursive: nil),
+            pids_stats: .init(current: 1)
+        )
+    }
+
+    func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(Data("rootfs-tar".utf8))
+            continuation.finish()
+        }
     }
 
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {
@@ -539,7 +741,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             image: "fixture@sha256:abc",
             command: ["/bin/true"],
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-            state: running ? .running : .created,
+            state: paused ? .paused : (running ? .running : .created),
             exitCode: nil,
             labels: ["test": "true"],
             tty: false,

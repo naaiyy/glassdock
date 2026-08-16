@@ -1,14 +1,19 @@
 package backend
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +24,8 @@ import (
 	containerrecords "github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/content"
 	containerimages "github.com/containerd/containerd/v2/core/images"
+	containerarchive "github.com/containerd/containerd/v2/core/images/archive"
+	containermount "github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -66,6 +73,8 @@ type Backend struct {
 	networks      sync.Map // map[string]*networkPreparation
 	createMu      sync.Mutex
 	metadataMu    sync.Mutex
+	statsMu       sync.Mutex
+	lastStats     map[string]api.ContainerStatsResponse
 	network       *NetworkManager
 	taskCreates   chan struct{}
 	cleanups      orderedCleanupBarrier
@@ -333,6 +342,52 @@ func (b *Backend) Version(ctx context.Context) (string, error) {
 	return v.Version, nil
 }
 
+func (b *Backend) Push(ctx context.Context, request api.ImagePushRequest) (api.ImageResponse, error) {
+	if request.Source == "" || request.Target == "" {
+		return api.ImageResponse{}, errors.New("source and target image references are required")
+	}
+	ctx = b.ctx(ctx)
+	image, err := b.Image(ctx, request.Source)
+	if err != nil {
+		return api.ImageResponse{}, err
+	}
+	source, err := b.client.GetImage(ctx, image.References[0])
+	if err != nil {
+		return api.ImageResponse{}, err
+	}
+	resolverOptions := docker.ResolverOptions{}
+	if request.Username != "" {
+		resolverOptions.Credentials = func(_ string) (string, string, error) {
+			return request.Username, request.Secret, nil
+		}
+	}
+	pushOptions := []containerd.RemoteOpt{
+		containerd.WithResolver(docker.NewResolver(resolverOptions)),
+	}
+	if request.Platform != "" {
+		pushOptions = append(pushOptions, containerd.WithPlatform(request.Platform))
+	}
+	if err := b.client.Push(ctx, request.Target, source.Target(), pushOptions...); err != nil {
+		return api.ImageResponse{}, err
+	}
+	return api.ImageResponse{Name: request.Target, Digest: image.ID}, nil
+}
+
+func (b *Backend) ExportImages(ctx context.Context, request api.ImageExportRequest, stream StreamFunc) error {
+	if len(request.References) == 0 {
+		return errors.New("at least one image reference is required")
+	}
+	ctx = b.ctx(ctx)
+	options := make([]containerarchive.ExportOpt, 0, len(request.References))
+	for _, reference := range request.References {
+		if _, err := b.Image(ctx, reference); err != nil {
+			return err
+		}
+		options = append(options, containerarchive.WithImage(b.client.ImageService(), reference))
+	}
+	return b.client.Export(ctx, streamWriter{stream: "stdout", send: stream}, options...)
+}
+
 func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.ImageResponse, error) {
 	if request.Reference == "" {
 		return api.ImageResponse{}, errors.New("image reference is required")
@@ -412,7 +467,18 @@ func (b *Backend) Images(ctx context.Context) ([]api.Image, error) {
 			for _, layer := range spec.RootFS.DiffIDs {
 				layers = append(layers, layer.String())
 			}
-			item = &api.Image{ID: id, Digest: record.Target().Digest.String(), CreatedAt: created, Size: size, Labels: record.Labels(), RootFSLayers: layers}
+			history := make([]api.ImageHistory, 0, len(spec.History))
+			for _, entry := range spec.History {
+				createdAt := created
+				if entry.Created != nil {
+					createdAt = *entry.Created
+				}
+				history = append(history, api.ImageHistory{
+					Created: createdAt, CreatedBy: entry.CreatedBy,
+					Comment: entry.Comment, Empty: entry.EmptyLayer,
+				})
+			}
+			item = &api.Image{ID: id, Digest: record.Target().Digest.String(), CreatedAt: created, Size: size, Labels: record.Labels(), RootFSLayers: layers, History: history}
 			grouped[id] = item
 		}
 		item.References = append(item.References, record.Name())
@@ -906,7 +972,12 @@ func (b *Backend) UpdateContainerMetadata(ctx context.Context, request api.Conta
 		return err
 	}
 	metadata := decodeRuntimeMetadata(info.Labels)
-	metadata.PortBindings = request.PortBindings
+	if request.Name != "" {
+		metadata.Name = request.Name
+	}
+	if request.PortBindings != nil {
+		metadata.PortBindings = request.PortBindings
+	}
 	encoded, err := encodeRuntimeMetadata(metadata)
 	if err != nil {
 		return err
@@ -1131,6 +1202,351 @@ func (b *Backend) Kill(ctx context.Context, id string, signal uint32) error {
 		return err
 	}
 	return task.Kill(b.ctx(ctx), syscall.Signal(signal))
+}
+
+func (b *Backend) Pause(ctx context.Context, id string) error {
+	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	if err != nil {
+		return err
+	}
+	task, err := container.Task(b.ctx(ctx), nil)
+	if err != nil {
+		return err
+	}
+	if err := task.Pause(b.ctx(ctx)); err != nil {
+		return err
+	}
+	return b.updateRuntimeMetadata(b.ctx(ctx), container, func(metadata *api.ContainerMetadata) {
+		metadata.LifecycleState = "paused"
+	})
+}
+
+func (b *Backend) Resume(ctx context.Context, id string) error {
+	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	if err != nil {
+		return err
+	}
+	task, err := container.Task(b.ctx(ctx), nil)
+	if err != nil {
+		return err
+	}
+	if err := task.Resume(b.ctx(ctx)); err != nil {
+		return err
+	}
+	return b.updateRuntimeMetadata(b.ctx(ctx), container, func(metadata *api.ContainerMetadata) {
+		metadata.LifecycleState = "running"
+	})
+}
+
+func (b *Backend) Resize(ctx context.Context, request api.ContainerResizeRequest) error {
+	if request.ID == "" || request.Width == 0 || request.Height == 0 {
+		return errors.New("id, width, and height are required")
+	}
+	container, err := b.client.LoadContainer(b.ctx(ctx), request.ID)
+	if err != nil {
+		return err
+	}
+	task, err := container.Task(b.ctx(ctx), nil)
+	if err != nil {
+		return err
+	}
+	return task.Resize(b.ctx(ctx), request.Width, request.Height)
+}
+
+func (b *Backend) Top(ctx context.Context, request api.ContainerTopRequest) (api.ContainerTopResponse, error) {
+	if request.ID == "" {
+		return api.ContainerTopResponse{}, errors.New("container ID is required")
+	}
+	container, err := b.client.LoadContainer(b.ctx(ctx), request.ID)
+	if err != nil {
+		return api.ContainerTopResponse{}, err
+	}
+	task, err := container.Task(b.ctx(ctx), nil)
+	if err != nil {
+		return api.ContainerTopResponse{}, err
+	}
+	processes, err := task.Pids(b.ctx(ctx))
+	if err != nil {
+		return api.ContainerTopResponse{}, err
+	}
+	sort.Slice(processes, func(i, j int) bool { return processes[i].Pid < processes[j].Pid })
+	response := api.ContainerTopResponse{
+		Titles:    []string{"PID", "CMD"},
+		Processes: make([][]string, 0, len(processes)),
+	}
+	for _, process := range processes {
+		response.Processes = append(response.Processes, []string{
+			strconv.FormatUint(uint64(process.Pid), 10), processCommand(process.Pid),
+		})
+	}
+	return response, nil
+}
+
+func (b *Backend) Stats(ctx context.Context, request api.ContainerStatsRequest) (api.ContainerStatsResponse, error) {
+	if request.ID == "" {
+		return api.ContainerStatsResponse{}, errors.New("container ID is required")
+	}
+	container, err := b.client.LoadContainer(b.ctx(ctx), request.ID)
+	if err != nil {
+		return api.ContainerStatsResponse{}, err
+	}
+	task, err := container.Task(b.ctx(ctx), nil)
+	if err != nil {
+		return api.ContainerStatsResponse{ID: request.ID, Read: time.Now(), PreRead: time.Now()}, nil
+	}
+	processes, err := task.Pids(b.ctx(ctx))
+	if err != nil {
+		return api.ContainerStatsResponse{}, err
+	}
+	sample := readContainerStats(request.ID, processes)
+	b.statsMu.Lock()
+	defer b.statsMu.Unlock()
+	if b.lastStats == nil {
+		b.lastStats = make(map[string]api.ContainerStatsResponse)
+	}
+	previous := b.lastStats[request.ID]
+	result := sample
+	if !previous.Read.IsZero() {
+		result.PreRead = previous.Read
+		result.PreCPUStats = previous.CPUStats
+	}
+	b.lastStats[request.ID] = sample
+	return result, nil
+}
+
+func processCommand(pid uint32) string {
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "cmdline"))
+	if err == nil && len(data) > 0 {
+		return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
+	}
+	data, err = os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "comm"))
+	if err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return "-"
+}
+
+func readContainerStats(id string, processes []containerd.ProcessInfo) api.ContainerStatsResponse {
+	var userTicks, systemTicks, memoryBytes uint64
+	for _, process := range processes {
+		user, system, memory := readProcessStats(process.Pid)
+		userTicks += user
+		systemTicks += system
+		memoryBytes += memory
+	}
+	const ticksPerSecond = uint64(100)
+	current := api.ContainerStatsResponse{
+		ID:      id,
+		Read:    time.Now(),
+		PreRead: time.Now(),
+		CPUStats: api.CPUStats{
+			CPUUsage: api.CPUUsage{
+				TotalUsage:   (userTicks + systemTicks) * uint64(time.Second) / ticksPerSecond,
+				InKernelMode: systemTicks * uint64(time.Second) / ticksPerSecond,
+				InUserMode:   userTicks * uint64(time.Second) / ticksPerSecond,
+			},
+			SystemCPUUsage: readSystemCPUUsage(ticksPerSecond),
+			OnlineCPUs:     runtime.NumCPU(),
+		},
+		MemoryStats: api.MemoryStats{Usage: memoryBytes, Limit: readMemoryLimit(processes)},
+		PidsStats:   api.PidsStats{Current: uint64(len(processes))},
+	}
+	current.Networks = readNetworkStats(processes)
+	return current
+}
+
+func readProcessStats(pid uint32) (user, system, memory uint64) {
+	base := filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10))
+	if data, err := os.ReadFile(filepath.Join(base, "stat")); err == nil {
+		if end := strings.LastIndexByte(string(data), ')'); end >= 0 {
+			fields := strings.Fields(string(data)[end+1:])
+			if len(fields) > 12 {
+				user, _ = strconv.ParseUint(fields[11], 10, 64)
+				system, _ = strconv.ParseUint(fields[12], 10, 64)
+			}
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(base, "status")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "VmRSS:") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				value, _ := strconv.ParseUint(fields[1], 10, 64)
+				memory = value * 1024
+			}
+			break
+		}
+	}
+	return user, system, memory
+}
+
+func readSystemCPUUsage(ticksPerSecond uint64) uint64 {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "cpu" {
+			continue
+		}
+		var total uint64
+		for _, value := range fields[1:] {
+			ticks, parseErr := strconv.ParseUint(value, 10, 64)
+			if parseErr == nil {
+				total += ticks
+			}
+		}
+		return total * uint64(time.Second) / ticksPerSecond
+	}
+	return 0
+}
+
+func readMemoryLimit(processes []containerd.ProcessInfo) uint64 {
+	if len(processes) > 0 {
+		data, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(processes[0].Pid), 10), "cgroup"))
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				parts := strings.SplitN(line, ":", 3)
+				if len(parts) != 3 || parts[1] != "" {
+					continue
+				}
+				path := filepath.Join("/sys/fs/cgroup", parts[2], "memory.max")
+				value, readErr := os.ReadFile(path)
+				if readErr == nil && strings.TrimSpace(string(value)) != "max" {
+					limit, parseErr := strconv.ParseUint(strings.TrimSpace(string(value)), 10, 64)
+					if parseErr == nil {
+						return limit
+					}
+				}
+			}
+		}
+	}
+	return math.MaxUint64
+}
+
+func readNetworkStats(processes []containerd.ProcessInfo) map[string]api.NetStats {
+	if len(processes) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(processes[0].Pid), 10), "net/dev"))
+	if err != nil {
+		return nil
+	}
+	result := make(map[string]api.NetStats)
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		if name == "lo" {
+			continue
+		}
+		fields := strings.Fields(parts[1])
+		if len(fields) < 16 {
+			continue
+		}
+		values := make([]uint64, 16)
+		for index, field := range fields[:16] {
+			values[index], _ = strconv.ParseUint(field, 10, 64)
+		}
+		result[name] = api.NetStats{
+			RXBytes: values[0], RXPackets: values[1], RXErrors: values[2], RXDropped: values[3],
+			TXBytes: values[8], TXPackets: values[9], TXErrors: values[10], TXDropped: values[11],
+		}
+	}
+	return result
+}
+
+func (b *Backend) ExportContainer(ctx context.Context, id string, stream StreamFunc) error {
+	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	if err != nil {
+		return err
+	}
+	info, err := container.Info(b.ctx(ctx))
+	if err != nil {
+		return err
+	}
+	if info.SnapshotKey == "" || info.Snapshotter == "" {
+		return errors.New("container root filesystem is unavailable")
+	}
+	mounts, err := b.client.SnapshotService(info.Snapshotter).Mounts(b.ctx(ctx), info.SnapshotKey)
+	if err != nil {
+		return err
+	}
+	root, err := os.MkdirTemp("", "glassdock-export-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(root)
+	if err := containermount.All(mounts, root); err != nil {
+		return err
+	}
+	defer func() { _ = containermount.UnmountMounts(mounts, root, 0) }()
+	return writeRootfsTar(b.ctx(ctx), root, streamWriter{stream: "stdout", send: stream})
+}
+
+func writeRootfsTar(ctx context.Context, root string, writer io.Writer) error {
+	tarWriter := tar.NewWriter(writer)
+	defer tarWriter.Close()
+	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(relative)
+		if info.Mode()&os.ModeSymlink != 0 {
+			header.Linkname, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		buffer := make([]byte, 32*1024)
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			count, readErr := file.Read(buffer)
+			if count > 0 {
+				if _, err := tarWriter.Write(buffer[:count]); err != nil {
+					return err
+				}
+			}
+			if readErr == io.EOF {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	})
 }
 
 func (b *Backend) Delete(ctx context.Context, request api.ContainerDeleteRequest) error {

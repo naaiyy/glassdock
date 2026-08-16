@@ -357,16 +357,16 @@
       "method": "GET",
       "path": "/containers/{id}/export",
       "operationId": "ContainerExport",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this container operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Streams a tar archive of the guest container root filesystem."
     },
     {
       "method": "GET",
@@ -418,23 +418,23 @@
       "method": "POST",
       "path": "/containers/{id}/pause",
       "operationId": "ContainerPause",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "implemented",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Pauses a running guest task through containerd."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/rename",
       "operationId": "ContainerRename",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "implemented",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
@@ -442,38 +442,38 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Persists the Docker-facing container name in guest metadata."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/resize",
       "operationId": "ContainerResize",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Resizes a running TTY container through containerd."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/restart",
       "operationId": "ContainerRestart",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Stops and starts a guest container with Docker timeout and signal handling."
     },
     {
       "method": "POST",
@@ -495,16 +495,16 @@
       "method": "GET",
       "path": "/containers/{id}/stats",
       "operationId": "ContainerStats",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "#/definitions/ContainerStatsResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this container operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Reports guest process, memory, CPU, network, and PID samples; cgroup details vary by guest runtime."
     },
     {
       "method": "POST",
@@ -526,31 +526,31 @@
       "method": "GET",
       "path": "/containers/{id}/top",
       "operationId": "ContainerTop",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "#/definitions/ContainerTopResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this container operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Reports guest task PIDs and command names from the container process namespace."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/unpause",
       "operationId": "ContainerUnpause",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "implemented",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Resumes a paused guest task through containerd."
     },
     {
       "method": "POST",
@@ -678,15 +678,15 @@
       "method": "GET",
       "path": "/images/get",
       "operationId": "ImageGetAll",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "string",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this image operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Exports one or more guest images as an OCI/containerd tar archive."
     },
     {
       "method": "GET",
@@ -764,30 +764,30 @@
       "method": "GET",
       "path": "/images/{name}/get",
       "operationId": "ImageGet",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "string",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Exports one guest image as an OCI/containerd tar archive."
     },
     {
       "method": "GET",
       "path": "/images/{name}/history",
       "operationId": "ImageHistory",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "array",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The persistent guest protocol does not expose this image operation yet."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Reports history from the guest image OCI configuration and layer metadata."
     },
     {
       "method": "GET",
@@ -808,16 +808,16 @@
       "method": "POST",
       "path": "/images/{name}/push",
       "operationId": "ImagePush",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Pushes a guest image through containerd with optional registry credentials and platform selection."
     },
     {
       "method": "POST",
@@ -1490,15 +1490,15 @@
       "method": "GET",
       "path": "/system/df",
       "operationId": "SystemDataUsage",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "object",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "The guest runtime does not expose complete Docker system disk accounting."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Reports guest image and container accounting; volume and build-cache accounting are empty."
     },
     {
       "method": "GET",
