@@ -348,6 +348,28 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("network prune protects the guest bridge and network delete reports 403")
+    func networkMutationRoutes() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/networks/prune?filters=%7B%22dangling%22:%7B%22true%22:true%7D%7D"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["NetworksDeleted"] as? [String] == [])
+                #expect((value?["Errors"] as? [String: String])?.isEmpty == true)
+            }
+            try await app.testing().test(.DELETE, "/v1.51/networks/bridge") { response async in
+                #expect(response.status == .forbidden)
+            }
+            try await app.testing().test(.DELETE, "/v1.51/networks/missing") { response async in
+                #expect(response.status == .notFound)
+            }
+        }
+    }
+
     @Test("runtime and unsupported routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()

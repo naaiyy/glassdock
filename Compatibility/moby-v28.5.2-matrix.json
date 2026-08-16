@@ -885,22 +885,22 @@
       "method": "POST",
       "path": "/networks/prune",
       "operationId": "NetworkPrune",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "object",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Validates Docker network filters and protects the guest runtime's private bridge; custom network deletion is unsupported."
     },
     {
       "method": "DELETE",
       "path": "/networks/{id}",
       "operationId": "NetworkDelete",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 204,
       "responseStatuses": [
         204,
         403,
@@ -908,8 +908,8 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Returns Docker's protected-network error for the guest runtime bridge; custom network deletion is unsupported."
     },
     {
       "method": "GET",

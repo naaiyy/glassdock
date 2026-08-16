@@ -295,6 +295,11 @@ struct DockerRuntimeImageDelete: Sendable, Equatable {
     let reclaimed: Int64
 }
 
+private struct DockerRuntimeNetworkPruneResponse: Encodable {
+    let NetworksDeleted: [String]
+    let Errors: [String: String]
+}
+
 struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let source: String
     let target: String
@@ -486,6 +491,8 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/system/df", use: systemDataUsage)
         try routes.registerVersionedRoute(.GET, pattern: "/networks", use: listNetworks)
         try routes.registerVersionedRoute(.GET, pattern: "/networks/{id:.*}", use: inspectNetwork)
+        try routes.registerVersionedRoute(.POST, pattern: "/networks/prune", use: pruneNetworks)
+        try routes.registerVersionedRoute(.DELETE, pattern: "/networks/{id:.*}", use: deleteNetwork)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/create", use: createContainer)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/prune", use: pruneContainers)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/start", use: startContainer)
@@ -1037,6 +1044,48 @@ struct DockerRuntimeRoutes: RouteCollection {
         return try jsonResponse(.ok, Self.networkSummary(network))
     }
 
+    private func pruneNetworks(_ req: Request) async throws -> Response {
+        let filters = try DockerNetworkFilterUtility.parseNetworkFilters(
+            filtersParam: req.query[String.self, at: "filters"],
+            defaultDangling: true,
+            logger: req.logger
+        )
+        let filtersData = try JSONEncoder().encode(filters)
+        let filtersJSON = String(data: filtersData, encoding: .utf8)
+        let networks = try await call { try await backend.listNetworks() }
+        let candidates = ClientNetworkService.applyFilters(
+            networks.map(Self.networkSummary), filters: filtersJSON, logger: req.logger
+        )
+
+        // The guest runtime currently exposes only its persistent bridge. Do
+        // not report it as deleted, even when it matches a dangling filter.
+        // If a future guest adds custom network summaries before deletion is
+        // implemented, surface that limitation in Docker's Errors field.
+        let errors = candidates.reduce(into: [String: String]()) { result, network in
+            guard network.Id != "glassdock0", network.Name != "bridge" else { return }
+            result[network.Id] = "custom guest network deletion is not supported"
+        }
+        if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
+            await broadcaster.broadcast(
+                DockerEvent.make(
+                    type: "network", action: "prune", actorID: "",
+                    attributes: ["reclaimed": "0"]))
+        }
+        return try jsonResponse(
+            .ok,
+            DockerRuntimeNetworkPruneResponse(NetworksDeleted: [], Errors: errors)
+        )
+    }
+
+    private func deleteNetwork(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let network = try await call { try await backend.inspectNetwork(id: id) }
+        guard Self.isProtectedGuestNetwork(network) else {
+            throw Abort(.notImplemented, reason: "Custom guest network deletion is not supported")
+        }
+        throw Abort(.forbidden, reason: "error while removing network: \(network.name) is a protected guest network")
+    }
+
     private func topContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let arguments =
@@ -1565,6 +1614,10 @@ struct DockerRuntimeRoutes: RouteCollection {
             Subnet: ipamConfig?.Subnet,
             Gateway: ipamConfig?.Gateway
         )
+    }
+
+    private static func isProtectedGuestNetwork(_ network: DockerRuntimeNetwork) -> Bool {
+        network.id == "glassdock0" || network.name == "bridge"
     }
 
     private static func archivePathStatHeader(_ info: DockerRuntimeArchivePath) throws -> String {
