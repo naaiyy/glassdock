@@ -314,9 +314,13 @@ type ContainerDeleteRequest struct {
 	Snapshot bool   `json:"snapshot,omitempty"`
 }
 type ContainerLogsRequest struct {
-	ID     string `json:"id"`
-	Stdout bool   `json:"stdout,omitempty"`
-	Stderr bool   `json:"stderr,omitempty"`
+	ID         string `json:"id"`
+	Stdout     bool   `json:"stdout,omitempty"`
+	Stderr     bool   `json:"stderr,omitempty"`
+	Timestamps bool   `json:"timestamps,omitempty"`
+	Details    bool   `json:"details,omitempty"`
+	Since      int64  `json:"since,omitempty"`
+	Until      int64  `json:"until,omitempty"`
 }
 type ContainerLogsResponse struct {
 	Stdout    []byte `json:"stdout,omitempty"`

@@ -3,6 +3,8 @@ package backend
 import (
 	"bytes"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -165,5 +167,50 @@ func TestLiveLogStreamContinuesAfterRetentionLimit(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("live output stopped at the retention limit")
+	}
+}
+
+func TestAppendTimestampedPrefixesEachLogLine(t *testing.T) {
+	t.Parallel()
+	when := time.Date(2026, 8, 17, 12, 34, 56, 123456789, time.UTC)
+	got := string(appendTimestamped(nil, when, []byte("one\ntwo\n")))
+	want := "2026-08-17T12:34:56.123456789Z one\n2026-08-17T12:34:56.123456789Z two\n"
+	if got != want {
+		t.Fatalf("timestamped output = %q, want %q", got, want)
+	}
+}
+
+func TestReadFilteredLogUsesTimestampSidecar(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	backend := &Backend{logsDir: directory}
+	indexPath := filepath.Join(directory, logKey("container")+".stdout.timestamps")
+	index, err := os.Create(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(record logRecord) {
+		t.Helper()
+		writer := &boundedLogWriter{index: index}
+		if err := writer.writeRecordLocked(record.Time, record.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(logRecord{Time: time.Unix(10, 0).UTC(), Data: []byte("old\n")})
+	write(logRecord{Time: time.Unix(20, 0).UTC(), Data: []byte("new\n")})
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := backend.readFilteredLog("container", "stdout", api.ContainerLogsRequest{
+		Timestamps: true,
+		Since:      15,
+		Until:      25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "new\n") || strings.Contains(string(data), "old\n") {
+		t.Fatalf("filtered log = %q", data)
 	}
 }

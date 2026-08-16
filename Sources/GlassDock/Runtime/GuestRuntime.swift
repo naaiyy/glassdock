@@ -420,7 +420,7 @@ actor GuestRemovalGate {
 /// Maps Docker operations to the one multiplexed guest connection. The host
 /// keeps Docker-only metadata; containerd remains the authority for processes,
 /// snapshots, and lifecycle state.
-actor GuestRuntime: DockerRuntimeRouteBackend {
+actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
     private struct Metadata: Sendable {
         var name: String
         let command: [String]
@@ -1249,17 +1249,35 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
     func attachContainer(
         id: String, stdout: Bool, stderr: Bool
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
+        try await attachContainer(
+            id: id,
+            stdout: stdout,
+            stderr: stderr,
+            options: DockerRuntimeLogOptions(
+                timestamps: false, details: false, since: nil, until: nil
+            )
+        )
+    }
+
+    func attachContainer(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
         let resolved = try await resolve(id)
         let connection = try await engine.readyConnection()
-        let payload: JSONValue = .object([
+        var payload: [String: JSONValue] = [
             "id": .string(resolved), "stdout": .bool(stdout), "stderr": .bool(stderr),
-        ])
+        ]
+        Self.addLogOptions(options, to: &payload)
+        let requestPayload = JSONValue.object(payload)
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
             let control = GuestStreamRequestControl()
             let request = Task {
                 do {
                     let response = try await connection.request(
-                        method: "container.attach", payload: payload
+                        method: "container.attach", payload: requestPayload
                     ) { frame in
                         guard let data = frame.data else { return }
                         let result = continuation.yield(
@@ -1318,15 +1336,43 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
     }
 
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {
+        try await logs(
+            id: id,
+            stdout: stdout,
+            stderr: stderr,
+            options: DockerRuntimeLogOptions(
+                timestamps: false, details: false, since: nil, until: nil
+            )
+        )
+    }
+
+    func logs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> DockerRuntimeProcessOutput {
         let resolved = try await resolve(id)
+        var requestPayload: [String: JSONValue] = [
+            "id": .string(resolved), "stdout": .bool(stdout), "stderr": .bool(stderr),
+        ]
+        Self.addLogOptions(options, to: &requestPayload)
         let response = try await request(
-            "container.logs",
-            ["id": .string(resolved), "stdout": .bool(stdout), "stderr": .bool(stderr)]
+            "container.logs", requestPayload
         )
         let payload: GuestLogsPayload = try decode(response)
         return DockerRuntimeProcessOutput(
             stdout: payload.stdout ?? Data(), stderr: payload.stderr ?? Data(), exitCode: 0
         )
+    }
+
+    private static func addLogOptions(
+        _ options: DockerRuntimeLogOptions, to payload: inout [String: JSONValue]
+    ) {
+        if options.timestamps { payload["timestamps"] = .bool(true) }
+        if options.details { payload["details"] = .bool(true) }
+        if let since = options.since { payload["since"] = .number(Double(since)) }
+        if let until = options.until { payload["until"] = .number(Double(until)) }
     }
 
     private func resolve(_ reference: String) async throws -> String {

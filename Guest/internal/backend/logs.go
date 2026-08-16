@@ -1,9 +1,12 @@
 package backend
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -20,6 +23,7 @@ const maxLogBytes int64 = 4 << 20
 type boundedLogWriter struct {
 	mu          sync.Mutex
 	file        *os.File
+	index       *os.File
 	written     int64
 	truncated   bool
 	nextID      uint64
@@ -36,9 +40,13 @@ func (w *boundedLogWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock()
 	originalLength := len(p)
 	live := append([]byte(nil), p...)
+	when := time.Now().UTC()
 	remaining := maxLogBytes - w.written
 	if remaining <= 0 {
 		w.truncated = w.truncated || originalLength > 0
+		if err := w.writeRecordLocked(when, live); err != nil {
+			return 0, err
+		}
 		w.publishLocked(live)
 		return originalLength, nil
 	}
@@ -51,10 +59,25 @@ func (w *boundedLogWriter) Write(p []byte) (int, error) {
 	if err != nil {
 		return written, err
 	}
+	if err := w.writeRecordLocked(when, live); err != nil {
+		return written, err
+	}
 	w.publishLocked(live)
 	// Report the full input as consumed. Once the limit is reached, logs must not
 	// apply backpressure to the container process.
 	return originalLength, nil
+}
+
+func (w *boundedLogWriter) writeRecordLocked(when time.Time, data []byte) error {
+	if w.index == nil {
+		return nil
+	}
+	record, err := json.Marshal(logRecord{Time: when, Data: data})
+	if err != nil {
+		return err
+	}
+	_, err = w.index.Write(append(record, '\n'))
+	return err
 }
 
 func (w *boundedLogWriter) publishLocked(data []byte) {
@@ -129,6 +152,10 @@ func (b *Backend) logPath(id, stream string) string {
 	return filepath.Join(b.logsDir, logKey(id)+"."+stream)
 }
 
+func (b *Backend) logIndexPath(id, stream string) string {
+	return filepath.Join(b.logsDir, logKey(id)+"."+stream+".timestamps")
+}
+
 func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 	if err := os.MkdirAll(b.logsDir, 0o700); err != nil {
 		return nil, err
@@ -138,7 +165,12 @@ func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &boundedLogWriter{file: file}, nil
+		index, err := os.OpenFile(b.logIndexPath(id, stream), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		return &boundedLogWriter{file: file, index: index}, nil
 	}
 	stdout, err := open("stdout")
 	if err != nil {
@@ -147,7 +179,11 @@ func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 	stderr, err := open("stderr")
 	if err != nil {
 		_ = stdout.file.Close()
+		if stdout.index != nil {
+			_ = stdout.index.Close()
+		}
 		_ = os.Remove(b.logPath(id, "stdout"))
+		_ = os.Remove(b.logIndexPath(id, "stdout"))
 		return nil, err
 	}
 	return &logCapture{stdout: stdout, stderr: stderr}, nil
@@ -161,6 +197,12 @@ func (capture *logCapture) close() {
 		}
 		_ = capture.stdout.file.Close()
 		_ = capture.stderr.file.Close()
+		if capture.stdout.index != nil {
+			_ = capture.stdout.index.Close()
+		}
+		if capture.stderr.index != nil {
+			_ = capture.stderr.index.Close()
+		}
 	})
 }
 
@@ -178,6 +220,8 @@ func (b *Backend) removeLogs(id string) {
 	}
 	_ = os.Remove(b.logPath(id, "stdout"))
 	_ = os.Remove(b.logPath(id, "stderr"))
+	_ = os.Remove(b.logIndexPath(id, "stdout"))
+	_ = os.Remove(b.logIndexPath(id, "stderr"))
 }
 
 func (b *Backend) Logs(request api.ContainerLogsRequest) (api.ContainerLogsResponse, error) {
@@ -189,6 +233,9 @@ func (b *Backend) Logs(request api.ContainerLogsRequest) (api.ContainerLogsRespo
 	}
 	response := api.ContainerLogsResponse{}
 	read := func(stream string) ([]byte, error) {
+		if request.Timestamps || request.Since != 0 || request.Until != 0 {
+			return b.readFilteredLog(request.ID, stream, request)
+		}
 		data, err := os.ReadFile(b.logPath(request.ID, stream))
 		if errors.Is(err, os.ErrNotExist) {
 			return []byte{}, nil
@@ -225,6 +272,64 @@ func (b *Backend) Logs(request api.ContainerLogsRequest) (api.ContainerLogsRespo
 		}
 	}
 	return response, nil
+}
+
+type logRecord struct {
+	Time time.Time `json:"time"`
+	Data []byte    `json:"data"`
+}
+
+func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRequest) ([]byte, error) {
+	file, err := os.Open(b.logIndexPath(id, stream))
+	if errors.Is(err, os.ErrNotExist) {
+		data, readErr := os.ReadFile(b.logPath(id, stream))
+		return data, readErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), int(maxLogBytes)+64*1024)
+	var output []byte
+	for scanner.Scan() {
+		var record logRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, err
+		}
+		seconds := record.Time.Unix()
+		if request.Since != 0 && seconds < request.Since {
+			continue
+		}
+		if request.Until != 0 && seconds >= request.Until {
+			continue
+		}
+		if request.Timestamps {
+			output = appendTimestamped(output, record.Time, record.Data)
+		} else {
+			output = append(output, record.Data...)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+func appendTimestamped(output []byte, timestamp time.Time, data []byte) []byte {
+	const format = "2006-01-02T15:04:05.000000000Z07:00"
+	for len(data) > 0 {
+		output = append(output, timestamp.Format(format)...)
+		output = append(output, ' ')
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			output = append(output, data...)
+			break
+		}
+		output = append(output, data[:newline+1]...)
+		data = data[newline+1:]
+	}
+	return output
 }
 
 func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, stream StreamFunc) (uint32, error) {

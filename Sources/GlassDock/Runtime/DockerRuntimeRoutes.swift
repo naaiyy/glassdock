@@ -91,6 +91,26 @@ protocol DockerRuntimeRouteBackend: Sendable {
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
 }
 
+struct DockerRuntimeLogOptions: Sendable, Equatable {
+    let timestamps: Bool
+    let details: Bool
+    let since: Int64?
+    let until: Int64?
+
+    var requiresGuestFiltering: Bool {
+        timestamps || details || since != nil || until != nil
+    }
+}
+
+protocol DockerRuntimeLogOptionsBackend: DockerRuntimeRouteBackend {
+    func logs(
+        id: String, stdout: Bool, stderr: Bool, options: DockerRuntimeLogOptions
+    ) async throws -> DockerRuntimeProcessOutput
+    func attachContainer(
+        id: String, stdout: Bool, stderr: Bool, options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+}
+
 struct DockerRuntimeProcessFrame: Sendable {
     let stream: GuestStream?
     let data: Data
@@ -1545,14 +1565,7 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func logs(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        let unsupported =
-            Self.mobyBool(req.query[String.self, at: "timestamps"])
-            || Self.mobyBool(req.query[String.self, at: "details"])
-            || req.query[String.self, at: "since"].map { $0 != "0" } == true
-            || req.query[String.self, at: "until"].map { !$0.isEmpty && $0 != "0" } == true
-        if unsupported {
-            throw Abort(.notImplemented, reason: "Requested Docker log timestamps or time filtering is not implemented")
-        }
+        let options = try Self.logOptions(req)
         let stdout = Self.mobyBool(req.query[String.self, at: "stdout"])
         let stderr = Self.mobyBool(req.query[String.self, at: "stderr"])
         guard stdout || stderr else {
@@ -1561,12 +1574,30 @@ struct DockerRuntimeRoutes: RouteCollection {
         let backend = self.backend
         let container = try await call { try await backend.inspectContainer(id: id) }
         if Self.mobyBool(req.query[String.self, at: "follow"]) {
-            let stream = try await call {
-                try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
+            let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+            if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
+                stream = try await call {
+                    try await optionsBackend.attachContainer(
+                        id: id, stdout: stdout, stderr: stderr, options: options
+                    )
+                }
+            } else {
+                stream = try await call {
+                    try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
+                }
             }
             return Self.streamResponse(stream: stream, tty: container.tty, contentType: false)
         }
-        var output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+        var output: DockerRuntimeProcessOutput
+        if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
+            output = try await call {
+                try await optionsBackend.logs(
+                    id: id, stdout: stdout, stderr: stderr, options: options
+                )
+            }
+        } else {
+            output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+        }
         if let tail = req.query[String.self, at: "tail"] {
             output = try Self.applyTail(output, value: tail)
         }
@@ -1809,6 +1840,27 @@ struct DockerRuntimeRoutes: RouteCollection {
     private static func mobyBool(_ value: String?) -> Bool {
         guard let value else { return false }
         return value == "1" || value.lowercased() == "true"
+    }
+
+    private static func logOptions(_ req: Request) throws -> DockerRuntimeLogOptions {
+        func parse(_ name: String) throws -> Int64? {
+            guard let raw = req.query[String.self, at: name], !raw.isEmpty, raw != "0" else {
+                return nil
+            }
+            if let seconds = Double(raw), seconds >= 0, seconds.isFinite {
+                return Int64(seconds)
+            }
+            if let date = ISO8601DateFormatter().date(from: raw), date.timeIntervalSince1970 >= 0 {
+                return Int64(date.timeIntervalSince1970)
+            }
+            throw Abort(.badRequest, reason: "Invalid (name) value: (raw)")
+        }
+        return DockerRuntimeLogOptions(
+            timestamps: mobyBool(req.query[String.self, at: "timestamps"]),
+            details: mobyBool(req.query[String.self, at: "details"]),
+            since: try parse("since"),
+            until: try parse("until")
+        )
     }
 
     private static func imageReference(fromImage: String, tag: String?) -> String {
