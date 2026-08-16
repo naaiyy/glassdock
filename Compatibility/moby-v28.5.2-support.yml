@@ -155,7 +155,7 @@ routes:
     path: /exec/{id}/start
     support: partial
     owner: DockerRuntimeRoutes
-    note: Streaming exec start; detached exec and interactive stdin are unsupported.
+    note: Streaming and detached exec start through the guest; interactive stdin remains unsupported.
   - method: POST
     path: /exec/{id}/resize
     support: partial
@@ -250,7 +250,7 @@ routes:
     path: /system/df
     support: partial
     owner: DockerRuntimeRoutes
-    note: Reports guest image and container accounting; volume and build-cache accounting are empty.
+    note: Reports guest-backed images, containers, and persistent volumes; build-cache accounting and container filesystem sizes remain unavailable.
   - method: GET
     path: /version
     support: implemented

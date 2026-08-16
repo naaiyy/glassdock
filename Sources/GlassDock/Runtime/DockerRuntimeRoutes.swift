@@ -1132,11 +1132,22 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.notFound, reason: "Exec instance not found: \(id)")
         }
         let body = try req.content.decode(ExecStartRequest.self)
+        let tty = body.Tty ?? entry.request.tty
         if body.Detach == true {
-            throw Abort(.notImplemented, reason: "detached exec is not supported by the persistent runtime")
+            try execState.markRunning(id: id)
+            let backend = self.backend
+            let state = execState
+            Task {
+                do {
+                    let output = try await backend.startExec(id: id, detach: true, tty: tty)
+                    state.finish(id: id, exitCode: output.exitCode)
+                } catch {
+                    state.finish(id: id, exitCode: -1)
+                }
+            }
+            return Response(status: .noContent)
         }
         try execState.markRunning(id: id)
-        let tty = body.Tty ?? entry.request.tty
         let stream = try await call { try await backend.streamExec(id: id, tty: tty) }
         if req.headers.first(name: "Upgrade")?.lowercased() == "tcp",
             req.headers.first(name: "Connection")?.lowercased().split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true

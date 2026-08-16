@@ -998,7 +998,6 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
     }
 
     func startExec(id: String, detach: Bool, tty: Bool) async throws -> DockerRuntimeProcessOutput {
-        guard !detach else { throw DockerRuntimeRouteError.invalidRequest("detached exec is not supported") }
         guard let exec = execs[id] else { throw DockerRuntimeRouteError.notFound("exec \(id)") }
         let containerID = try await resolve(exec.containerID)
         var payload: [String: JSONValue] = [
@@ -1009,8 +1008,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         if let cwd = exec.workingDirectory, !cwd.isEmpty { payload["cwd"] = .string(cwd) }
         if let user = exec.user, !user.isEmpty { payload["user"] = .string(user) }
         let collector = GuestStreamCollector(
-            stdout: exec.attachStdout,
-            stderr: exec.attachStderr
+            stdout: detach ? false : exec.attachStdout,
+            stderr: detach ? false : exec.attachStderr
         )
         let connection = try await engine.readyConnection()
         let response = try await connection.request(

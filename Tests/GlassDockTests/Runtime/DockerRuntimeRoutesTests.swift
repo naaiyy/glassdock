@@ -529,7 +529,7 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastDelete == nil)
     }
 
-    @Test("healthy wait and detached exec are explicit 501 responses")
+    @Test("healthy wait stays explicit while detached exec runs in the guest")
     func unsupportedRuntimeVariants() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
@@ -550,7 +550,7 @@ struct DockerRuntimeRoutesTests {
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Detach":true}"#)
             ) { response async in
-                #expect(response.status == .notImplemented)
+                #expect(response.status == .noContent)
             }
         }
     }
