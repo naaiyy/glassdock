@@ -18,7 +18,8 @@ func TestApplyCommitChangesUpdatesImageConfiguration(t *testing.T) {
 		},
 	}
 
-	err := applyCommitChanges(&image, "CMD [\"/bin/sh\",\"-c\",\"echo ok\"]\nENV A=new B=two\nLABEL role=web\nEXPOSE 8080/tcp\nVOLUME /data\nUSER 1000\nWORKDIR /app\nSTOPSIGNAL SIGTERM")
+	onBuild := []string{}
+	err := applyCommitChangesWithOnBuild(&image, "CMD [\"/bin/sh\",\"-c\",\"echo ok\"]\nENV A=new B=two\nLABEL role=web\nEXPOSE 8080/tcp\nVOLUME /data\nUSER 1000\nWORKDIR /app\nSTOPSIGNAL SIGTERM\nONBUILD RUN echo ready", &onBuild)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +37,9 @@ func TestApplyCommitChangesUpdatesImageConfiguration(t *testing.T) {
 	}
 	if _, ok := image.Config.Volumes["/data"]; !ok || image.Config.User != "1000" || image.Config.WorkingDir != "/app" || image.Config.StopSignal != "SIGTERM" {
 		t.Fatalf("configuration changes were not applied: %#v", image.Config)
+	}
+	if got, want := onBuild, []string{"RUN echo ready"}; !equalStrings(got, want) {
+		t.Fatalf("got ONBUILD instructions %#v, want %#v", got, want)
 	}
 }
 
@@ -56,6 +60,27 @@ func TestApplyCommitChangesRejectsFilesystemInstructions(t *testing.T) {
 		if err := applyCommitChanges(&imagespec.Image{}, instruction); err == nil {
 			t.Fatalf("expected %q to be rejected", instruction)
 		}
+	}
+}
+
+func TestDockerOnBuildRoundTrip(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"config":{"Cmd":["sh"],"OnBuild":["RUN echo base"]}}`)
+	values, err := dockerOnBuild(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values = append(values, "COPY app /app")
+	encoded, err := encodeDockerOnBuild(data, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := dockerOnBuild(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"RUN echo base", "COPY app /app"}; !equalStrings(got, want) {
+		t.Fatalf("got ONBUILD %#v, want %#v", got, want)
 	}
 }
 

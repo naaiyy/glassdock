@@ -567,10 +567,10 @@ func (b *Backend) PruneImages(ctx context.Context, request api.ImagePruneRequest
 		return api.ImageDeleteResponse{}, err
 	}
 	result := api.ImageDeleteResponse{}
-	if !request.All {
-		return result, nil
-	}
 	for _, image := range images {
+		if !request.All && !isDanglingImage(image) {
+			continue
+		}
 		for _, reference := range append([]string(nil), image.References...) {
 			deleted, err := b.DeleteImage(ctx, api.ImageDeleteRequest{Reference: reference})
 			if err != nil {
@@ -585,6 +585,18 @@ func (b *Backend) PruneImages(ctx context.Context, request api.ImagePruneRequest
 		}
 	}
 	return result, nil
+}
+
+func isDanglingImage(image api.Image) bool {
+	if len(image.References) == 0 {
+		return true
+	}
+	for _, reference := range image.References {
+		if reference != "<none>:<none>" && !strings.HasPrefix(reference, "sha256:") && !strings.Contains(reference, "@sha256:") {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *Backend) TagImage(ctx context.Context, request api.ImageTagRequest) (api.ImageResponse, error) {

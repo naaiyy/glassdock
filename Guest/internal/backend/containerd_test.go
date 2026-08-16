@@ -240,6 +240,27 @@ func TestToOCIMountsPreservesOptionsAndReadonly(t *testing.T) {
 	}
 }
 
+func TestIsDanglingImage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		references []string
+		want       bool
+	}{
+		{name: "digest only", references: []string{"sha256:deadbeef"}, want: true},
+		{name: "none tag", references: []string{"<none>:<none>"}, want: true},
+		{name: "named tag", references: []string{"docker.io/library/alpine:latest"}, want: false},
+		{name: "mixed references", references: []string{"sha256:deadbeef", "example.test/app:latest"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDanglingImage(api.Image{References: test.references}); got != test.want {
+				t.Fatalf("isDanglingImage(%#v) = %v, want %v", test.references, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeMetadataRoundTripPreservesDockerIdentity(t *testing.T) {
 	t.Parallel()
 	hostPort := uint16(8080)

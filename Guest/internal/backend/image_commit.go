@@ -65,7 +65,11 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 	if err := json.Unmarshal(configData, &imageConfig); err != nil {
 		return api.ImageResponse{}, fmt.Errorf("decode source image configuration: %w", err)
 	}
-	if err := applyCommitChanges(&imageConfig, request.Changes); err != nil {
+	onBuild, err := dockerOnBuild(configData)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("decode source ONBUILD configuration: %w", err)
+	}
+	if err := applyCommitChangesWithOnBuild(&imageConfig, request.Changes, &onBuild); err != nil {
 		return api.ImageResponse{}, err
 	}
 
@@ -149,6 +153,10 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 	newConfigData, err := json.Marshal(imageConfig)
 	if err != nil {
 		return api.ImageResponse{}, fmt.Errorf("encode committed image configuration: %w", err)
+	}
+	newConfigData, err = encodeDockerOnBuild(newConfigData, onBuild)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("encode committed ONBUILD configuration: %w", err)
 	}
 	newConfigDescriptor := imagespec.Descriptor{
 		MediaType: configDescriptor.MediaType,
@@ -271,6 +279,10 @@ func commitImageName(request api.ImageCommitRequest, digest digest.Digest) strin
 }
 
 func applyCommitChanges(image *imagespec.Image, raw string) error {
+	return applyCommitChangesWithOnBuild(image, raw, nil)
+}
+
+func applyCommitChangesWithOnBuild(image *imagespec.Image, raw string, onBuild *[]string) error {
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -333,11 +345,68 @@ func applyCommitChanges(image *imagespec.Image, raw string) error {
 				return errors.New("STOPSIGNAL change requires a value")
 			}
 			image.Config.StopSignal = argument
+		case "ONBUILD":
+			if argument == "" {
+				return errors.New("ONBUILD change requires an instruction")
+			}
+			if onBuild == nil {
+				return errors.New("ONBUILD changes require a Docker image configuration")
+			}
+			*onBuild = append(*onBuild, argument)
 		default:
 			return fmt.Errorf("commit change %q is not supported", instruction)
 		}
 	}
 	return nil
+}
+
+func dockerOnBuild(data []byte) ([]string, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, err
+	}
+	var config map[string]json.RawMessage
+	if raw := document["config"]; raw != nil {
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return nil, err
+		}
+	}
+	for _, key := range []string{"OnBuild", "onbuild"} {
+		if raw := config[key]; raw != nil {
+			var values []string
+			if err := json.Unmarshal(raw, &values); err != nil {
+				return nil, err
+			}
+			return values, nil
+		}
+	}
+	return nil, nil
+}
+
+func encodeDockerOnBuild(data []byte, values []string) ([]byte, error) {
+	if len(values) == 0 {
+		return data, nil
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, err
+	}
+	config := map[string]json.RawMessage{}
+	if raw := document["config"]; raw != nil {
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
+	}
+	config["OnBuild"] = raw
+	document["config"], err = json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(document)
 }
 
 func commitCommandValues(argument string) ([]string, error) {
