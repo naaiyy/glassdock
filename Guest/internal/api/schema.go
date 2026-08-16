@@ -437,6 +437,8 @@ type Container struct {
 	PID            uint32            `json:"pid,omitempty"`
 	ExitCode       *uint32           `json:"exitCode,omitempty"`
 	CreatedAt      time.Time         `json:"createdAt"`
+	SizeRw         int64             `json:"sizeRw,omitempty"`
+	SizeRootFs     int64             `json:"sizeRootFs,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
 	Metadata       ContainerMetadata `json:"metadata,omitempty"`
 }

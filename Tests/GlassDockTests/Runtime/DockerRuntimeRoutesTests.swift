@@ -588,6 +588,21 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("system df reports container snapshot accounting")
+    func systemDataUsageContainers() async throws {
+        try await withRuntimeRoutes(
+            DockerRuntimeBackendMock(containerSizeRw: 7, containerSizeRootFs: 42)
+        ) { app in
+            try await app.testing().test(.GET, "/v1.51/system/df?type=container") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let rows = value?["Containers"] as? [[String: Any]]
+                #expect(rows?.first?["SizeRw"] as? Int == 7)
+                #expect(rows?.first?["SizeRootFs"] as? Int == 42)
+            }
+        }
+    }
+
     @Test("stats one-shot returns one sample when streaming is enabled")
     func statsOneShot() async throws {
         try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
@@ -961,13 +976,22 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private var paused = false
     private let logOutput: String?
     private let imageRows: [DockerRuntimeImage]
+    private let containerSizeRw: Int64
+    private let containerSizeRootFs: Int64
 
-    init(logOutput: String? = nil, images: [DockerRuntimeImage]? = nil) {
+    init(
+        logOutput: String? = nil,
+        images: [DockerRuntimeImage]? = nil,
+        containerSizeRw: Int64 = -1,
+        containerSizeRootFs: Int64 = -1
+    ) {
         self.logOutput = logOutput
         self.imageRows =
             images ?? [
                 DockerRuntimeImage(reference: "example.test/fixture:latest", digest: "sha256:abc")
             ]
+        self.containerSizeRw = containerSizeRw
+        self.containerSizeRootFs = containerSizeRootFs
     }
 
     func pullImage(
@@ -1275,7 +1299,9 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             exitCode: nil,
             labels: ["test": "true"],
             tty: false,
-            ports: [.init(containerPort: 80, proto: "tcp", hostIP: "127.0.0.1", hostPort: 18080)]
+            ports: [.init(containerPort: 80, proto: "tcp", hostIP: "127.0.0.1", hostPort: 18080)],
+            sizeRw: containerSizeRw,
+            sizeRootFs: containerSizeRootFs
         )
     }
 

@@ -67,6 +67,8 @@ private struct GuestContainer: Decodable {
     let status: String
     let exitCode: UInt32?
     let createdAt: Date
+    let sizeRw: Int64?
+    let sizeRootFs: Int64?
     let publishedPorts: [GuestPublishedPort]?
     let metadata: GuestContainerMetadata?
 }
@@ -1454,7 +1456,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             id: guest.id, name: meta?.name ?? guest.id, image: guest.image,
             command: meta?.command ?? [], createdAt: guest.createdAt, state: state,
             exitCode: guest.exitCode.map(Int32.init), labels: meta?.labels ?? [:],
-            tty: meta?.tty ?? false, ports: meta?.ports ?? []
+            tty: meta?.tty ?? false, ports: meta?.ports ?? [],
+            sizeRw: guest.sizeRw ?? -1, sizeRootFs: guest.sizeRootFs ?? -1
         )
     }
 
@@ -1524,7 +1527,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             exitCode: meta.exitCode,
             labels: meta.labels,
             tty: meta.tty,
-            ports: meta.ports
+            ports: meta.ports,
+            sizeRw: -1,
+            sizeRootFs: -1
         )
     }
 

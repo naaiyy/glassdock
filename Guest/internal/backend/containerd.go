@@ -706,6 +706,7 @@ func (b *Backend) inspect(ctx context.Context, container containerd.Container) (
 	}
 	metadata := decodeRuntimeMetadata(info.Labels)
 	result := api.Container{ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata}
+	result.SizeRw, result.SizeRootFs = b.containerUsage(ctx, info)
 	task, err := container.Task(ctx, nil)
 	if err != nil {
 		applyPersistedLifecycle(&result, metadata)
@@ -725,6 +726,22 @@ func (b *Backend) inspect(ctx context.Context, container containerd.Container) (
 		result.ExitCode = &code
 	}
 	return result, nil
+}
+
+func (b *Backend) containerUsage(ctx context.Context, info containerrecords.Container) (int64, int64) {
+	var writable int64
+	if info.SnapshotKey != "" && info.Snapshotter != "" {
+		if usage, err := b.client.SnapshotService(info.Snapshotter).Usage(ctx, info.SnapshotKey); err == nil {
+			writable = usage.Size
+		}
+	}
+	var rootFilesystem int64 = writable
+	if image, err := b.client.GetImage(ctx, info.Image); err == nil {
+		if size, sizeErr := image.Size(ctx); sizeErr == nil {
+			rootFilesystem += size
+		}
+	}
+	return writable, rootFilesystem
 }
 
 func applyPersistedLifecycle(result *api.Container, metadata api.ContainerMetadata) {

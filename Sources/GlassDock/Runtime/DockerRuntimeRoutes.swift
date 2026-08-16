@@ -438,6 +438,36 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let labels: [String: String]
     let tty: Bool
     let ports: [DockerRuntimePortBinding]
+    let sizeRw: Int64
+    let sizeRootFs: Int64
+
+    init(
+        id: String,
+        name: String,
+        image: String,
+        command: [String],
+        createdAt: Date,
+        state: EngineContainerState,
+        exitCode: Int32?,
+        labels: [String: String],
+        tty: Bool,
+        ports: [DockerRuntimePortBinding],
+        sizeRw: Int64 = -1,
+        sizeRootFs: Int64 = -1
+    ) {
+        self.id = id
+        self.name = name
+        self.image = image
+        self.command = command
+        self.createdAt = createdAt
+        self.state = state
+        self.exitCode = exitCode
+        self.labels = labels
+        self.tty = tty
+        self.ports = ports
+        self.sizeRw = sizeRw
+        self.sizeRootFs = sizeRootFs
+    }
 }
 
 struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
@@ -800,15 +830,19 @@ struct DockerRuntimeRoutes: RouteCollection {
                 && (filters.map { Self.matches(container, filters: $0) } ?? true)
         }
         var deleted: [String] = []
+        var reclaimed: Int64 = 0
         for container in candidates {
             try await call {
                 try await backend.deleteContainer(id: container.id, force: false, removeVolumes: false)
             }
             deleted.append(container.id)
+            if container.sizeRw > 0 {
+                reclaimed = reclaimed.addingReportingOverflow(container.sizeRw).partialValue
+            }
         }
         return try jsonResponse(
             .ok,
-            ContainerPruneResponse(ContainersDeleted: deleted, SpaceReclaimed: 0)
+            ContainerPruneResponse(ContainersDeleted: deleted, SpaceReclaimed: reclaimed)
         )
     }
 
@@ -2464,8 +2498,8 @@ private struct SystemDataUsageResponse: Encodable {
         let ImageID: String
         let Command: String
         let Created: Int64
-        let SizeRw: Int64 = -1
-        let SizeRootFs: Int64 = -1
+        let SizeRw: Int64
+        let SizeRootFs: Int64
         let Labels: [String: String]
         let State: String
         let Status: String
@@ -2477,6 +2511,8 @@ private struct SystemDataUsageResponse: Encodable {
             ImageID = container.image
             Command = container.command.joined(separator: " ")
             Created = Int64(container.createdAt.timeIntervalSince1970)
+            SizeRw = container.sizeRw
+            SizeRootFs = container.sizeRootFs
             Labels = container.labels
             State = container.state.rawValue
             Status = container.state.rawValue
