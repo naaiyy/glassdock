@@ -367,3 +367,49 @@ func TestNetworkManagerRejectsChangedRepublish(t *testing.T) {
 		t.Fatal("changed publication was treated as idempotent")
 	}
 }
+
+func TestNetworkManagerCreatesAndMutatesGuestNetworkObjects(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	request := api.NetworkCreateRequest{
+		Name:   "frontend",
+		Driver: "bridge",
+		IPAM:   &api.NetworkIPAM{Config: []api.NetworkIPAMConfig{{Subnet: "10.89.0.0/16", Gateway: "10.89.0.1"}}},
+		Labels: map[string]string{"tier": "web"},
+	}
+	created, err := manager.CreateNetwork(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "frontend" || created.Driver != "bridge" || created.IPAM.Config[0].Subnet != "10.89.0.0/16" {
+		t.Fatalf("created network = %#v", created)
+	}
+	if _, err := manager.Create("container-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Connect(created.ID, "container-one", "web", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	summaries := manager.Summaries(map[string]string{"container-one": "web"})
+	var frontend api.NetworkSummary
+	for _, summary := range summaries {
+		if summary.ID == created.ID {
+			frontend = summary
+		}
+	}
+	endpoint, ok := frontend.Containers["container-one"]
+	if !ok || endpoint.Name != "web" || endpoint.IPv4Address != "10.89.0.2/16" {
+		t.Fatalf("frontend endpoint = %#v", endpoint)
+	}
+	if err := manager.Connect(created.ID, "container-one", "web", "", "", true); err == nil || !strings.Contains(err.Error(), "hot attach") {
+		t.Fatalf("running connect error = %v", err)
+	}
+	if err := manager.Disconnect(created.ID, "container-one", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, summary := range manager.Summaries(nil) {
+		if summary.ID == created.ID && len(summary.Containers) != 0 {
+			t.Fatalf("disconnected network still has endpoints: %#v", summary.Containers)
+		}
+	}
+}

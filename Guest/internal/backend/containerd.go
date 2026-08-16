@@ -648,38 +648,34 @@ func (b *Backend) Networks(ctx context.Context) ([]api.NetworkSummary, error) {
 		}
 		containerNames[container.ID] = name
 	}
+	return b.network.Summaries(containerNames), nil
+}
 
-	attached := make(map[string]api.NetworkContainer)
-	for _, endpoint := range b.network.Endpoints() {
-		name := containerNames[endpoint.ContainerID]
-		if name == "" {
-			name = endpoint.ContainerID
-		}
-		attached[endpoint.ContainerID] = api.NetworkContainer{
-			Name:        name,
-			EndpointID:  endpoint.EndpointID,
-			IPv4Address: endpoint.Address + "/16",
-		}
+func (b *Backend) CreateNetwork(ctx context.Context, request api.NetworkCreateRequest) (api.NetworkSummary, error) {
+	return b.network.CreateNetwork(request)
+}
+
+func (b *Backend) ConnectNetwork(ctx context.Context, request api.NetworkConnectRequest) error {
+	container, err := b.Inspect(ctx, request.ContainerID)
+	if err != nil {
+		return err
 	}
-	createdAt := b.network.CreatedAt()
-	if createdAt.IsZero() {
-		createdAt = time.Unix(0, 0).UTC()
+	name := container.Metadata.Name
+	if name == "" {
+		name = container.ID
 	}
-	return []api.NetworkSummary{{
-		ID:         bridgeName,
-		Name:       "bridge",
-		CreatedAt:  createdAt,
-		Scope:      "local",
-		Driver:     "bridge",
-		EnableIPv4: true,
-		IPAM: api.NetworkIPAM{
-			Driver: "default",
-			Config: []api.NetworkIPAMConfig{{Subnet: networkCIDR, Gateway: "10.88.0.1"}},
-		},
-		Options:    map[string]string{},
-		Containers: attached,
-		Labels:     map[string]string{},
-	}}, nil
+	return b.network.Connect(
+		request.NetworkID,
+		request.ContainerID,
+		name,
+		request.IPv4Address,
+		request.IPv6Address,
+		container.Status == string(containerd.Running) || container.Status == "running",
+	)
+}
+
+func (b *Backend) DisconnectNetwork(ctx context.Context, request api.NetworkDisconnectRequest) error {
+	return b.network.Disconnect(request.NetworkID, request.ContainerID, request.Force)
 }
 
 func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error) {

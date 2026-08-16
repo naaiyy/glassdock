@@ -1008,6 +1008,77 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
         return network
     }
 
+    func createNetwork(
+        name: String,
+        driver: String?,
+        scope: String?,
+        enableIPv4: Bool?,
+        enableIPv6: Bool?,
+        internalNetwork: Bool?,
+        attachable: Bool?,
+        ingress: Bool?,
+        ipam: DockerRuntimeNetworkIPAM?,
+        options: [String: String]?,
+        labels: [String: String]?
+    ) async throws -> DockerRuntimeNetwork {
+        var payload: [String: JSONValue] = ["name": .string(name)]
+        if let driver { payload["driver"] = .string(driver) }
+        if let scope { payload["scope"] = .string(scope) }
+        if let enableIPv4 { payload["enableIPv4"] = .bool(enableIPv4) }
+        if let enableIPv6 { payload["enableIPv6"] = .bool(enableIPv6) }
+        if let internalNetwork { payload["internal"] = .bool(internalNetwork) }
+        if let attachable { payload["attachable"] = .bool(attachable) }
+        if let ingress { payload["ingress"] = .bool(ingress) }
+        if let options { payload["options"] = .object(options.mapValues(JSONValue.string)) }
+        if let labels { payload["labels"] = .object(labels.mapValues(JSONValue.string)) }
+        if let ipam {
+            payload["ipam"] = .object([
+                "driver": ipam.driver.map(JSONValue.string) ?? .string("default"),
+                "config": .array(
+                    ipam.config.map { config in
+                        .object([
+                            "subnet": config.subnet.map(JSONValue.string) ?? .null,
+                            "ipRange": config.ipRange.map(JSONValue.string) ?? .null,
+                            "gateway": config.gateway.map(JSONValue.string) ?? .null,
+                            "auxiliaryAddresses": config.auxiliaryAddresses.map {
+                                .object($0.mapValues(JSONValue.string))
+                            } ?? .null,
+                        ])
+                    }),
+            ])
+        }
+        let response = try await request("network.create", payload)
+        return Self.dockerNetwork(try decode(response, as: GuestNetworkPayload.self))
+    }
+
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
+        let resolved = try await resolve(containerID)
+        var payload: [String: JSONValue] = [
+            "networkId": .string(id),
+            "containerId": .string(resolved),
+        ]
+        if let ipv4Address { payload["ipv4Address"] = .string(ipv4Address) }
+        if let ipv6Address { payload["ipv6Address"] = .string(ipv6Address) }
+        _ = try await request("network.connect", payload)
+    }
+
+    func disconnectNetwork(id: String, containerID: String, force: Bool) async throws {
+        let resolved = try await resolve(containerID)
+        _ = try await request(
+            "network.disconnect",
+            [
+                "networkId": .string(id),
+                "containerId": .string(resolved),
+                "force": .bool(force),
+            ]
+        )
+    }
+
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         let resolved = try await resolve(id)
         let response = try await request(
@@ -1292,6 +1363,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend {
                 || error.message.contains("already exists") || error.message.contains("already in use")
                 || error.message.contains("running container")
                 || error.message.contains("container is not running")
+                || error.message.contains("hot attach")
+                || error.message.contains("network is in use")
             {
                 throw DockerRuntimeRouteError.conflict(error.message)
             }

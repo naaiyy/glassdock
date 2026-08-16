@@ -522,6 +522,52 @@ struct DockerRuntimeRoutesTests {
         #expect(resize?.1 == 40)
     }
 
+    @Test("guest network objects can be created and connected while stopped")
+    func networkObjectOperations() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/networks/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string:
+                        #"{"Name":"frontend","Driver":"bridge","Labels":{"tier":"web"},"IPAM":{"Config":[{"Subnet":"10.89.0.0/16","Gateway":"10.89.0.1"}]}}"#
+                )
+            ) { response async throws in
+                #expect(response.status == .created)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["Id"] as? String == "network-frontend")
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/networks/frontend/connect",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Container":"container-1"}"#)
+            ) { response async in
+                #expect(response.status == .ok)
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/networks/frontend/disconnect",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Container":"container-1"}"#)
+            ) { response async in
+                #expect(response.status == .ok)
+            }
+        }
+        let created = try #require(await backend.lastNetworkCreate)
+        #expect(created.name == "frontend")
+        #expect(created.driver == "bridge")
+        #expect(created.ipam.Config.first?.Subnet == "10.89.0.0/16")
+        let connected = await backend.lastNetworkConnect
+        #expect(connected?.0 == "frontend")
+        #expect(connected?.1 == "container-1")
+        let disconnected = await backend.lastNetworkDisconnect
+        #expect(disconnected?.0 == "frontend")
+        #expect(disconnected?.1 == "container-1")
+    }
+
     @Test("top, non-streaming stats, and export map guest data")
     func processAndFilesystemRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -779,6 +825,9 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastRename: String?
     private(set) var lastResize: (UInt32, UInt32)?
     private(set) var lastUpdate: DockerRuntimeContainerUpdate?
+    private(set) var lastNetworkCreate: DockerRuntimeNetwork?
+    private(set) var lastNetworkConnect: (String, String)?
+    private(set) var lastNetworkDisconnect: (String, String)?
     private(set) var startCount = 0
     private var running = false
     private var paused = false
@@ -938,6 +987,62 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             throw DockerRuntimeRouteError.notFound("No such network: \(id)")
         }
         return network()
+    }
+
+    func createNetwork(
+        name: String,
+        driver: String?,
+        scope: String?,
+        enableIPv4: Bool?,
+        enableIPv6: Bool?,
+        internalNetwork: Bool?,
+        attachable: Bool?,
+        ingress: Bool?,
+        ipam: DockerRuntimeNetworkIPAM?,
+        options: [String: String]?,
+        labels: [String: String]?
+    ) async throws -> DockerRuntimeNetwork {
+        let created = DockerRuntimeNetwork(
+            id: "network-frontend",
+            name: name,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            scope: scope ?? "local",
+            driver: driver ?? "bridge",
+            enableIPv4: enableIPv4 ?? true,
+            enableIPv6: enableIPv6 ?? false,
+            internalNetwork: internalNetwork ?? false,
+            attachable: attachable ?? false,
+            ingress: ingress ?? false,
+            ipam: NetworkIPAM(
+                Driver: ipam?.driver ?? "default",
+                Config: ipam?.config.map {
+                    NetworkIPAMConfig(
+                        Subnet: $0.subnet,
+                        IPRange: $0.ipRange,
+                        Gateway: $0.gateway,
+                        AuxiliaryAddresses: $0.auxiliaryAddresses
+                    )
+                } ?? []
+            ),
+            options: options ?? [:],
+            containers: [:],
+            labels: labels ?? [:]
+        )
+        lastNetworkCreate = created
+        return created
+    }
+
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
+        lastNetworkConnect = (id, containerID)
+    }
+
+    func disconnectNetwork(id: String, containerID: String, force: Bool) async throws {
+        lastNetworkDisconnect = (id, containerID)
     }
 
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {

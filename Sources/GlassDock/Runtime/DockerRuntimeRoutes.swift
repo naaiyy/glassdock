@@ -53,6 +53,26 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer]
     func listNetworks() async throws -> [DockerRuntimeNetwork]
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork
+    func createNetwork(
+        name: String,
+        driver: String?,
+        scope: String?,
+        enableIPv4: Bool?,
+        enableIPv6: Bool?,
+        internalNetwork: Bool?,
+        attachable: Bool?,
+        ingress: Bool?,
+        ipam: DockerRuntimeNetworkIPAM?,
+        options: [String: String]?,
+        labels: [String: String]?
+    ) async throws -> DockerRuntimeNetwork
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws
+    func disconnectNetwork(id: String, containerID: String, force: Bool) async throws
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop
     func statsContainer(id: String) async throws -> DockerRuntimeStats
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error>
@@ -125,6 +145,32 @@ extension DockerRuntimeRouteBackend {
     }
     func putContainerArchive(id: String, path: String, data: Data, noOverwriteDirNonDir: Bool) async throws {
         throw DockerRuntimeRouteError.invalidRequest("container archive upload is not supported")
+    }
+    func createNetwork(
+        name: String,
+        driver: String?,
+        scope: String?,
+        enableIPv4: Bool?,
+        enableIPv6: Bool?,
+        internalNetwork: Bool?,
+        attachable: Bool?,
+        ingress: Bool?,
+        ipam: DockerRuntimeNetworkIPAM?,
+        options: [String: String]?,
+        labels: [String: String]?
+    ) async throws -> DockerRuntimeNetwork {
+        throw DockerRuntimeRouteError.invalidRequest("network creation is not supported")
+    }
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("network connection is not supported")
+    }
+    func disconnectNetwork(id: String, containerID: String, force: Bool) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("network disconnection is not supported")
     }
     func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {
         throw DockerRuntimeRouteError.invalidRequest("container changes are not supported")
@@ -449,6 +495,18 @@ struct DockerRuntimeNetwork: Sendable {
     let labels: [String: String]
 }
 
+struct DockerRuntimeNetworkIPAM: Sendable, Equatable {
+    let driver: String?
+    let config: [DockerRuntimeNetworkIPAMConfig]
+}
+
+struct DockerRuntimeNetworkIPAMConfig: Sendable, Equatable {
+    let subnet: String?
+    let ipRange: String?
+    let gateway: String?
+    let auxiliaryAddresses: [String: String]?
+}
+
 struct DockerRuntimeExecCreate: Sendable, Equatable {
     let containerID: String
     let command: [String]
@@ -547,6 +605,9 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.POST, pattern: "/commit", use: commitImage)
         try routes.registerVersionedRoute(.GET, pattern: "/info", use: info)
         try routes.registerVersionedRoute(.GET, pattern: "/system/df", use: systemDataUsage)
+        try routes.registerVersionedRoute(.POST, pattern: "/networks/create", use: createNetwork)
+        try routes.registerVersionedRoute(.POST, pattern: "/networks/{id:.*}/connect", use: connectNetwork)
+        try routes.registerVersionedRoute(.POST, pattern: "/networks/{id:.*}/disconnect", use: disconnectNetwork)
         try routes.registerVersionedRoute(.GET, pattern: "/networks", use: listNetworks)
         try routes.registerVersionedRoute(.GET, pattern: "/networks/{id:.*}", use: inspectNetwork)
         try routes.registerVersionedRoute(.POST, pattern: "/networks/prune", use: pruneNetworks)
@@ -1092,6 +1153,62 @@ struct DockerRuntimeRoutes: RouteCollection {
             containers = containers.filter { Self.matches($0, filters: filters) }
         }
         return try jsonResponse(.ok, containers.map(ListResponse.init))
+    }
+
+    private func createNetwork(_ req: Request) async throws -> Response {
+        let body = try req.content.decode(DockerNetworkCreateRequest.self)
+        guard !body.Name.isEmpty else {
+            throw Abort(.badRequest, reason: "Network name is required")
+        }
+        let network = try await call {
+            try await backend.createNetwork(
+                name: body.Name,
+                driver: body.Driver,
+                scope: body.Scope,
+                enableIPv4: body.EnableIPv4,
+                enableIPv6: body.EnableIPv6,
+                internalNetwork: body.Internal,
+                attachable: body.Attachable,
+                ingress: body.Ingress,
+                ipam: body.IPAM.map { $0.runtimeIPAM },
+                options: body.Options,
+                labels: body.Labels
+            )
+        }
+        return try jsonResponse(.created, RESTNetworkCreate(Id: network.id, Warning: ""))
+    }
+
+    private func connectNetwork(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let body = try req.content.decode(DockerNetworkConnectRequest.self)
+        guard !body.Container.isEmpty else {
+            throw Abort(.badRequest, reason: "Container is required")
+        }
+        try await call {
+            try await backend.connectNetwork(
+                id: id,
+                containerID: body.Container,
+                ipv4Address: body.EndpointConfig?.IPAMConfig?.IPv4Address,
+                ipv6Address: body.EndpointConfig?.IPAMConfig?.IPv6Address
+            )
+        }
+        return Response(status: .ok)
+    }
+
+    private func disconnectNetwork(_ req: Request) async throws -> Response {
+        let id = try requiredParameter("id", request: req)
+        let body = try req.content.decode(DockerNetworkDisconnectRequest.self)
+        guard !body.Container.isEmpty else {
+            throw Abort(.badRequest, reason: "Container is required")
+        }
+        try await call {
+            try await backend.disconnectNetwork(
+                id: id,
+                containerID: body.Container,
+                force: body.Force ?? false
+            )
+        }
+        return Response(status: .ok)
     }
 
     private func listNetworks(_ req: Request) async throws -> Response {
@@ -2122,6 +2239,60 @@ private struct SystemDataUsageResponse: Encodable {
         Containers = containers.map(ContainerUsage.init)
         Volumes = volumes
     }
+}
+
+private struct DockerNetworkCreateRequest: Content {
+    let Name: String
+    let Driver: String?
+    let Scope: String?
+    let Internal: Bool?
+    let Attachable: Bool?
+    let Ingress: Bool?
+    let EnableIPv4: Bool?
+    let EnableIPv6: Bool?
+    let IPAM: DockerNetworkIPAMRequest?
+    let Options: [String: String]?
+    let Labels: [String: String]?
+}
+
+private struct DockerNetworkIPAMRequest: Content {
+    let Driver: String?
+    let Config: [DockerNetworkIPAMConfigRequest]?
+
+    var runtimeIPAM: DockerRuntimeNetworkIPAM {
+        DockerRuntimeNetworkIPAM(
+            driver: Driver,
+            config: (Config ?? []).map {
+                DockerRuntimeNetworkIPAMConfig(
+                    subnet: $0.Subnet,
+                    ipRange: $0.IPRange,
+                    gateway: $0.Gateway,
+                    auxiliaryAddresses: $0.AuxiliaryAddresses
+                )
+            }
+        )
+    }
+}
+
+private struct DockerNetworkIPAMConfigRequest: Content {
+    let Subnet: String?
+    let IPRange: String?
+    let Gateway: String?
+    let AuxiliaryAddresses: [String: String]?
+}
+
+private struct DockerNetworkConnectRequest: Content {
+    let Container: String
+    let EndpointConfig: DockerNetworkEndpointConfig?
+}
+
+private struct DockerNetworkDisconnectRequest: Content {
+    let Container: String
+    let Force: Bool?
+}
+
+private struct DockerNetworkEndpointConfig: Content {
+    let IPAMConfig: ContainerIPAMConfig?
 }
 
 private struct CreateRequest: Content {

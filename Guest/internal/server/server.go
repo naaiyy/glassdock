@@ -308,6 +308,40 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = writePayload(w, request.ID, api.NetworkListResponse{Networks: items})
+	case api.MethodNetworkCreate:
+		body, err := decode[api.NetworkCreateRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.CreateNetwork(ctx, body)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		_ = writePayload(w, request.ID, item)
+	case api.MethodNetworkConnect:
+		body, err := decode[api.NetworkConnectRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.ConnectNetwork(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodNetworkDisconnect:
+		body, err := decode[api.NetworkDisconnectRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.DisconnectNetwork(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
 	case api.MethodContainerInspect:
 		body, err := decode[api.IDRequest](request)
 		if err != nil {

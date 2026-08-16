@@ -868,8 +868,8 @@
       "method": "POST",
       "path": "/networks/create",
       "operationId": "NetworkCreate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 201,
       "responseStatuses": [
         201,
         400,
@@ -878,8 +878,8 @@
         500
       ],
       "responseSchema": "#/definitions/NetworkCreateResponse",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Creates guest-owned bridge network objects with guest IPAM state; advanced drivers and options remain unavailable."
     },
     {
       "method": "POST",
@@ -930,8 +930,8 @@
       "method": "POST",
       "path": "/networks/{id}/connect",
       "operationId": "NetworkConnect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -940,15 +940,15 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Connects stopped guest containers to guest network objects; running-container hot attach returns a conflict until guest namespace attachment is available."
     },
     {
       "method": "POST",
       "path": "/networks/{id}/disconnect",
       "operationId": "NetworkDisconnect",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         403,
@@ -956,8 +956,8 @@
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Disconnects guest network endpoints from stopped containers and protects the default bridge network."
     },
     {
       "method": "GET",

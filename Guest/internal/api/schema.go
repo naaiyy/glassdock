@@ -42,6 +42,9 @@ const (
 	MethodContainerMetadataUpdate = "container.metadata.update"
 	MethodExecResize              = "exec.resize"
 	MethodNetworkList             = "network.list"
+	MethodNetworkCreate           = "network.create"
+	MethodNetworkConnect          = "network.connect"
+	MethodNetworkDisconnect       = "network.disconnect"
 	EventContainerExit            = "container.exit"
 )
 
@@ -268,6 +271,33 @@ type NetworkSummary struct {
 }
 type NetworkListResponse struct {
 	Networks []NetworkSummary `json:"networks"`
+}
+type NetworkCreateRequest struct {
+	Name       string            `json:"name"`
+	Driver     string            `json:"driver,omitempty"`
+	Scope      string            `json:"scope,omitempty"`
+	EnableIPv4 *bool             `json:"enableIPv4,omitempty"`
+	EnableIPv6 *bool             `json:"enableIPv6,omitempty"`
+	Internal   *bool             `json:"internal,omitempty"`
+	Attachable *bool             `json:"attachable,omitempty"`
+	Ingress    *bool             `json:"ingress,omitempty"`
+	IPAM       *NetworkIPAM      `json:"ipam,omitempty"`
+	Options    map[string]string `json:"options,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+}
+type NetworkCreateResponse struct {
+	Network NetworkSummary `json:"network"`
+}
+type NetworkConnectRequest struct {
+	NetworkID   string `json:"networkId"`
+	ContainerID string `json:"containerId"`
+	IPv4Address string `json:"ipv4Address,omitempty"`
+	IPv6Address string `json:"ipv6Address,omitempty"`
+}
+type NetworkDisconnectRequest struct {
+	NetworkID   string `json:"networkId"`
+	ContainerID string `json:"containerId"`
+	Force       bool   `json:"force,omitempty"`
 }
 type ContainerDeleteRequest struct {
 	ID       string `json:"id"`
