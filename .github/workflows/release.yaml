@@ -188,6 +188,9 @@ jobs:
             --approval FINAL-APPROVAL
           test -s ".build/release-distribution/GlassDock-${version}-macOS-arm64-notarized.zip"
           unzip -tq ".build/release-distribution/GlassDock-${version}-macOS-arm64-notarized.zip" >/dev/null
+          cp \
+            ".build/release-distribution/GlassDock-${version}-macOS-arm64-notarized.zip" \
+            "pkginstaller/out/GlassDock-${version}-macOS-arm64-notarized.zip"
 
       - name: Verify reproducible guest artifacts
         run: make -C Guest reproducibility-test
@@ -201,7 +204,7 @@ jobs:
             pkginstaller/out/*.tar.gz
             pkginstaller/out/SHA256SUMS
             pkginstaller/out/BUILD-METADATA.txt
-            .build/release-distribution/*-notarized.zip
+            pkginstaller/out/GlassDock-*-macOS-arm64-notarized.zip
           if-no-files-found: error
           retention-days: 7
 
