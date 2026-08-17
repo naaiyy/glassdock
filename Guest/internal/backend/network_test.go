@@ -413,3 +413,82 @@ func TestNetworkManagerCreatesAndMutatesGuestNetworkObjects(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkManagerCreatesLogicalNetworkAndAttachesContainer(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{
+		Name: "frontend", Labels: map[string]string{"tier": "edge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.Name != "frontend" || resource.Driver != "bridge" || resource.Subnet == "" {
+		t.Fatalf("unexpected network resource: %#v", resource)
+	}
+	if _, err := manager.Create("web"); err != nil {
+		t.Fatal(err)
+	}
+	manager.SetContainerIdentity("web", "web", "web-host")
+	connected, err := manager.ConnectNetwork(api.NetworkConnectRequest{
+		NetworkID: resource.ID, ContainerID: "web", Aliases: []string{"api"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := connected.Containers["web"]
+	if endpoint.IPv4Address == "" || endpoint.Gateway == "" || !reflect.DeepEqual(endpoint.Aliases, []string{"web", "api"}) {
+		t.Fatalf("unexpected attached endpoint: %#v", endpoint)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, expected := range []string{
+		"ip link add gd" + resource.ID[:10] + " type bridge",
+		"netlink attach st",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("network commands do not contain %q:\n%s", expected, joined)
+		}
+	}
+	hosts, nameservers, err := manager.HostsFile("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(hosts, endpoint.IPv4Address+" web\n") ||
+		!strings.Contains(hosts, endpoint.IPv4Address+" api\n") ||
+		!strings.Contains(hosts, endpoint.IPv4Address+" web-host\n") {
+		t.Fatalf("managed hosts file omitted aliases:\n%s", hosts)
+	}
+	if len(nameservers) != 2 {
+		t.Fatalf("nameservers = %#v, want default and custom gateways", nameservers)
+	}
+}
+
+func TestNetworkManagerHotDisconnectAndPruneAreStateful(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{Name: "temporary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create("web"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ConnectNetwork(api.NetworkConnectRequest{NetworkID: resource.ID, ContainerID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.DisconnectNetwork(api.NetworkDisconnectRequest{NetworkID: resource.ID, ContainerID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if inspected, err := manager.InspectNetwork(resource.ID); err != nil {
+		t.Fatal(err)
+	} else if len(inspected.Containers) != 0 {
+		t.Fatalf("disconnected network still has endpoints: %#v", inspected.Containers)
+	}
+	pruned := manager.PruneNetworks(map[string][]string{"dangling": {"true"}})
+	if !reflect.DeepEqual(pruned.NetworksDeleted, []string{resource.ID}) {
+		t.Fatalf("pruned networks = %#v, want %q", pruned.NetworksDeleted, resource.ID)
+	}
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "netlink detach st") {
+		t.Fatalf("hot disconnect did not remove the namespace interface: %#v", runner.commands)
+	}
+}

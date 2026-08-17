@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	bridgeName  = "glassdock0"
-	bridgeCIDR  = "10.88.0.1/16"
-	networkCIDR = "10.88.0.0/16"
+	bridgeName       = "glassdock0"
+	bridgeCIDR       = "10.88.0.1/16"
+	networkCIDR      = "10.88.0.0/16"
+	defaultNetworkID = "bridge"
 )
 
 type networkCommandRunner interface {
@@ -28,6 +29,11 @@ type networkCommandRunner interface {
 type networkNamespaceOperations interface {
 	Create(name, hostVeth, containerVeth, address string) error
 	Delete(name string) error
+}
+
+type networkAttachmentOperations interface {
+	Attach(namespace, bridge, hostVeth, containerVeth, address string, prefix int, interfaceName string) error
+	Detach(namespace, interfaceName string) error
 }
 
 type commandRunner struct{}
@@ -42,8 +48,19 @@ func (commandRunner) Run(name string, args ...string) error {
 
 type containerNetwork struct {
 	name       string
+	identity   string
+	hostname   string
 	address    string
 	guestPorts []api.PublishedPort
+	endpoints  map[string]*networkEndpoint
+}
+
+type networkEndpoint struct {
+	networkID     string
+	interfaceName string
+	endpointID    string
+	address       string
+	aliases       []string
 }
 
 type NetworkEndpoint struct {
@@ -53,9 +70,23 @@ type NetworkEndpoint struct {
 }
 
 type managedNetwork struct {
-	summary     api.NetworkSummary
-	bridge      string
-	nextAddress uint32
+	id         string
+	name       string
+	bridge     string
+	subnet     *net.IPNet
+	gateway    string
+	driver     string
+	scope      string
+	createdAt  time.Time
+	labels     map[string]string
+	options    map[string]string
+	internal   bool
+	enableIPv4 bool
+	enableIPv6 bool
+	attachable bool
+	ingress    bool
+	ipamDriver string
+	containers map[string]*networkEndpoint
 }
 
 // NetworkManager owns one bridge and one preconfigured network namespace per
@@ -68,9 +99,9 @@ type NetworkManager struct {
 	initialized bool
 	nextAddress uint32
 	nextPort    uint16
-	createdAt   time.Time
 	containers  map[string]*containerNetwork
 	networks    map[string]*managedNetwork
+	nextSubnet  uint8
 }
 
 func (m *NetworkManager) Path(id string) string {
@@ -83,12 +114,8 @@ func NewNetworkManager(runner networkCommandRunner) *NetworkManager {
 
 func newNetworkManager(runner networkCommandRunner, namespaces networkNamespaceOperations) *NetworkManager {
 	return &NetworkManager{
-		runner:      runner,
-		namespaces:  namespaces,
-		nextAddress: 2,
-		nextPort:    41000,
-		containers:  make(map[string]*containerNetwork),
-		networks:    make(map[string]*managedNetwork),
+		runner: runner, namespaces: namespaces, nextAddress: 2, nextPort: 41000,
+		containers: make(map[string]*containerNetwork), networks: make(map[string]*managedNetwork), nextSubnet: 89,
 	}
 }
 
@@ -110,6 +137,10 @@ func (m *NetworkManager) Create(id string) (string, error) {
 	if m.nextAddress >= 65535 {
 		return "", errors.New("container bridge address space is exhausted")
 	}
+	defaultNetwork, err := m.ensureDefaultNetwork()
+	if err != nil {
+		return "", err
+	}
 	name := networkName(id)
 	address := fmt.Sprintf("10.88.%d.%d", m.nextAddress/256, m.nextAddress%256)
 	m.nextAddress++
@@ -119,169 +150,644 @@ func (m *NetworkManager) Create(id string) (string, error) {
 		_ = m.namespaces.Delete(name)
 		return "", err
 	}
-	m.containers[id] = &containerNetwork{name: name, address: address}
-	bridge := m.networks[bridgeName]
-	if bridge != nil {
-		if bridge.summary.Containers == nil {
-			bridge.summary.Containers = make(map[string]api.NetworkContainer)
-		}
-		bridge.summary.Containers[id] = api.NetworkContainer{
-			EndpointID:  name,
-			IPv4Address: address + "/16",
-		}
+	endpoint := &networkEndpoint{
+		networkID: defaultNetwork.id, interfaceName: "eth0", endpointID: endpointName(defaultNetwork.id, id),
+		address: address,
 	}
+	m.containers[id] = &containerNetwork{
+		name: name, address: address, endpoints: map[string]*networkEndpoint{defaultNetwork.id: endpoint},
+	}
+	defaultNetwork.containers[id] = endpoint
 	return "/run/netns/" + name, nil
 }
 
-func (m *NetworkManager) CreateNetwork(request api.NetworkCreateRequest) (api.NetworkSummary, error) {
+func (m *NetworkManager) CreateNetwork(request api.NetworkCreateRequest) (api.NetworkResource, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if request.Name == "" {
-		return api.NetworkSummary{}, errors.New("network name is required")
+	if err := validateNetworkName(request.Name); err != nil {
+		return api.NetworkResource{}, err
 	}
-	if request.Name == "bridge" || request.Name == bridgeName {
-		return api.NetworkSummary{}, fmt.Errorf("network %s already exists", request.Name)
+	if request.Driver != "" && request.Driver != "bridge" && request.Driver != "nat" {
+		return api.NetworkResource{}, fmt.Errorf("unsupported network driver %q", request.Driver)
 	}
-	if request.Driver != "" && request.Driver != "bridge" && request.Driver != "default" {
-		return api.NetworkSummary{}, fmt.Errorf("unsupported network driver %s", request.Driver)
+	if existing := m.networkByNameLocked(request.Name); existing != nil {
+		return api.NetworkResource{}, fmt.Errorf("network %s already exists", request.Name)
 	}
-	for _, network := range m.networks {
-		if network.summary.Name == request.Name || network.summary.ID == request.Name {
-			return api.NetworkSummary{}, fmt.Errorf("network %s already exists", request.Name)
+	if _, err := m.ensureDefaultNetwork(); err != nil {
+		return api.NetworkResource{}, err
+	}
+	requestedSubnet, requestedGateway := request.Subnet, request.Gateway
+	ipamDriver := "default"
+	if request.IPAM != nil {
+		if request.IPAM.Driver != "" {
+			ipamDriver = request.IPAM.Driver
+		}
+		if len(request.IPAM.Config) > 0 {
+			if request.IPAM.Config[0].Subnet != "" {
+				requestedSubnet = request.IPAM.Config[0].Subnet
+			}
+			if request.IPAM.Config[0].Gateway != "" {
+				requestedGateway = request.IPAM.Config[0].Gateway
+			}
 		}
 	}
-	if err := m.initialize(); err != nil {
-		return api.NetworkSummary{}, err
-	}
-	id := networkID(request.Name)
-	subnet, gateway := networkSubnet(len(m.networks))
-	config := api.NetworkIPAMConfig{Subnet: subnet, Gateway: gateway}
-	if request.IPAM != nil && len(request.IPAM.Config) > 0 {
-		config = request.IPAM.Config[0]
-		if config.Subnet == "" {
-			config.Subnet = subnet
-		}
-		if config.Gateway == "" {
-			config.Gateway = gateway
-		}
-	}
-	_, subnetNetwork, err := net.ParseCIDR(config.Subnet)
+	subnet, gateway, err := m.allocateSubnetLocked(requestedSubnet, requestedGateway)
 	if err != nil {
-		return api.NetworkSummary{}, fmt.Errorf("invalid subnet %q: %w", config.Subnet, err)
+		return api.NetworkResource{}, err
 	}
+	id := networkID(request.Name, subnet.String())
 	bridge := networkBridgeName(id)
-	prefix, _ := subnetNetwork.Mask.Size()
-	commands := []string{
-		"ip link add " + bridge + " type bridge",
-		"ip addr add " + config.Gateway + "/" + strconv.Itoa(prefix) + " dev " + bridge,
-		"ip link set " + bridge + " up",
+	if err := m.createBridge(bridge, subnet, gateway); err != nil {
+		return api.NetworkResource{}, err
 	}
-	if err := m.runner.Run("sh", "-c", strings.Join(commands, " && ")); err != nil {
-		return api.NetworkSummary{}, err
-	}
-	driver := valueOr(request.Driver, "bridge")
+	driver := valueOrNetwork(request.Driver, "bridge")
 	if driver == "default" {
 		driver = "bridge"
 	}
-	summary := api.NetworkSummary{
-		ID:         id,
-		Name:       request.Name,
-		CreatedAt:  time.Now().UTC(),
-		Scope:      valueOr(request.Scope, "local"),
-		Driver:     driver,
-		EnableIPv4: boolOr(request.EnableIPv4, true),
-		EnableIPv6: boolOr(request.EnableIPv6, false),
-		Internal:   boolOr(request.Internal, false),
-		Attachable: boolOr(request.Attachable, false),
-		Ingress:    boolOr(request.Ingress, false),
-		IPAM: api.NetworkIPAM{
-			Driver: valueOrIPAMDriver(request.IPAM),
-			Config: []api.NetworkIPAMConfig{config},
-		},
-		Options:    cloneStrings(request.Options),
-		Containers: make(map[string]api.NetworkContainer),
-		Labels:     cloneStrings(request.Labels),
+	scope := valueOrNetwork(request.Scope, "local")
+	enableIPv4 := true
+	if request.EnableIPv4 != nil {
+		enableIPv4 = *request.EnableIPv4
 	}
-	m.networks[id] = &managedNetwork{summary: summary, bridge: bridge, nextAddress: 2}
-	return cloneNetworkSummary(summary), nil
+	attachable := true
+	if request.Attachable != nil {
+		attachable = *request.Attachable
+	}
+	ingress := false
+	if request.Ingress != nil {
+		ingress = *request.Ingress
+	}
+	network := &managedNetwork{
+		id: id, name: request.Name, bridge: bridge, subnet: subnet, gateway: gateway,
+		driver: driver, scope: scope, createdAt: time.Now().UTC(), labels: cloneStringMap(request.Labels),
+		options: cloneStringMap(request.Options), internal: request.Internal, enableIPv4: enableIPv4,
+		enableIPv6: request.EnableIPv6, attachable: attachable, ingress: ingress, ipamDriver: ipamDriver,
+		containers: make(map[string]*networkEndpoint),
+	}
+	m.networks[id] = network
+	return m.networkResourceLocked(network), nil
+}
+
+func (m *NetworkManager) ListNetworks() []api.NetworkResource {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]api.NetworkResource, 0, len(m.networks))
+	for _, network := range m.networks {
+		result = append(result, m.networkResourceLocked(network))
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
+}
+
+// Summaries preserves the original guest protocol view while the richer
+// network resource is used by the lifecycle API.
+func (m *NetworkManager) Summaries(containerNames map[string]string) []api.NetworkSummary {
+	resources := m.ListNetworks()
+	result := make([]api.NetworkSummary, 0, len(resources))
+	for _, resource := range resources {
+		prefix := ""
+		if len(resource.IPAM.Config) > 0 {
+			if _, subnet, err := net.ParseCIDR(resource.IPAM.Config[0].Subnet); err == nil {
+				bits, _ := subnet.Mask.Size()
+				prefix = fmt.Sprintf("/%d", bits)
+			}
+		}
+		containers := make(map[string]api.NetworkContainer, len(resource.Containers))
+		for id, endpoint := range resource.Containers {
+			name := endpoint.Name
+			if override := containerNames[id]; override != "" {
+				name = override
+			}
+			containers[id] = api.NetworkContainer{
+				Name: name, EndpointID: endpoint.EndpointID, IPv4Address: endpoint.IPv4Address + prefix,
+			}
+		}
+		result = append(result, api.NetworkSummary{
+			ID: resource.ID, Name: resource.Name, CreatedAt: resource.CreatedAt, Scope: resource.Scope,
+			Driver: resource.Driver, EnableIPv4: resource.EnableIPv4, EnableIPv6: resource.EnableIPv6,
+			Internal: resource.Internal, Attachable: resource.Attachable, Ingress: resource.Ingress,
+			IPAM: resource.IPAM, Options: cloneStringMap(resource.Options), Containers: containers,
+			Labels: cloneStringMap(resource.Labels),
+		})
+	}
+	return result
 }
 
 func (m *NetworkManager) Connect(
 	networkID, containerID, containerName, ipv4Address, ipv6Address string, running bool,
 ) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	network := m.findNetworkLocked(networkID)
-	if network == nil {
-		return fmt.Errorf("network %s not found", networkID)
-	}
 	if running {
 		return errors.New("network hot attach is not supported for running container")
 	}
-	if _, exists := m.containers[containerID]; !exists {
-		return fmt.Errorf("container %s network namespace does not exist", containerID)
-	}
-	if _, exists := network.summary.Containers[containerID]; exists {
-		return nil
-	}
-	if ipv4Address == "" {
-		ipv4Address = allocateNetworkAddress(network)
-	} else if ip := net.ParseIP(strings.Split(ipv4Address, "/")[0]); ip == nil || ip.To4() == nil {
-		return fmt.Errorf("invalid IPv4 address %s", ipv4Address)
-	}
-	if containerName == "" {
-		containerName = containerID
-	}
-	endpointID := networkEndpointID(network.summary.ID, containerID)
-	network.summary.Containers[containerID] = api.NetworkContainer{
-		Name:        containerName,
-		EndpointID:  endpointID,
-		IPv4Address: ipv4Address + "/16",
-		IPv6Address: ipv6Address,
-	}
-	return nil
+	_, err := m.ConnectNetwork(api.NetworkConnectRequest{
+		NetworkID: networkID, ContainerID: containerID, Aliases: []string{containerName},
+		IPv4Address: ipv4Address, IPv6Address: ipv6Address,
+	})
+	return err
 }
 
 func (m *NetworkManager) Disconnect(networkID, containerID string, force bool) error {
+	_, err := m.DisconnectNetwork(api.NetworkDisconnectRequest{
+		NetworkID: networkID, ContainerID: containerID, Force: force,
+	})
+	return err
+}
+
+func (m *NetworkManager) Endpoints() []NetworkEndpoint {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	network := m.findNetworkLocked(networkID)
-	if network == nil {
-		return fmt.Errorf("network %s not found", networkID)
+	ids := make([]string, 0, len(m.containers))
+	for id := range m.containers {
+		ids = append(ids, id)
 	}
-	if network.summary.ID == bridgeName {
-		return errors.New("cannot disconnect the default bridge network")
-	}
-	if _, exists := network.summary.Containers[containerID]; !exists {
-		if force {
-			return nil
+	sort.Strings(ids)
+	result := make([]NetworkEndpoint, 0, len(ids))
+	for _, id := range ids {
+		container := m.containers[id]
+		endpoint := container.endpoints[defaultNetworkID]
+		if endpoint == nil {
+			continue
 		}
-		return fmt.Errorf("container %s is not connected to network %s", containerID, network.summary.Name)
+		result = append(result, NetworkEndpoint{ContainerID: id, EndpointID: endpoint.endpointID, Address: endpoint.address})
 	}
-	delete(network.summary.Containers, containerID)
+	return result
+}
+
+func (m *NetworkManager) CreatedAt() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if network := m.networks[defaultNetworkID]; network != nil {
+		return network.createdAt
+	}
+	return time.Time{}
+}
+
+func (m *NetworkManager) InspectNetwork(id string) (api.NetworkResource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	network := m.resolveNetworkLocked(id)
+	if network == nil {
+		return api.NetworkResource{}, fmt.Errorf("network %s not found", id)
+	}
+	return m.networkResourceLocked(network), nil
+}
+
+func (m *NetworkManager) DeleteNetwork(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	network := m.resolveNetworkLocked(id)
+	if network == nil {
+		return fmt.Errorf("network %s not found", id)
+	}
+	if network.id == defaultNetworkID || network.name == "bridge" {
+		return errors.New("default bridge network cannot be removed")
+	}
+	if len(network.containers) != 0 {
+		return fmt.Errorf("network %s has active endpoints", network.name)
+	}
+	if err := m.runner.Run("ip", "link", "delete", network.bridge); err != nil {
+		return err
+	}
+	delete(m.networks, network.id)
 	return nil
 }
 
-func (m *NetworkManager) Summaries(containerNames map[string]string) []api.NetworkSummary {
+func (m *NetworkManager) PruneNetworks(filters map[string][]string) api.NetworkPruneResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	result := api.NetworkPruneResponse{NetworksDeleted: []string{}, Errors: map[string]string{}}
 	ids := make([]string, 0, len(m.networks))
 	for id := range m.networks {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	result := make([]api.NetworkSummary, 0, len(ids))
 	for _, id := range ids {
-		summary := cloneNetworkSummary(m.networks[id].summary)
-		for containerID, endpoint := range summary.Containers {
-			if name := containerNames[containerID]; name != "" {
-				endpoint.Name = name
-				summary.Containers[containerID] = endpoint
-			}
+		network := m.networks[id]
+		if network.id == defaultNetworkID || len(network.containers) != 0 || !matchesNetworkFilters(network, filters) {
+			continue
 		}
-		result = append(result, summary)
+		if err := m.runner.Run("ip", "link", "delete", network.bridge); err != nil {
+			result.Errors[id] = err.Error()
+			continue
+		}
+		delete(m.networks, id)
+		result.NetworksDeleted = append(result.NetworksDeleted, id)
 	}
 	return result
+}
+
+func (m *NetworkManager) ConnectNetwork(request api.NetworkConnectRequest) (api.NetworkResource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	network := m.resolveNetworkLocked(request.NetworkID)
+	if network == nil {
+		return api.NetworkResource{}, fmt.Errorf("network %s not found", request.NetworkID)
+	}
+	container := m.containers[request.ContainerID]
+	if container == nil {
+		return api.NetworkResource{}, fmt.Errorf("container %s not found", request.ContainerID)
+	}
+	if _, exists := network.containers[request.ContainerID]; exists {
+		return api.NetworkResource{}, fmt.Errorf("container %s is already connected to network %s", request.ContainerID, network.name)
+	}
+	address, err := m.allocateAddressLocked(network, request.IPv4Address)
+	if err != nil {
+		return api.NetworkResource{}, err
+	}
+	interfaceName := fmt.Sprintf("eth%d", len(container.endpoints))
+	endpointID := endpointName(network.id, request.ContainerID)
+	hostVeth := "vh" + endpointID[:10]
+	containerVeth := "vc" + endpointID[:10]
+	prefix, _ := network.subnet.Mask.Size()
+	if err := m.attachNamespace(container.name, network.bridge, hostVeth, containerVeth, address, prefix, interfaceName); err != nil {
+		return api.NetworkResource{}, err
+	}
+	aliases := normalizeAliases(request.Aliases, container)
+	endpoint := &networkEndpoint{
+		networkID: network.id, interfaceName: interfaceName, endpointID: endpointID,
+		address: address, aliases: aliases,
+	}
+	container.endpoints[network.id] = endpoint
+	network.containers[request.ContainerID] = endpoint
+	return m.networkResourceLocked(network), nil
+}
+
+func (m *NetworkManager) DisconnectNetwork(request api.NetworkDisconnectRequest) (api.NetworkResource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	network := m.resolveNetworkLocked(request.NetworkID)
+	if network == nil {
+		return api.NetworkResource{}, fmt.Errorf("network %s not found", request.NetworkID)
+	}
+	container := m.containers[request.ContainerID]
+	if container == nil {
+		return api.NetworkResource{}, fmt.Errorf("container %s not found", request.ContainerID)
+	}
+	endpoint := network.containers[request.ContainerID]
+	if endpoint == nil {
+		return api.NetworkResource{}, fmt.Errorf("container %s is not connected to network %s", request.ContainerID, network.name)
+	}
+	if err := m.detachNamespace(container.name, endpoint.interfaceName); err != nil {
+		return api.NetworkResource{}, err
+	}
+	delete(network.containers, request.ContainerID)
+	delete(container.endpoints, network.id)
+	return m.networkResourceLocked(network), nil
+}
+
+func (m *NetworkManager) SetContainerIdentity(id, name, hostname string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if container := m.containers[id]; container != nil {
+		if name != "" {
+			container.identity = name
+		}
+		if hostname != "" {
+			container.hostname = hostname
+		}
+	}
+}
+
+func (m *NetworkManager) ContainerIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.containers))
+	for id := range m.containers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (m *NetworkManager) HostsFile(id string) (string, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	container := m.containers[id]
+	if container == nil {
+		return "", nil, fmt.Errorf("container %s not found", id)
+	}
+	type hostEntry struct{ address, name string }
+	entries := make([]hostEntry, 0)
+	nameservers := make([]string, 0)
+	for _, network := range m.networks {
+		if network.containers[id] == nil {
+			continue
+		}
+		if network.gateway != "" {
+			nameservers = append(nameservers, network.gateway)
+		}
+		for containerID, endpoint := range network.containers {
+			other := m.containers[containerID]
+			if other == nil {
+				continue
+			}
+			name := other.identity
+			if name == "" {
+				name = containerID
+			}
+			entries = append(entries, hostEntry{address: endpoint.address, name: name})
+			if other.hostname != "" && other.hostname != name {
+				entries = append(entries, hostEntry{address: endpoint.address, name: other.hostname})
+			}
+			for _, alias := range endpoint.aliases {
+				entries = append(entries, hostEntry{address: endpoint.address, name: alias})
+			}
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].name == entries[j].name {
+			return entries[i].address < entries[j].address
+		}
+		return entries[i].name < entries[j].name
+	})
+	var builder strings.Builder
+	builder.WriteString("# glassdock managed hosts begin\n")
+	seen := make(map[string]struct{})
+	for _, entry := range entries {
+		key := entry.address + " " + entry.name
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		builder.WriteString(entry.address)
+		builder.WriteByte(' ')
+		builder.WriteString(entry.name)
+		builder.WriteByte('\n')
+	}
+	builder.WriteString("# glassdock managed hosts end\n")
+	return builder.String(), uniqueStrings(nameservers), nil
+}
+
+func (m *NetworkManager) ensureDefaultNetwork() (*managedNetwork, error) {
+	if network := m.networks[defaultNetworkID]; network != nil {
+		return network, nil
+	}
+	if err := m.initialize(); err != nil {
+		return nil, err
+	}
+	_, subnet, err := net.ParseCIDR(networkCIDR)
+	if err != nil {
+		return nil, err
+	}
+	network := &managedNetwork{
+		id: defaultNetworkID, name: "bridge", bridge: bridgeName, subnet: subnet,
+		gateway: "10.88.0.1", driver: "bridge", createdAt: time.Unix(0, 0).UTC(),
+		scope: "local", labels: map[string]string{}, options: map[string]string{}, enableIPv4: true,
+		attachable: false, ipamDriver: "default", containers: make(map[string]*networkEndpoint),
+	}
+	m.networks[network.id] = network
+	return network, nil
+}
+
+func (m *NetworkManager) networkByNameLocked(name string) *managedNetwork {
+	for _, network := range m.networks {
+		if network.name == name {
+			return network
+		}
+	}
+	return nil
+}
+
+func (m *NetworkManager) resolveNetworkLocked(reference string) *managedNetwork {
+	if network := m.networks[reference]; network != nil {
+		return network
+	}
+	return m.networkByNameLocked(reference)
+}
+
+func (m *NetworkManager) networkResourceLocked(network *managedNetwork) api.NetworkResource {
+	containers := make(map[string]api.NetworkEndpoint, len(network.containers))
+	for id, endpoint := range network.containers {
+		container := m.containers[id]
+		name := id
+		if container != nil && container.identity != "" {
+			name = container.identity
+		}
+		containers[id] = api.NetworkEndpoint{
+			Name: name, EndpointID: endpoint.endpointID, IPv4Address: endpoint.address,
+			Gateway: network.gateway, Aliases: append([]string(nil), endpoint.aliases...),
+		}
+	}
+	return api.NetworkResource{
+		ID: network.id, Name: network.name, CreatedAt: network.createdAt, Scope: valueOrNetwork(network.scope, "local"),
+		Driver: network.driver, EnableIPv4: network.enableIPv4, EnableIPv6: network.enableIPv6,
+		Internal: network.internal, Attachable: network.attachable, Ingress: network.ingress,
+		IPAM: api.NetworkIPAM{
+			Driver: valueOrNetwork(network.ipamDriver, "default"),
+			Config: []api.NetworkIPAMConfig{{Subnet: network.subnet.String(), Gateway: network.gateway}},
+		},
+		Subnet: network.subnet.String(), Gateway: network.gateway,
+		Options: cloneStringMap(network.options), Labels: cloneStringMap(network.labels), Containers: containers,
+	}
+}
+
+func (m *NetworkManager) allocateSubnetLocked(requested, requestedGateway string) (*net.IPNet, string, error) {
+	var subnet *net.IPNet
+	var err error
+	if requested != "" {
+		_, subnet, err = net.ParseCIDR(requested)
+		if err != nil || subnet.IP.To4() == nil {
+			return nil, "", fmt.Errorf("invalid IPv4 subnet %q", requested)
+		}
+	} else {
+		for attempts := 0; attempts < 166; attempts++ {
+			candidate := fmt.Sprintf("10.%d.0.0/16", m.nextSubnet)
+			m.nextSubnet++
+			_, candidateSubnet, parseErr := net.ParseCIDR(candidate)
+			if parseErr == nil && !m.subnetOverlapsLocked(candidateSubnet) {
+				subnet = candidateSubnet
+				break
+			}
+		}
+		if subnet == nil {
+			return nil, "", errors.New("network address space is exhausted")
+		}
+	}
+	if m.subnetOverlapsLocked(subnet) {
+		return nil, "", fmt.Errorf("network subnet %s overlaps an existing network", subnet.String())
+	}
+	gateway := requestedGateway
+	if gateway == "" {
+		gatewayIP := append(net.IP(nil), subnet.IP.To4()...)
+		gatewayIP[3]++
+		gateway = gatewayIP.String()
+	}
+	parsedGateway := net.ParseIP(gateway).To4()
+	if parsedGateway == nil || !subnet.Contains(parsedGateway) || parsedGateway.Equal(subnet.IP) {
+		return nil, "", fmt.Errorf("gateway %q is outside subnet %s", gateway, subnet.String())
+	}
+	return subnet, gateway, nil
+}
+
+func (m *NetworkManager) subnetOverlapsLocked(candidate *net.IPNet) bool {
+	for _, network := range m.networks {
+		if network.subnet.Contains(candidate.IP) || candidate.Contains(network.subnet.IP) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *NetworkManager) allocateAddressLocked(network *managedNetwork, requested string) (string, error) {
+	if requested != "" {
+		address := net.ParseIP(requested).To4()
+		if address == nil || !network.subnet.Contains(address) || address.String() == network.gateway {
+			return "", fmt.Errorf("IPv4 address %q is outside network %s", requested, network.name)
+		}
+		for _, endpoint := range network.containers {
+			if endpoint.address == address.String() {
+				return "", fmt.Errorf("IPv4 address %s is already in use", requested)
+			}
+		}
+		return address.String(), nil
+	}
+	base := binaryIP(network.subnet.IP.To4())
+	first := binaryIP(net.ParseIP(network.gateway).To4()) + 1
+	maskSize, bits := network.subnet.Mask.Size()
+	limit := uint32(1) << uint32(bits-maskSize)
+	for offset := first - base; offset < limit-1; offset++ {
+		candidate := uint32ToIP(base + offset).String()
+		used := false
+		for _, endpoint := range network.containers {
+			if endpoint.address == candidate {
+				used = true
+				break
+			}
+		}
+		if !used && candidate != network.gateway {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("network %s address space is exhausted", network.name)
+}
+
+func (m *NetworkManager) createBridge(bridge string, subnet *net.IPNet, gateway string) error {
+	prefix, _ := subnet.Mask.Size()
+	commands := [][]string{
+		{"ip", "link", "add", bridge, "type", "bridge"},
+		{"ip", "addr", "add", fmt.Sprintf("%s/%d", gateway, prefix), "dev", bridge},
+		{"ip", "link", "set", bridge, "up"},
+		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "!", "-o", bridge, "-j", "MASQUERADE"},
+		{"iptables", "-A", "FORWARD", "-i", bridge, "-j", "ACCEPT"},
+		{"iptables", "-A", "FORWARD", "-o", bridge, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+	}
+	for _, command := range commands {
+		if err := m.runner.Run(command[0], command[1:]...); err != nil {
+			_ = m.runner.Run("ip", "link", "delete", bridge)
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *NetworkManager) attachNamespace(namespace, bridge, hostVeth, containerVeth, address string, maskSize int, interfaceName string) error {
+	if operations, ok := m.namespaces.(networkAttachmentOperations); ok {
+		return operations.Attach(namespace, bridge, hostVeth, containerVeth, address, maskSize, interfaceName)
+	}
+	return m.runner.Run(
+		"netlink", "attach", namespace, bridge, hostVeth, containerVeth,
+		"addr", fmt.Sprintf("%s/%d", address, maskSize), "dev", interfaceName,
+	)
+}
+
+func (m *NetworkManager) detachNamespace(namespace, interfaceName string) error {
+	if operations, ok := m.namespaces.(networkAttachmentOperations); ok {
+		return operations.Detach(namespace, interfaceName)
+	}
+	return m.runner.Run("netlink", "detach", namespace, interfaceName)
+}
+
+func matchesNetworkFilters(network *managedNetwork, filters map[string][]string) bool {
+	for key, values := range filters {
+		if len(values) == 0 {
+			continue
+		}
+		matched := false
+		for _, value := range values {
+			switch key {
+			case "dangling":
+				want := value == "true" || value == "1"
+				matched = want == (len(network.containers) == 0)
+			case "driver":
+				matched = strings.EqualFold(network.driver, value)
+			case "id":
+				matched = strings.HasPrefix(network.id, value)
+			case "name":
+				matched = strings.Contains(network.name, value)
+			case "label":
+				parts := strings.SplitN(value, "=", 2)
+				label, exists := network.labels[parts[0]]
+				matched = exists && (len(parts) == 1 || label == parts[1])
+			case "type":
+				matched = value == "custom"
+			default:
+				matched = false
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeAliases(requested []string, container *containerNetwork) []string {
+	values := make([]string, 0, len(requested)+2)
+	if container.identity != "" {
+		values = append(values, container.identity)
+	}
+	for _, value := range requested {
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return uniqueStrings(values)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return map[string]string{}
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func valueOrNetwork(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func validateNetworkName(name string) error {
+	if name == "" || len(name) > 255 {
+		return errors.New("network name is required and must be at most 255 characters")
+	}
+	for _, character := range name {
+		if !(character == '-' || character == '_' || character == '.' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9') {
+			return fmt.Errorf("invalid network name %q", name)
+		}
+	}
+	return nil
 }
 
 func (m *NetworkManager) Publish(id string, requested []api.PublishedPort) ([]api.PublishedPort, error) {
@@ -386,32 +892,6 @@ func (m *NetworkManager) Published(id string) []api.PublishedPort {
 	return nil
 }
 
-func (m *NetworkManager) Endpoints() []NetworkEndpoint {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	ids := make([]string, 0, len(m.containers))
-	for id := range m.containers {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	endpoints := make([]NetworkEndpoint, 0, len(ids))
-	for _, id := range ids {
-		network := m.containers[id]
-		endpoints = append(endpoints, NetworkEndpoint{
-			ContainerID: id,
-			EndpointID:  network.name,
-			Address:     network.address,
-		})
-	}
-	return endpoints
-}
-
-func (m *NetworkManager) CreatedAt() time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.createdAt
-}
-
 func (m *NetworkManager) PublishedTCPDestination(guestPort uint16) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -441,22 +921,13 @@ func (m *NetworkManager) Delete(id string) error {
 	if err := m.namespaces.Delete(network.name); err != nil {
 		return err
 	}
-	delete(m.containers, id)
-	if bridge := m.networks[bridgeName]; bridge != nil {
-		delete(bridge.summary.Containers, id)
-	}
-	return nil
-}
-
-func (m *NetworkManager) findNetworkLocked(id string) *managedNetwork {
-	if network := m.networks[id]; network != nil {
-		return network
-	}
-	for _, network := range m.networks {
-		if network.summary.Name == id {
-			return network
+	for networkID, endpoint := range network.endpoints {
+		if managed := m.networks[networkID]; managed != nil {
+			delete(managed.containers, id)
 		}
+		_ = endpoint
 	}
+	delete(m.containers, id)
 	return nil
 }
 
@@ -477,119 +948,18 @@ func (m *NetworkManager) initialize() error {
 		return err
 	}
 	m.initialized = true
-	m.createdAt = time.Now().UTC()
-	m.networks[bridgeName] = &managedNetwork{
-		bridge:      bridgeName,
-		nextAddress: 2,
-		summary: api.NetworkSummary{
-			ID:         bridgeName,
-			Name:       "bridge",
-			CreatedAt:  m.createdAt,
-			Scope:      "local",
-			Driver:     "bridge",
-			EnableIPv4: true,
-			IPAM: api.NetworkIPAM{
-				Driver: "default",
-				Config: []api.NetworkIPAMConfig{{Subnet: networkCIDR, Gateway: "10.88.0.1"}},
-			},
-			Options:    map[string]string{},
-			Containers: make(map[string]api.NetworkContainer),
-			Labels:     map[string]string{},
-		},
-	}
-	return nil
-}
-
-func cloneNetworkSummary(summary api.NetworkSummary) api.NetworkSummary {
-	containers := make(map[string]api.NetworkContainer, len(summary.Containers))
-	for id, container := range summary.Containers {
-		containers[id] = container
-	}
-	return api.NetworkSummary{
-		ID:         summary.ID,
-		Name:       summary.Name,
-		CreatedAt:  summary.CreatedAt,
-		Scope:      summary.Scope,
-		Driver:     summary.Driver,
-		EnableIPv4: summary.EnableIPv4,
-		EnableIPv6: summary.EnableIPv6,
-		Internal:   summary.Internal,
-		Attachable: summary.Attachable,
-		Ingress:    summary.Ingress,
-		IPAM:       summary.IPAM,
-		Options:    cloneStrings(summary.Options),
-		Containers: containers,
-		Labels:     cloneStrings(summary.Labels),
-	}
-}
-
-func cloneStrings(values map[string]string) map[string]string {
-	if values == nil {
-		return map[string]string{}
-	}
-	result := make(map[string]string, len(values))
-	for key, value := range values {
-		result[key] = value
-	}
-	return result
-}
-
-func valueOr(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-func boolOr(value *bool, fallback bool) bool {
-	if value == nil {
-		return fallback
-	}
-	return *value
-}
-
-func valueOrIPAMDriver(value *api.NetworkIPAM) string {
-	if value == nil || value.Driver == "" {
-		return "default"
-	}
-	return value.Driver
-}
-
-func networkID(name string) string {
-	digest := sha256.Sum256([]byte("network:" + name))
-	return fmt.Sprintf("%x", digest[:])
-}
-
-func networkBridgeName(id string) string {
-	return "gd" + id[:10]
-}
-
-func networkEndpointID(networkID, containerID string) string {
-	digest := sha256.Sum256([]byte(networkID + ":" + containerID))
-	return fmt.Sprintf("%x", digest[:8])
-}
-
-func networkSubnet(index int) (string, string) {
-	third := 89 + index
-	if third > 250 {
-		third = 250
-	}
-	return fmt.Sprintf("10.%d.0.0/16", third), fmt.Sprintf("10.%d.0.1", third)
-}
-
-func allocateNetworkAddress(network *managedNetwork) string {
-	address := network.nextAddress
-	network.nextAddress++
-	third := 89
-	if len(network.summary.IPAM.Config) > 0 {
-		if _, subnet, err := net.ParseCIDR(network.summary.IPAM.Config[0].Subnet); err == nil {
-			bytes := subnet.IP.To4()
-			if bytes != nil {
-				third = int(bytes[1])
-			}
+	if m.networks[defaultNetworkID] == nil {
+		_, subnet, err := net.ParseCIDR(networkCIDR)
+		if err != nil {
+			return err
+		}
+		m.networks[defaultNetworkID] = &managedNetwork{
+			id: defaultNetworkID, name: "bridge", bridge: bridgeName, subnet: subnet,
+			gateway: "10.88.0.1", driver: "bridge", createdAt: time.Unix(0, 0).UTC(),
+			labels: map[string]string{}, containers: make(map[string]*networkEndpoint),
 		}
 	}
-	return fmt.Sprintf("10.%d.%d.%d", third, address/256, address%256)
+	return nil
 }
 
 func (m *NetworkManager) addRules(network *containerNetwork, port api.PublishedPort) error {
@@ -657,4 +1027,30 @@ func publishedRequestMatches(existing, requested []api.PublishedPort) bool {
 func networkName(id string) string {
 	digest := sha256.Sum256([]byte(id))
 	return fmt.Sprintf("st%x", digest[:6])
+}
+
+func networkID(name, subnet string) string {
+	digest := sha256.Sum256([]byte(name + "\x00" + subnet))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func endpointName(networkID, containerID string) string {
+	digest := sha256.Sum256([]byte(networkID + "\x00" + containerID))
+	return fmt.Sprintf("%x", digest[:6])
+}
+
+func networkBridgeName(id string) string {
+	return "gd" + id[:10]
+}
+
+func binaryIP(address net.IP) uint32 {
+	address = address.To4()
+	if len(address) != net.IPv4len {
+		return 0
+	}
+	return uint32(address[0])<<24 | uint32(address[1])<<16 | uint32(address[2])<<8 | uint32(address[3])
+}
+
+func uint32ToIP(value uint32) net.IP {
+	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }

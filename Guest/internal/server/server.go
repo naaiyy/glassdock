@@ -307,20 +307,25 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, api.ImageBuildResponse{Image: image})
-	case api.MethodContainerList:
-		items, err := s.backend.List(ctx)
-		if err != nil {
-			fail("containerd", err)
-			return
-		}
-		_ = writePayload(w, request.ID, api.ContainerListResponse{Containers: items})
 	case api.MethodNetworkList:
 		items, err := s.backend.Networks(ctx)
 		if err != nil {
-			fail("containerd", err)
+			fail("network", err)
 			return
 		}
 		_ = writePayload(w, request.ID, api.NetworkListResponse{Networks: items})
+	case api.MethodNetworkInspect:
+		body, err := decode[api.NetworkRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.Network(ctx, body.ID)
+		if err != nil {
+			fail("not_found", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
 	case api.MethodNetworkCreate:
 		body, err := decode[api.NetworkCreateRequest](request)
 		if err != nil {
@@ -329,32 +334,64 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		item, err := s.backend.CreateNetwork(ctx, body)
 		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkCreateResponse{Network: item})
+	case api.MethodNetworkDelete:
+		body, err := decode[api.NetworkRequest](request)
+		if err != nil {
 			fail("invalid_argument", err)
 			return
 		}
-		_ = writePayload(w, request.ID, item)
+		if err := s.backend.DeleteNetwork(ctx, body.ID); err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodNetworkPrune:
+		body, err := decode[api.NetworkPruneRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		result, err := s.backend.PruneNetworks(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, result)
 	case api.MethodNetworkConnect:
 		body, err := decode[api.NetworkConnectRequest](request)
 		if err != nil {
 			fail("invalid_argument", err)
 			return
 		}
-		if err := s.backend.ConnectNetwork(ctx, body); err != nil {
-			fail("containerd", err)
+		item, err := s.backend.ConnectNetwork(ctx, body)
+		if err != nil {
+			fail("network", err)
 			return
 		}
-		_ = writePayload(w, request.ID, api.Empty{})
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
 	case api.MethodNetworkDisconnect:
 		body, err := decode[api.NetworkDisconnectRequest](request)
 		if err != nil {
 			fail("invalid_argument", err)
 			return
 		}
-		if err := s.backend.DisconnectNetwork(ctx, body); err != nil {
+		item, err := s.backend.DisconnectNetwork(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
+	case api.MethodContainerList:
+		items, err := s.backend.List(ctx)
+		if err != nil {
 			fail("containerd", err)
 			return
 		}
-		_ = writePayload(w, request.ID, api.Empty{})
+		_ = writePayload(w, request.ID, api.ContainerListResponse{Containers: items})
 	case api.MethodContainerInspect:
 		body, err := decode[api.IDRequest](request)
 		if err != nil {

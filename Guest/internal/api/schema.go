@@ -43,7 +43,10 @@ const (
 	MethodContainerMetadataUpdate = "container.metadata.update"
 	MethodExecResize              = "exec.resize"
 	MethodNetworkList             = "network.list"
+	MethodNetworkInspect          = "network.inspect"
 	MethodNetworkCreate           = "network.create"
+	MethodNetworkDelete           = "network.delete"
+	MethodNetworkPrune            = "network.prune"
 	MethodNetworkConnect          = "network.connect"
 	MethodNetworkDisconnect       = "network.disconnect"
 	EventContainerExit            = "container.exit"
@@ -278,35 +281,83 @@ type NetworkSummary struct {
 	Containers map[string]NetworkContainer `json:"containers"`
 	Labels     map[string]string           `json:"labels"`
 }
-type NetworkListResponse struct {
-	Networks []NetworkSummary `json:"networks"`
-}
 type NetworkCreateRequest struct {
 	Name       string            `json:"name"`
 	Driver     string            `json:"driver,omitempty"`
 	Scope      string            `json:"scope,omitempty"`
+	Subnet     string            `json:"subnet,omitempty"`
+	Gateway    string            `json:"gateway,omitempty"`
 	EnableIPv4 *bool             `json:"enableIPv4,omitempty"`
-	EnableIPv6 *bool             `json:"enableIPv6,omitempty"`
-	Internal   *bool             `json:"internal,omitempty"`
+	EnableIPv6 bool              `json:"enableIPv6,omitempty"`
+	Internal   bool              `json:"internal,omitempty"`
 	Attachable *bool             `json:"attachable,omitempty"`
 	Ingress    *bool             `json:"ingress,omitempty"`
 	IPAM       *NetworkIPAM      `json:"ipam,omitempty"`
 	Options    map[string]string `json:"options,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
 }
-type NetworkCreateResponse struct {
-	Network NetworkSummary `json:"network"`
+type NetworkRequest struct {
+	ID string `json:"id"`
 }
+
+type NetworkPruneRequest struct {
+	Filters map[string][]string `json:"filters,omitempty"`
+}
+
 type NetworkConnectRequest struct {
-	NetworkID   string `json:"networkId"`
-	ContainerID string `json:"containerId"`
-	IPv4Address string `json:"ipv4Address,omitempty"`
-	IPv6Address string `json:"ipv6Address,omitempty"`
+	NetworkID   string   `json:"networkId"`
+	ContainerID string   `json:"containerId"`
+	Aliases     []string `json:"aliases,omitempty"`
+	IPv4Address string   `json:"ipv4Address,omitempty"`
+	IPv6Address string   `json:"ipv6Address,omitempty"`
 }
 type NetworkDisconnectRequest struct {
 	NetworkID   string `json:"networkId"`
 	ContainerID string `json:"containerId"`
 	Force       bool   `json:"force,omitempty"`
+}
+type NetworkEndpoint struct {
+	Name        string   `json:"name"`
+	EndpointID  string   `json:"endpointId"`
+	IPv4Address string   `json:"ipv4Address"`
+	Gateway     string   `json:"gateway"`
+	Aliases     []string `json:"aliases,omitempty"`
+}
+
+type NetworkResource struct {
+	ID         string                     `json:"id"`
+	Name       string                     `json:"name"`
+	CreatedAt  time.Time                  `json:"createdAt"`
+	Scope      string                     `json:"scope"`
+	Driver     string                     `json:"driver"`
+	EnableIPv4 bool                       `json:"enableIPv4"`
+	EnableIPv6 bool                       `json:"enableIPv6"`
+	Internal   bool                       `json:"internal"`
+	Attachable bool                       `json:"attachable"`
+	Ingress    bool                       `json:"ingress"`
+	IPAM       NetworkIPAM                `json:"ipam"`
+	Subnet     string                     `json:"subnet"`
+	Gateway    string                     `json:"gateway"`
+	Options    map[string]string          `json:"options,omitempty"`
+	Labels     map[string]string          `json:"labels,omitempty"`
+	Containers map[string]NetworkEndpoint `json:"containers,omitempty"`
+}
+
+type NetworkListResponse struct {
+	Networks []NetworkResource `json:"networks"`
+}
+
+type NetworkResponse struct {
+	Network NetworkResource `json:"network"`
+}
+
+type NetworkCreateResponse struct {
+	Network NetworkResource `json:"network"`
+}
+
+type NetworkPruneResponse struct {
+	NetworksDeleted []string          `json:"networksDeleted"`
+	Errors          map[string]string `json:"errors,omitempty"`
 }
 type ContainerDeleteRequest struct {
 	ID       string `json:"id"`

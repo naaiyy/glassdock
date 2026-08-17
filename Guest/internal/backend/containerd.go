@@ -324,6 +324,125 @@ func (b *Backend) waitNetworkPreparation(ctx context.Context, id string) error {
 func (b *Backend) Close() error             { return b.client.Close() }
 func (b *Backend) InitializeNetwork() error { return b.network.Initialize() }
 
+func (b *Backend) Networks(ctx context.Context) ([]api.NetworkResource, error) {
+	if err := b.network.Initialize(); err != nil {
+		return nil, err
+	}
+	return b.network.ListNetworks(), nil
+}
+
+func (b *Backend) Network(ctx context.Context, id string) (api.NetworkResource, error) {
+	if err := b.network.Initialize(); err != nil {
+		return api.NetworkResource{}, err
+	}
+	return b.network.InspectNetwork(id)
+}
+
+func (b *Backend) CreateNetwork(ctx context.Context, request api.NetworkCreateRequest) (api.NetworkResource, error) {
+	return b.network.CreateNetwork(request)
+}
+
+func (b *Backend) DeleteNetwork(ctx context.Context, id string) error {
+	return b.network.DeleteNetwork(id)
+}
+
+func (b *Backend) PruneNetworks(ctx context.Context, request api.NetworkPruneRequest) (api.NetworkPruneResponse, error) {
+	return b.network.PruneNetworks(request.Filters), nil
+}
+
+func (b *Backend) ConnectNetwork(ctx context.Context, request api.NetworkConnectRequest) (api.NetworkResource, error) {
+	resource, err := b.network.ConnectNetwork(request)
+	if err != nil {
+		return api.NetworkResource{}, err
+	}
+	if err := b.syncNetworkFiles(ctx, request.ContainerID); err != nil {
+		return api.NetworkResource{}, err
+	}
+	return resource, nil
+}
+
+func (b *Backend) DisconnectNetwork(ctx context.Context, request api.NetworkDisconnectRequest) (api.NetworkResource, error) {
+	resource, err := b.network.DisconnectNetwork(request)
+	if err != nil {
+		return api.NetworkResource{}, err
+	}
+	if err := b.syncNetworkFiles(ctx, request.ContainerID); err != nil {
+		return api.NetworkResource{}, err
+	}
+	return resource, nil
+}
+
+func (b *Backend) syncNetworkFiles(ctx context.Context, id string) error {
+	hosts, nameservers, err := b.network.HostsFile(id)
+	if err != nil {
+		return err
+	}
+	root, cleanup, err := b.mountContainerRoot(ctx, id, "glassdock-network-")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	etc := filepath.Join(root, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return err
+	}
+	if err := writeManagedNetworkFile(filepath.Join(etc, "hosts"), hosts, "hosts"); err != nil {
+		return err
+	}
+	if len(nameservers) != 0 {
+		var resolver strings.Builder
+		resolver.WriteString("# glassdock managed resolv.conf begin\n")
+		for _, nameserver := range nameservers {
+			resolver.WriteString("nameserver ")
+			resolver.WriteString(nameserver)
+			resolver.WriteByte('\n')
+		}
+		resolver.WriteString("# glassdock managed resolv.conf end\n")
+		if err := writeManagedNetworkFile(filepath.Join(etc, "resolv.conf"), resolver.String(), "resolv.conf"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeManagedNetworkFile(path, managed, kind string) error {
+	begin := "# glassdock managed " + kind + " begin"
+	end := "# glassdock managed " + kind + " end"
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lines := strings.Split(strings.ReplaceAll(string(existing), "\r\n", "\n"), "\n")
+	filtered := make([]string, 0, len(lines))
+	inside := false
+	for _, line := range lines {
+		if line == begin {
+			inside = true
+			continue
+		}
+		if inside && line == end {
+			inside = false
+			continue
+		}
+		if !inside {
+			filtered = append(filtered, line)
+		}
+	}
+	for len(filtered) > 0 && filtered[len(filtered)-1] == "" {
+		filtered = filtered[:len(filtered)-1]
+	}
+	if managed != "" {
+		filtered = append(filtered, strings.TrimSuffix(managed, "\n"))
+	}
+	content := strings.Join(filtered, "\n") + "\n"
+	if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("replace %s symlink: %w", kind, err)
+		}
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
 func (b *Backend) acquireTaskCreation(ctx context.Context) error {
 	select {
 	case b.taskCreates <- struct{}{}:
@@ -647,49 +766,6 @@ func (b *Backend) List(ctx context.Context) ([]api.Container, error) {
 	return out, nil
 }
 
-func (b *Backend) Networks(ctx context.Context) ([]api.NetworkSummary, error) {
-	containers, err := b.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	containerNames := make(map[string]string, len(containers))
-	for _, container := range containers {
-		name := container.Metadata.Name
-		if name == "" {
-			name = container.ID
-		}
-		containerNames[container.ID] = name
-	}
-	return b.network.Summaries(containerNames), nil
-}
-
-func (b *Backend) CreateNetwork(ctx context.Context, request api.NetworkCreateRequest) (api.NetworkSummary, error) {
-	return b.network.CreateNetwork(request)
-}
-
-func (b *Backend) ConnectNetwork(ctx context.Context, request api.NetworkConnectRequest) error {
-	container, err := b.Inspect(ctx, request.ContainerID)
-	if err != nil {
-		return err
-	}
-	name := container.Metadata.Name
-	if name == "" {
-		name = container.ID
-	}
-	return b.network.Connect(
-		request.NetworkID,
-		request.ContainerID,
-		name,
-		request.IPv4Address,
-		request.IPv6Address,
-		container.Status == string(containerd.Running) || container.Status == "running",
-	)
-}
-
-func (b *Backend) DisconnectNetwork(ctx context.Context, request api.NetworkDisconnectRequest) error {
-	return b.network.Disconnect(request.NetworkID, request.ContainerID, request.Force)
-}
-
 func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error) {
 	container, err := b.client.LoadContainer(b.ctx(ctx), id)
 	if err != nil {
@@ -929,6 +1005,7 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		return api.Container{}, err
 	}
 	keepNetwork = true
+	b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
 	return api.Container{
 		ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata,
 	}, nil
@@ -1060,10 +1137,19 @@ func (b *Backend) UpdateContainerMetadata(ctx context.Context, request api.Conta
 		return err
 	}
 	info.Labels[runtimeMetadataLabel] = encoded
-	return container.Update(ctx, func(_ context.Context, _ *containerd.Client, record *containerrecords.Container) error {
+	if err := container.Update(ctx, func(_ context.Context, _ *containerd.Client, record *containerrecords.Container) error {
 		record.Labels = info.Labels
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if request.Name != "" {
+		b.network.SetContainerIdentity(request.ID, metadata.Name, "")
+		if err := b.syncNetworkFiles(ctx, request.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpdateRequest) ([]string, error) {
@@ -1357,6 +1443,13 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 	}
 	record.setTask(task)
 	if err := b.persistRunningState(ctx, container, published); err != nil {
+		_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
+		_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
+		record.setTask(nil)
+		rollbackNetwork()
+		return api.Container{}, err
+	}
+	if err := b.syncNetworkFiles(ctx, id); err != nil {
 		_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
 		_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
 		record.setTask(nil)
