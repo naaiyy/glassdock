@@ -393,6 +393,20 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("network type filters distinguish the built-in bridge from custom bridge networks")
+    func networkTypeFilters() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .GET,
+                "/v1.51/networks?filters=%7B%22type%22:%5B%22custom%22%5D%7D"
+            ) { response async throws in
+                let values = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
+                #expect(values?.map { $0["Name"] as? String } == ["frontend", "racy"])
+            }
+        }
+    }
+
     @Test("network prune protects the guest bridge and deletes custom networks")
     func networkMutationRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -403,7 +417,7 @@ struct DockerRuntimeRoutesTests {
             ) { response async throws in
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
-                #expect(value?["NetworksDeleted"] as? [String] == [])
+                #expect(value?["NetworksDeleted"] as? [String] == ["network-frontend"])
                 #expect((value?["Errors"] as? [String: String])?.isEmpty == true)
             }
             try await app.testing().test(.DELETE, "/v1.51/networks/bridge") { response async in
@@ -1169,12 +1183,15 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     }
 
     func listNetworks() async throws -> [DockerRuntimeNetwork] {
-        [network()]
+        [network(), customNetwork(), racyNetwork()]
     }
 
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork {
         if id == "frontend" || id == "network-frontend" {
             return customNetwork()
+        }
+        if id == "network-racy" {
+            return attachedNetwork()
         }
         guard id == "bridge" || id == "glassdock0" else {
             throw DockerRuntimeRouteError.notFound("No such network: \(id)")
@@ -1390,6 +1407,50 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             options: [:],
             containers: [:],
             labels: [:]
+        )
+    }
+
+    private func racyNetwork() -> DockerRuntimeNetwork {
+        let network = customNetwork()
+        return DockerRuntimeNetwork(
+            id: "network-racy",
+            name: "racy",
+            createdAt: network.createdAt,
+            scope: network.scope,
+            driver: network.driver,
+            enableIPv4: network.enableIPv4,
+            enableIPv6: network.enableIPv6,
+            internalNetwork: network.internalNetwork,
+            attachable: network.attachable,
+            ingress: network.ingress,
+            ipam: network.ipam,
+            options: network.options,
+            containers: [:],
+            labels: network.labels
+        )
+    }
+
+    private func attachedNetwork() -> DockerRuntimeNetwork {
+        let network = racyNetwork()
+        let container = DockerRuntimeNetworkContainer(
+            name: "container-1", endpointID: "endpoint-1", macAddress: nil,
+            ipv4Address: "10.88.0.2", ipv6Address: nil
+        )
+        return DockerRuntimeNetwork(
+            id: network.id,
+            name: network.name,
+            createdAt: network.createdAt,
+            scope: network.scope,
+            driver: network.driver,
+            enableIPv4: network.enableIPv4,
+            enableIPv6: network.enableIPv6,
+            internalNetwork: network.internalNetwork,
+            attachable: network.attachable,
+            ingress: network.ingress,
+            ipam: network.ipam,
+            options: network.options,
+            containers: ["container-1": container],
+            labels: network.labels
         )
     }
 }

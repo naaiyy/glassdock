@@ -1355,8 +1355,16 @@ struct DockerRuntimeRoutes: RouteCollection {
         for network in candidates {
             guard network.Id != "glassdock0", network.Name != "bridge" else { continue }
             do {
+                let current = try await call { try await backend.inspectNetwork(id: network.Id) }
+                guard current.containers.isEmpty else { continue }
                 try await call { try await backend.deleteNetwork(id: network.Id) }
                 deleted.append(network.Id)
+                if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
+                    await broadcaster.broadcast(
+                        DockerEvent.make(
+                            type: "network", action: "destroy", actorID: network.Id,
+                            attributes: ["name": network.Name, "type": network.Driver]))
+                }
             } catch {
                 errors[network.Id] = String(describing: error)
             }

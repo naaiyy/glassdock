@@ -83,7 +83,10 @@ struct ClientNetworkService: ClientNetworkProtocol {
                 }
             }
             if let typeArr = filtersDict["type"], !typeArr.isEmpty {
-                let isCustom = network.Driver != "bridge" && network.Driver != "host" && network.Driver != "null"
+                let isBuiltIn =
+                    network.Id == "glassdock0"
+                    || ["bridge", "host", "none"].contains(network.Name)
+                let isCustom = !isBuiltIn
                 if !typeArr.contains(where: { ($0 == "custom" && isCustom) || ($0 == "builtin" && !isCustom) }) {
                     excludedReason = "type mismatch"
                 }
