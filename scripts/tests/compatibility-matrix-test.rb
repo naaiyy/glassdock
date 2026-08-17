@@ -42,6 +42,11 @@ end
 assert(body_is_valid?("HEAD", ""), "HEAD error bodies should not require a message")
 assert(body_is_valid?("GET", "operation not implemented"), "Docker not-implemented errors should be accepted")
 assert(!body_is_valid?("GET", ""), "empty GET error bodies should be rejected")
+assert(json_body("{\"status\":\"ok\"}\n{\"status\":\"done\"}"), "newline-delimited JSON should be accepted")
+assert(
+  validate_contract_response({"method" => "GET", "path" => "/_ping"}, 200, "OK", "" ).nil?,
+  "the Docker ping body should be accepted as plain text"
+)
 
 generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
 operations = generated_matrix.fetch("operations")

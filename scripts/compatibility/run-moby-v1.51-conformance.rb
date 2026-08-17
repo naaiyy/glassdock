@@ -37,14 +37,19 @@ def request(socket:, method:, path:, timeout:, body: nil, body_content_type: nil
     "curl", "--silent", "--show-error", "--max-time", timeout.to_s,
     "--unix-socket", socket, "-X", method,
     "-H", "Accept: application/json",
-    "-w", "\n%{http_code}\n%{content_type}", url
+    "-w", "\n%{http_code}\n%{content_type}\n", url
   ]
+  stdin_data = nil
   unless method == "GET" || method == "HEAD"
-    args.insert(-2, "--data-binary", body || "{}")
+    args.insert(-2, "--data-binary", "@-")
     args.insert(-2, "-H", "Content-Type: #{body_content_type || "application/json"}")
+    stdin_data = body || "{}"
   end
-  stdout, stderr, status = Open3.capture3(*args)
-  abort "curl failed for #{method} #{path}: #{stderr}" unless status.success?
+  stdout, stderr, status = Open3.capture3(*args, stdin_data: stdin_data)
+  unless status.success?
+    warn "curl failed for #{method} #{path}: #{stderr.strip}"
+    return [599, "", ""]
+  end
   lines = stdout.lines
   content_type = lines.pop.to_s.strip
   code = Integer(lines.pop.to_s.strip)
@@ -86,6 +91,12 @@ def contract_path(path)
     "#{concrete}?fromImage=alpine&tag=latest"
   when "/containers/json"
     "#{concrete}?all=1"
+  when "/containers/{id}/logs", "/services/{id}/logs", "/tasks/{id}/logs"
+    "#{concrete}?follow=false&tail=0"
+  when "/containers/{id}/stats"
+    "#{concrete}?stream=false"
+  when "/events"
+    "#{concrete}?since=0&until=1"
   else
     concrete
   end
@@ -94,7 +105,7 @@ end
 def contract_body(row)
   path = row.fetch("path")
   return tar_context if path == "/build"
-  return '{"username":"probe","password":"probe","serveraddress":"registry.invalid"}' if path == "/auth"
+  return '{"username":"probe","password":"probe"}' if path == "/auth"
   return '{"Image":"alpine"}' if path == "/containers/create"
   return '{"Name":"glassdock-compat-volume"}' if path == "/volumes/create"
   return '{"Name":"glassdock-compat-network"}' if path == "/networks/create"
@@ -108,9 +119,18 @@ def contract_body(row)
 end
 
 def json_body(body)
-  JSON.parse(body) unless body.empty?
+  return nil if body.empty?
+
+  JSON.parse(body)
 rescue JSON::ParserError
-  nil
+  lines = body.lines.map(&:strip).reject(&:empty?)
+  return nil if lines.empty?
+
+  begin
+    lines.map { |line| JSON.parse(line) }
+  rescue JSON::ParserError
+    nil
+  end
 end
 
 def validate_contract_response(row, status, body, content_type)
@@ -120,7 +140,9 @@ def validate_contract_response(row, status, body, content_type)
   if status >= 500 && status != 501 && status != 503
     return "#{method} #{path}: unexpected server error #{status}"
   end
-  if method != "HEAD" && !body.empty? && !path.end_with?("/attach/ws") && !content_type.include?("raw-stream")
+  return nil if path == "/_ping" && body == "OK"
+  binary = content_type.include?("raw-stream") || content_type.include?("tar") || content_type.include?("octet-stream")
+  if method != "HEAD" && !body.empty? && !binary
     return "#{method} #{path}: response body is not valid JSON" unless json_body(body)
   end
   if !body.empty? && status >= 400 && !content_type.include?("json")
