@@ -12,17 +12,6 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
     private static let endpoints = [
         Endpoint(method: .POST, pattern: "/build"),
         Endpoint(method: .POST, pattern: "/build/prune"),
-        Endpoint(method: .DELETE, pattern: "/plugins/{name:.*}"),
-        Endpoint(method: .GET, pattern: "/plugins"),
-        Endpoint(method: .GET, pattern: "/plugins/privileges"),
-        Endpoint(method: .GET, pattern: "/plugins/{name:.*}/json"),
-        Endpoint(method: .POST, pattern: "/plugins/create"),
-        Endpoint(method: .POST, pattern: "/plugins/pull"),
-        Endpoint(method: .POST, pattern: "/plugins/{name:.*}/disable"),
-        Endpoint(method: .POST, pattern: "/plugins/{name:.*}/enable"),
-        Endpoint(method: .POST, pattern: "/plugins/{name:.*}/push"),
-        Endpoint(method: .POST, pattern: "/plugins/{name:.*}/set"),
-        Endpoint(method: .POST, pattern: "/plugins/{name:.*}/upgrade"),
         Endpoint(method: .POST, pattern: "/session"),
         Endpoint(method: .PUT, pattern: "/volumes/{name:.*}"),
     ]

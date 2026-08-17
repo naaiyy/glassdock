@@ -86,6 +86,18 @@ actor DockerControlPlane {
         let state: String
     }
 
+    struct Plugin: Sendable, Equatable {
+        let id: String
+        var name: String
+        var reference: String
+        var enabled: Bool
+        var version: UInt64
+        var createdAt: Date
+        var updatedAt: Date
+        var config: [String: JSONValue]
+        var settings: [String: JSONValue]
+    }
+
     enum JSONValue: Sendable, Equatable, Codable {
         case string(String)
         case number(Double)
@@ -144,6 +156,7 @@ actor DockerControlPlane {
     ]
     private var services: [String: Service] = [:]
     private var tasks: [String: Task] = [:]
+    private var plugins: [String: Plugin] = [:]
 
     func createConfig(spec: Spec) -> Object {
         create(spec: spec, in: &configs)
@@ -377,6 +390,74 @@ actor DockerControlPlane {
         tasks[resolveTaskID(id)]
     }
 
+    func listPlugins() -> [Plugin] {
+        plugins.values.sorted { $0.name < $1.name }
+    }
+
+    func inspectPlugin(name: String) -> Plugin? {
+        plugins[resolvePluginName(name)]
+    }
+
+    func createPlugin(
+        name: String,
+        reference: String? = nil,
+        config: [String: JSONValue] = [:]
+    ) -> Plugin {
+        if let existing = inspectPlugin(name: name) { return existing }
+        let now = Date()
+        let plugin = Plugin(
+            id: Self.identifier(),
+            name: name,
+            reference: reference ?? name,
+            enabled: false,
+            version: 1,
+            createdAt: now,
+            updatedAt: now,
+            config: config,
+            settings: [:]
+        )
+        plugins[plugin.name] = plugin
+        return plugin
+    }
+
+    func pullPlugin(name: String, reference: String) -> Plugin {
+        createPlugin(name: name, reference: reference)
+    }
+
+    func deletePlugin(name: String) -> Bool {
+        plugins.removeValue(forKey: resolvePluginName(name)) != nil
+    }
+
+    func setPluginEnabled(name: String, enabled: Bool) -> Plugin? {
+        let resolved = resolvePluginName(name)
+        guard var plugin = plugins[resolved] else { return nil }
+        plugin.enabled = enabled
+        plugin.updatedAt = Date()
+        plugin.version += 1
+        plugins[resolved] = plugin
+        return plugin
+    }
+
+    func setPluginSettings(name: String, settings: [String: JSONValue]) -> Plugin? {
+        let resolved = resolvePluginName(name)
+        guard var plugin = plugins[resolved] else { return nil }
+        plugin.settings = settings
+        plugin.updatedAt = Date()
+        plugin.version += 1
+        plugins[resolved] = plugin
+        return plugin
+    }
+
+    func upgradePlugin(name: String, reference: String?) -> Plugin? {
+        let resolved = resolvePluginName(name)
+        guard var plugin = plugins[resolved] else { return nil }
+        if let reference, !reference.isEmpty { plugin.reference = reference }
+        plugin.updatedAt = Date()
+        plugin.version += 1
+        plugins[resolved] = plugin
+        return plugin
+    }
+
     private func node() -> Node? {
         guard let swarm else { return nil }
         return Node(
@@ -438,6 +519,10 @@ actor DockerControlPlane {
 
     private func resolveTaskID(_ id: String) -> String {
         tasks[id] != nil ? id : tasks.keys.first { $0.hasPrefix(id) } ?? id
+    }
+
+    private func resolvePluginName(_ name: String) -> String {
+        plugins[name] != nil ? name : plugins.keys.first { $0.hasPrefix(name) } ?? name
     }
 
     private func create(spec: Spec, in storage: inout [String: StoredObject]) -> Object {
@@ -549,6 +634,17 @@ struct DockerControlPlaneRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/tasks", use: listTasks)
         try routes.registerVersionedRoute(.GET, pattern: "/tasks/{id:.*}/logs", use: taskLogs)
         try routes.registerVersionedRoute(.GET, pattern: "/tasks/{id:.*}", use: inspectTask)
+        try routes.registerVersionedRoute(.GET, pattern: "/plugins", use: listPlugins)
+        try routes.registerVersionedRoute(.GET, pattern: "/plugins/privileges", use: pluginPrivileges)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/create", use: createPlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/pull", use: pullPlugin)
+        try routes.registerVersionedRoute(.GET, pattern: "/plugins/{name:.*}/json", use: inspectPlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/{name:.*}/disable", use: disablePlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/{name:.*}/enable", use: enablePlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/{name:.*}/push", use: pushPlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/{name:.*}/set", use: setPlugin)
+        try routes.registerVersionedRoute(.POST, pattern: "/plugins/{name:.*}/upgrade", use: upgradePlugin)
+        try routes.registerVersionedRoute(.DELETE, pattern: "/plugins/{name:.*}", use: deletePlugin)
     }
 
     private func createConfig(_ req: Request) async throws -> Response {
@@ -761,6 +857,92 @@ struct DockerControlPlaneRoutes: RouteCollection {
         return emptyLogResponse()
     }
 
+    private func listPlugins(_ req: Request) async throws -> Response {
+        try jsonResponse(.ok, await controlPlane.listPlugins().map(PluginResponse.init))
+    }
+
+    private func pluginPrivileges(_ req: Request) async throws -> Response {
+        try jsonResponse(.ok, [PluginPrivilege]())
+    }
+
+    private func createPlugin(_ req: Request) async throws -> Response {
+        let data = try await bodyData(req, allowEmpty: true)
+        let object =
+            (try? JSONDecoder().decode(
+                [String: DockerControlPlane.JSONValue].self, from: data
+            )) ?? [:]
+        let name =
+            req.query[String.self, at: "name"]
+            ?? (object["Name"].flatMap(Self.stringValue))
+            ?? "local-plugin"
+        let plugin = await controlPlane.createPlugin(name: name, config: object)
+        return try jsonResponse(.created, PluginResponse(plugin))
+    }
+
+    private func pullPlugin(_ req: Request) async throws -> Response {
+        let reference =
+            req.query[String.self, at: "remote"]
+            ?? req.query[String.self, at: "name"]
+            ?? "local-plugin"
+        let name = req.query[String.self, at: "name"] ?? reference
+        let plugin = await controlPlane.pullPlugin(name: name, reference: reference)
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func inspectPlugin(_ req: Request) async throws -> Response {
+        let plugin = await controlPlane.inspectPlugin(name: try parameter("name", req))
+        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func disablePlugin(_ req: Request) async throws -> Response {
+        let plugin = await controlPlane.setPluginEnabled(
+            name: try parameter("name", req), enabled: false
+        )
+        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func enablePlugin(_ req: Request) async throws -> Response {
+        let plugin = await controlPlane.setPluginEnabled(
+            name: try parameter("name", req), enabled: true
+        )
+        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func pushPlugin(_ req: Request) async throws -> Response {
+        guard let plugin = await controlPlane.inspectPlugin(name: try parameter("name", req)) else {
+            throw Abort(.notFound, reason: "plugin not found")
+        }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func setPlugin(_ req: Request) async throws -> Response {
+        let settings = try await decodeObject(req, message: "plugin settings")
+        let plugin = await controlPlane.setPluginSettings(
+            name: try parameter("name", req), settings: settings
+        )
+        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func upgradePlugin(_ req: Request) async throws -> Response {
+        let plugin = await controlPlane.upgradePlugin(
+            name: try parameter("name", req),
+            reference: req.query[String.self, at: "remote"]
+        )
+        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
+        return try jsonResponse(.ok, PluginResponse(plugin))
+    }
+
+    private func deletePlugin(_ req: Request) async throws -> Response {
+        guard await controlPlane.deletePlugin(name: try parameter("name", req)) else {
+            throw Abort(.notFound, reason: "plugin not found")
+        }
+        return try jsonResponse(.ok, WarningsResponse())
+    }
+
     private func decodeSpec(_ req: Request, secret: Bool) async throws -> DockerControlPlane.Spec {
         let body = try await bodyData(req)
         let value: SpecRequest
@@ -782,6 +964,11 @@ struct DockerControlPlaneRoutes: RouteCollection {
         } catch {
             throw Abort(.badRequest, reason: "Invalid \(message)")
         }
+    }
+
+    private static func stringValue(_ value: DockerControlPlane.JSONValue) -> String? {
+        guard case .string(let string) = value else { return nil }
+        return string
     }
 
     private func decodeSwarmRequest(_ req: Request) async throws -> SwarmRequest {
@@ -1095,6 +1282,44 @@ struct DockerControlPlaneRoutes: RouteCollection {
                 "Message": .string("service task is awaiting a compatible scheduler"),
             ]
             DesiredState = "running"
+        }
+    }
+
+    private struct PluginPrivilege: Encodable {
+        let Name: String
+        let Description: String
+
+        init() {
+            Name = "network"
+            Description = "Glass Dock does not grant host network privileges to plugins."
+        }
+    }
+
+    private struct PluginResponse: Encodable {
+        let Id: String
+        let Name: String
+        let PluginReference: String
+        let Enabled: Bool
+        let Config: [String: DockerControlPlane.JSONValue]
+        let Settings: [String: DockerControlPlane.JSONValue]
+        let Version: VersionResponse
+        let CreatedAt: String
+        let UpdatedAt: String
+        let Warnings: [String]
+
+        init(_ plugin: DockerControlPlane.Plugin) {
+            Id = plugin.id
+            Name = plugin.name
+            PluginReference = plugin.reference
+            Enabled = plugin.enabled
+            Config = plugin.config
+            Settings = plugin.settings
+            Version = .init(index: plugin.version)
+            CreatedAt = ISO8601DateFormatter().string(from: plugin.createdAt)
+            UpdatedAt = ISO8601DateFormatter().string(from: plugin.updatedAt)
+            Warnings = [
+                "Plugin execution is metadata-only; Glass Dock does not run Docker managed plugins."
+            ]
         }
     }
 }
