@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,12 @@ type buildPlan struct {
 	base    string
 	changes []string
 	runs    []string
+	copies  []buildCopy
+}
+
+type buildCopy struct {
+	sources     []string
+	destination string
 }
 
 // Build executes the Dockerfile instructions that can be represented by the
@@ -75,7 +82,7 @@ func (b *Backend) Build(ctx context.Context, request api.ImageBuildRequest) (api
 		_ = b.Delete(context.Background(), api.ContainerDeleteRequest{ID: id, Force: true})
 	}()
 
-	contextArchive, err := filterBuildContext(request.Context, dockerfile)
+	contextArchive, err := filterBuildContext(request.Context, dockerfile, plan.copies)
 	if err != nil {
 		return api.ImageResponse{}, err
 	}
@@ -212,8 +219,13 @@ func parseBuildDockerfile(data []byte) (buildPlan, error) {
 				return buildPlan{}, fmt.Errorf("%s requires a value", instruction)
 			}
 			plan.changes = append(plan.changes, instruction+" "+argument)
-		case "COPY", "ADD", "ARG", "SHELL":
-			// COPY and ADD are represented by the filtered build context.
+		case "COPY", "ADD":
+			copyInstruction, err := parseBuildCopy(argument)
+			if err != nil {
+				return buildPlan{}, fmt.Errorf("%s: %w", instruction, err)
+			}
+			plan.copies = append(plan.copies, copyInstruction)
+		case "ARG", "SHELL":
 			// ARG and SHELL affect Dockerfile parsing but not this image config.
 		default:
 			return buildPlan{}, fmt.Errorf("Dockerfile instruction %q is not supported", instruction)
@@ -228,13 +240,35 @@ func parseBuildDockerfile(data []byte) (buildPlan, error) {
 	return plan, nil
 }
 
-func filterBuildContext(contextData []byte, dockerfile string) ([]byte, error) {
+func parseBuildCopy(argument string) (buildCopy, error) {
+	var fields []string
+	if strings.HasPrefix(strings.TrimSpace(argument), "[") {
+		if err := json.Unmarshal([]byte(argument), &fields); err != nil {
+			return buildCopy{}, fmt.Errorf("invalid JSON form: %w", err)
+		}
+	} else {
+		fields = strings.Fields(argument)
+	}
+	if len(fields) < 2 {
+		return buildCopy{}, errors.New("requires at least one source and a destination")
+	}
+	for _, source := range fields[:len(fields)-1] {
+		if strings.Contains(source, "://") || strings.HasPrefix(source, "--from=") {
+			return buildCopy{}, fmt.Errorf("source %q is not supported", source)
+		}
+	}
+	return buildCopy{
+		sources:     fields[:len(fields)-1],
+		destination: fields[len(fields)-1],
+	}, nil
+}
+
+func filterBuildContext(contextData []byte, dockerfile string, copies []buildCopy) ([]byte, error) {
 	reader, closeReader, err := buildTarReader(contextData)
 	if err != nil {
 		return nil, err
 	}
 	defer closeReader()
-	expected := cleanBuildPath(dockerfile)
 	var output bytes.Buffer
 	writer := tar.NewWriter(&output)
 	defer writer.Close()
@@ -246,16 +280,28 @@ func filterBuildContext(contextData []byte, dockerfile string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read build context: %w", err)
 		}
-		if cleanBuildPath(header.Name) == expected || cleanBuildPath(header.Name) == ".dockerignore" {
+		entryName := cleanBuildPath(header.Name)
+		if entryName == cleanBuildPath(dockerfile) || entryName == ".dockerignore" {
 			continue
 		}
-		copyHeader := *header
-		if err := writer.WriteHeader(&copyHeader); err != nil {
-			return nil, fmt.Errorf("write build context: %w", err)
-		}
-		if header.Size > 0 {
-			if _, err := io.CopyN(writer, reader, header.Size); err != nil {
-				return nil, fmt.Errorf("copy build context: %w", err)
+		for _, copyInstruction := range copies {
+			for _, source := range copyInstruction.sources {
+				sourceName := strings.TrimSuffix(cleanBuildPath(source), "/")
+				if entryName != sourceName && !strings.HasPrefix(entryName, sourceName+"/") {
+					continue
+				}
+				targetName := copyTargetName(entryName, sourceName, copyInstruction.destination, len(copyInstruction.sources) > 1, header)
+				copyHeader := *header
+				copyHeader.Name = targetName
+				if err := writer.WriteHeader(&copyHeader); err != nil {
+					return nil, fmt.Errorf("write build context: %w", err)
+				}
+				if header.Size > 0 {
+					if _, err := io.CopyN(writer, reader, header.Size); err != nil {
+						return nil, fmt.Errorf("copy build context: %w", err)
+					}
+				}
+				break
 			}
 		}
 	}
@@ -263,6 +309,17 @@ func filterBuildContext(contextData []byte, dockerfile string) ([]byte, error) {
 		return nil, fmt.Errorf("close build context: %w", err)
 	}
 	return output.Bytes(), nil
+}
+
+func copyTargetName(entryName, sourceName, destination string, multipleSources bool, header *tar.Header) string {
+	destinationName := strings.TrimPrefix(cleanBuildPath(destination), "/")
+	relative := strings.TrimPrefix(entryName, sourceName)
+	relative = strings.TrimPrefix(relative, "/")
+	copyDirectory := header.Typeflag == tar.TypeDir || relative != ""
+	if multipleSources || strings.HasSuffix(destination, "/") || copyDirectory {
+		return path.Join(destinationName, path.Base(sourceName), relative)
+	}
+	return destinationName
 }
 
 func buildTarReader(data []byte) (*tar.Reader, func(), error) {

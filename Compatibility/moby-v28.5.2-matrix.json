@@ -65,7 +65,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Builds a Dockerfile context in the persistent guest runtime and returns Docker JSON progress."
+      "note": "Builds single-stage Dockerfiles with local COPY and ADD mappings in the persistent guest runtime; multi-stage, remote, and advanced builder semantics remain unsupported."
     },
     {
       "method": "POST",
@@ -1049,7 +1049,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Creates a local plugin metadata record from a request body or name query."
+      "note": "Returns Docker 501 because no plugin manager can create or execute host plugins."
     },
     {
       "method": "GET",
@@ -1077,7 +1077,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Records a remote plugin reference without executing or installing host plugin code."
+      "note": "Returns Docker 501 because no plugin manager can pull or install host plugins."
     },
     {
       "method": "DELETE",
@@ -1107,7 +1107,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Disables a plugin metadata record."
+      "note": "Returns Docker 501 because no plugin manager can control host plugins."
     },
     {
       "method": "POST",
@@ -1122,7 +1122,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Enables a plugin metadata record without starting plugin code."
+      "note": "Returns Docker 501 because no plugin manager can execute host plugins."
     },
     {
       "method": "GET",
@@ -1152,7 +1152,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Returns the local plugin metadata for Docker push clients; registry upload is not performed."
+      "note": "Returns Docker 501 because no plugin manager can export or push host plugins."
     },
     {
       "method": "POST",
@@ -1182,7 +1182,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerControlPlaneRoutes",
-      "note": "Updates the recorded plugin reference and version without executing plugin code."
+      "note": "Returns Docker 501 because no plugin manager can upgrade host plugins."
     },
     {
       "method": "GET",
@@ -1295,7 +1295,7 @@
       ],
       "responseSchema": "#/definitions/ServiceCreateResponse",
       "owner": "DockerControlPlaneRoutes",
-      "note": "Creates a service specification and a pending single-node task record."
+      "note": "Creates a service specification and reconciles one guest-backed task container; replicas, placement, and scheduler semantics remain incomplete."
     },
     {
       "method": "DELETE",
@@ -1360,7 +1360,7 @@
       ],
       "responseSchema": "#/definitions/ServiceUpdateResponse",
       "owner": "DockerControlPlaneRoutes",
-      "note": "Updates a local service specification and returns a Docker warning for unscheduled tasks."
+      "note": "Reconciles a service update by replacing its guest task container; replicas, placement, rollback, and scheduler semantics remain incomplete."
     },
     {
       "method": "POST",

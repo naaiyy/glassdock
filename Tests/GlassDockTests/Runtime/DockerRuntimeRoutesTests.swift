@@ -491,6 +491,17 @@ struct DockerRuntimeRoutesTests {
     @Test("runtime and build routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
+        let contextDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glassdock-build-context-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: contextDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: contextDirectory) }
+        try Data("FROM alpine\nCOPY app.txt /opt/app.txt\n".utf8)
+            .write(to: contextDirectory.appendingPathComponent("Dockerfile"))
+        try Data("built source\n".utf8)
+            .write(to: contextDirectory.appendingPathComponent("app.txt"))
+        let contextArchive = contextDirectory.appendingPathComponent("context.tar")
+        try ArchiveUtility.create(tarPath: contextArchive, from: contextDirectory)
+        let context = try Data(contentsOf: contextArchive)
         try await withApp(configure: { _ in }) { app in
             let router = app.regexRouter(with: app.logger)
             app.setRegexRouter(router)
@@ -512,11 +523,16 @@ struct DockerRuntimeRoutesTests {
             try await app.testing().test(
                 .POST,
                 "/v1.51/build?t=example.test%2Fbuilt%3Alatest",
-                body: ByteBuffer(string: "context")
+                headers: ["Content-Type": "application/x-tar"],
+                body: ByteBuffer(data: context)
             ) { response async throws in
                 #expect(response.status == .ok)
                 #expect(String(decoding: response.body.readableBytesView, as: UTF8.self).contains("Successfully built"))
             }
+            let build = try #require(await backend.lastBuild)
+            #expect(build.0 == context)
+            #expect(build.1 == "Dockerfile")
+            #expect(build.2 == ["example.test/built:latest"])
             try await app.testing().test(.POST, "/v1.51/build/prune") { response async throws in
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]

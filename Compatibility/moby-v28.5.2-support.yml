@@ -15,7 +15,7 @@ routes:
     path: /build
     support: partial
     owner: DockerRuntimeRoutes
-    note: Builds a Dockerfile context in the persistent guest runtime and returns Docker JSON progress.
+    note: Builds single-stage Dockerfiles with local COPY and ADD mappings in the persistent guest runtime; multi-stage, remote, and advanced builder semantics remain unsupported.
   - method: POST
     path: /build/prune
     support: partial
@@ -400,7 +400,7 @@ routes:
     path: /services/create
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Creates a service specification and a pending single-node task record.
+    note: Creates a service specification and reconciles one guest-backed task container; replicas, placement, and scheduler semantics remain incomplete.
   - method: DELETE
     path: /services/{id}
     support: partial
@@ -420,7 +420,7 @@ routes:
     path: /services/{id}/update
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Updates a local service specification and returns a Docker warning for unscheduled tasks.
+    note: Reconciles a service update by replacing its guest task container; replicas, placement, rollback, and scheduler semantics remain incomplete.
   - method: GET
     path: /tasks
     support: partial
@@ -445,7 +445,7 @@ routes:
     path: /plugins/create
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Creates a local plugin metadata record from a request body or name query.
+    note: Returns Docker 501 because no plugin manager can create or execute host plugins.
   - method: GET
     path: /plugins/privileges
     support: partial
@@ -455,7 +455,7 @@ routes:
     path: /plugins/pull
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Records a remote plugin reference without executing or installing host plugin code.
+    note: Returns Docker 501 because no plugin manager can pull or install host plugins.
   - method: DELETE
     path: /plugins/{name}
     support: partial
@@ -465,12 +465,12 @@ routes:
     path: /plugins/{name}/disable
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Disables a plugin metadata record.
+    note: Returns Docker 501 because no plugin manager can control host plugins.
   - method: POST
     path: /plugins/{name}/enable
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Enables a plugin metadata record without starting plugin code.
+    note: Returns Docker 501 because no plugin manager can execute host plugins.
   - method: GET
     path: /plugins/{name}/json
     support: partial
@@ -480,7 +480,7 @@ routes:
     path: /plugins/{name}/push
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Returns the local plugin metadata for Docker push clients; registry upload is not performed.
+    note: Returns Docker 501 because no plugin manager can export or push host plugins.
   - method: POST
     path: /plugins/{name}/set
     support: partial
@@ -490,7 +490,7 @@ routes:
     path: /plugins/{name}/upgrade
     support: partial
     owner: DockerControlPlaneRoutes
-    note: Updates the recorded plugin reference and version without executing plugin code.
+    note: Returns Docker 501 because no plugin manager can upgrade host plugins.
   - method: POST
     path: /session
     support: partial
