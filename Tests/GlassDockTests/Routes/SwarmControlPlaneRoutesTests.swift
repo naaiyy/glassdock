@@ -108,10 +108,11 @@ struct SwarmControlPlaneRoutesTests {
     @Test("nodes, services, and tasks share single-node control-plane state")
     func nodesServicesAndTasks() async throws {
         let controlPlane = DockerControlPlane()
+        let runtime = ControlPlaneRuntimeMock()
         try await withApp(configure: { _ in }) { app in
             let router = app.regexRouter(with: app.logger)
             app.setRegexRouter(router)
-            try app.register(collection: DockerControlPlaneRoutes(controlPlane: controlPlane))
+            try app.register(collection: DockerControlPlaneRoutes(controlPlane: controlPlane, runtime: runtime))
 
             try await app.testing().test(
                 .POST,
@@ -159,6 +160,7 @@ struct SwarmControlPlaneRoutesTests {
             }
             try await app.testing().test(.GET, "/v1.51/services/\(serviceID)/logs") { response async in
                 #expect(response.status == .ok)
+                #expect(Data(buffer: response.body).count > 8)
             }
             try await app.testing().test(
                 .POST,
@@ -179,11 +181,39 @@ struct SwarmControlPlaneRoutesTests {
             }
             try await app.testing().test(.GET, "/v1.51/tasks/\(taskID)/logs") { response async in
                 #expect(response.status == .ok)
+                #expect(Data(buffer: response.body).count > 8)
             }
             try await app.testing().test(.DELETE, "/v1.51/services/\(serviceID)") { response async in
                 #expect(response.status == .ok)
             }
         }
+    }
+}
+
+private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
+    func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
+        DockerRuntimeContainer(
+            id: "service-container",
+            name: request.name ?? "service-container",
+            image: request.image,
+            command: request.command,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            state: .created,
+            exitCode: nil,
+            labels: request.labels,
+            tty: request.tty,
+            ports: request.ports
+        )
+    }
+
+    func startContainer(id: String) async throws {}
+
+    func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {
+        DockerRuntimeProcessOutput(
+            stdout: stdout ? Data("service output\n".utf8) : Data(),
+            stderr: stderr ? Data("service warning\n".utf8) : Data(),
+            exitCode: 0
+        )
     }
 }
 

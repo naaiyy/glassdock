@@ -2,6 +2,14 @@ import Foundation
 import NIOCore
 import Vapor
 
+protocol DockerControlPlaneRuntime: Sendable {
+    func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer
+    func startContainer(id: String) async throws
+    func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput
+}
+
+extension GuestRuntime: DockerControlPlaneRuntime {}
+
 /// Stores the Docker control-plane objects that do not belong to a running
 /// container. The persistent guest runtime has no Swarm manager, so this
 /// state models the single-node control plane without pretending to schedule
@@ -84,6 +92,7 @@ actor DockerControlPlane {
         let serviceID: String
         let spec: [String: JSONValue]
         let state: String
+        let containerID: String?
     }
 
     struct Plugin: Sendable, Equatable {
@@ -341,7 +350,8 @@ actor DockerControlPlane {
             updatedAt: now,
             serviceID: serviceID,
             spec: taskSpec,
-            state: "new"
+            state: "new",
+            containerID: nil
         )
         services[serviceID] = service
         tasks[taskID] = task
@@ -388,6 +398,26 @@ actor DockerControlPlane {
 
     func inspectTask(id: String) -> Task? {
         tasks[resolveTaskID(id)]
+    }
+
+    func attachTaskContainer(taskID: String, containerID: String) -> Bool {
+        let resolved = resolveTaskID(taskID)
+        guard let task = tasks[resolved] else { return false }
+        tasks[resolved] = Task(
+            id: task.id,
+            version: task.version,
+            createdAt: task.createdAt,
+            updatedAt: Date(),
+            serviceID: task.serviceID,
+            spec: task.spec,
+            state: "running",
+            containerID: containerID
+        )
+        return true
+    }
+
+    func taskContainerID(id: String) -> String? {
+        tasks[resolveTaskID(id)]?.containerID
     }
 
     func listPlugins() -> [Plugin] {
@@ -602,6 +632,12 @@ actor DockerControlPlane {
 
 struct DockerControlPlaneRoutes: RouteCollection {
     let controlPlane: DockerControlPlane
+    let runtime: (any DockerControlPlaneRuntime)?
+
+    init(controlPlane: DockerControlPlane, runtime: (any DockerControlPlaneRuntime)? = nil) {
+        self.controlPlane = controlPlane
+        self.runtime = runtime
+    }
 
     func boot(routes: RoutesBuilder) throws {
         try routes.registerVersionedRoute(.POST, pattern: "/configs/create", use: createConfig)
@@ -797,6 +833,29 @@ struct DockerControlPlaneRoutes: RouteCollection {
         guard let service = await controlPlane.createService(spec: spec) else {
             throw Abort(.serviceUnavailable, reason: "This node is not a swarm manager")
         }
+        guard let runtime else {
+            _ = await controlPlane.removeService(id: service.id)
+            throw Abort(.serviceUnavailable, reason: "service scheduler is unavailable")
+        }
+        do {
+            let container = try await runtime.createContainer(
+                try containerRequest(serviceName: name, specification: spec)
+            )
+            try await runtime.startContainer(id: container.id)
+            guard
+                await controlPlane.attachTaskContainer(
+                    taskID: service.taskID, containerID: container.id
+                )
+            else {
+                throw Abort(.internalServerError, reason: "service task was not retained")
+            }
+        } catch let abort as Abort {
+            _ = await controlPlane.removeService(id: service.id)
+            throw abort
+        } catch {
+            _ = await controlPlane.removeService(id: service.id)
+            throw Abort(.serviceUnavailable, reason: "service task could not be started: \(error)")
+        }
         return try jsonResponse(.created, CreateResponse(id: service.id))
     }
 
@@ -830,10 +889,10 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func serviceLogs(_ req: Request) async throws -> Response {
-        guard await controlPlane.inspectService(id: try parameter("id", req)) != nil else {
+        guard let service = await controlPlane.inspectService(id: try parameter("id", req)) else {
             throw Abort(.notFound, reason: "service not found")
         }
-        return emptyLogResponse()
+        return try await logsResponse(taskID: service.taskID)
     }
 
     private func listTasks(_ req: Request) async throws -> Response {
@@ -851,10 +910,11 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func taskLogs(_ req: Request) async throws -> Response {
-        guard await controlPlane.inspectTask(id: try parameter("id", req)) != nil else {
+        let taskID = try parameter("id", req)
+        guard await controlPlane.inspectTask(id: taskID) != nil else {
             throw Abort(.notFound, reason: "task not found")
         }
-        return emptyLogResponse()
+        return try await logsResponse(taskID: taskID)
     }
 
     private func listPlugins(_ req: Request) async throws -> Response {
@@ -1011,12 +1071,106 @@ struct DockerControlPlaneRoutes: RouteCollection {
         return response
     }
 
-    private func emptyLogResponse() -> Response {
-        let response = Response(status: .ok, body: .init(data: Data()))
+    private func logsResponse(taskID: String) async throws -> Response {
+        guard let runtime else {
+            throw Abort(.serviceUnavailable, reason: "service scheduler is unavailable")
+        }
+        guard let containerID = await controlPlane.taskContainerID(id: taskID) else {
+            throw Abort(.serviceUnavailable, reason: "service task has not been scheduled")
+        }
+        let output = try await runtime.logs(id: containerID, stdout: true, stderr: true)
+        var data = Data()
+        data.append(Self.rawStreamFrame(output.stdout, stream: 1))
+        data.append(Self.rawStreamFrame(output.stderr, stream: 2))
+        let response = Response(status: .ok, body: .init(data: data))
         response.headers.contentType = HTTPMediaType(
             type: "application", subType: "vnd.docker.raw-stream"
         )
         return response
+    }
+
+    private func containerRequest(
+        serviceName: String, specification: [String: DockerControlPlane.JSONValue]
+    ) throws -> DockerRuntimeContainerCreate {
+        guard
+            case .object(let taskTemplate) = specification["TaskTemplate"],
+            case .object(let containerSpec) = taskTemplate["ContainerSpec"],
+            case .string(let image) = containerSpec["Image"], !image.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "TaskTemplate.ContainerSpec.Image is required")
+        }
+        let command = Self.strings(containerSpec["Command"])
+        let arguments = Self.strings(containerSpec["Args"])
+        let labels = Self.stringMap(containerSpec["Labels"])
+        let environment = Self.strings(containerSpec["Env"])
+        let mounts = try Self.mounts(containerSpec["Mounts"])
+        return DockerRuntimeContainerCreate(
+            name: "swarm-\(serviceName)-\(UUID().uuidString.prefix(8).lowercased())",
+            image: image,
+            command: command + arguments,
+            entrypoint: command.isEmpty ? nil : command,
+            cmd: arguments.isEmpty ? nil : arguments,
+            environment: environment,
+            workingDirectory: Self.string(containerSpec["Dir"]),
+            user: Self.string(containerSpec["User"]),
+            hostname: Self.string(containerSpec["Hostname"]),
+            labels: labels,
+            tty: Self.bool(containerSpec["TTY"]) ?? false,
+            autoRemove: false,
+            mounts: mounts,
+            ports: []
+        )
+    }
+
+    private static func string(_ value: DockerControlPlane.JSONValue?) -> String? {
+        guard case .string(let value) = value else { return nil }
+        return value
+    }
+
+    private static func bool(_ value: DockerControlPlane.JSONValue?) -> Bool? {
+        guard case .bool(let value) = value else { return nil }
+        return value
+    }
+
+    private static func strings(_ value: DockerControlPlane.JSONValue?) -> [String] {
+        guard case .array(let values) = value else { return [] }
+        return values.compactMap(string)
+    }
+
+    private static func stringMap(_ value: DockerControlPlane.JSONValue?) -> [String: String] {
+        guard case .object(let values) = value else { return [:] }
+        return values.reduce(into: [:]) { result, item in
+            if let value = string(item.value) { result[item.key] = value }
+        }
+    }
+
+    private static func mounts(
+        _ value: DockerControlPlane.JSONValue?
+    ) throws -> [DockerRuntimeMount] {
+        guard case .array(let values) = value else { return [] }
+        return try values.map { value in
+            guard case .object(let mount) = value,
+                let source = string(mount["Source"]),
+                let target = string(mount["Target"]),
+                !source.isEmpty, !target.isEmpty
+            else {
+                throw Abort(.badRequest, reason: "Invalid service mount")
+            }
+            return DockerRuntimeMount(
+                source: source,
+                target: target,
+                readOnly: bool(mount["ReadOnly"]) ?? false
+            )
+        }
+    }
+
+    private static func rawStreamFrame(_ payload: Data, stream: UInt8) -> Data {
+        guard !payload.isEmpty else { return Data() }
+        var frame = Data([stream, 0, 0, 0])
+        var length = UInt32(payload.count).bigEndian
+        frame.append(Data(bytes: &length, count: MemoryLayout<UInt32>.size))
+        frame.append(payload)
+        return frame
     }
 
     private struct SpecRequest: Decodable {
@@ -1279,7 +1433,11 @@ struct DockerControlPlaneRoutes: RouteCollection {
             Status = [
                 "Timestamp": .string(ISO8601DateFormatter().string(from: task.updatedAt)),
                 "State": .string(task.state),
-                "Message": .string("service task is awaiting a compatible scheduler"),
+                "Message": .string(
+                    task.containerID == nil
+                        ? "service task is awaiting a compatible scheduler"
+                        : "service task is running in the guest runtime"
+                ),
             ]
             DesiredState = "running"
         }
