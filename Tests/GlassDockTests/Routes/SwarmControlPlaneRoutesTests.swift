@@ -208,6 +208,18 @@ struct SwarmControlPlaneRoutesTests {
                 #expect(Data(buffer: response.body).count > 8)
             }
             try await app.testing().test(
+                .GET,
+                "/v1.51/services/\(serviceID)/logs?stdout=1&stderr=0&timestamps=1&tail=1"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(
+                    await runtime.lastLogOptions()
+                        == DockerRuntimeLogOptions(
+                            timestamps: true, details: false, since: nil, until: nil
+                        ))
+                #expect(Data(buffer: response.body).contains(0x01))
+            }
+            try await app.testing().test(
                 .POST,
                 "/v1.51/services/\(serviceID)/update",
                 headers: ["Content-Type": "application/json"],
@@ -243,6 +255,7 @@ struct SwarmControlPlaneRoutesTests {
 private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
     private var requests: [DockerRuntimeContainerCreate] = []
     private var deletedIDs: [String] = []
+    private var lastOptions: DockerRuntimeLogOptions?
 
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
         requests.append(request)
@@ -275,6 +288,16 @@ private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
         )
     }
 
+    func logs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> DockerRuntimeProcessOutput {
+        lastOptions = options
+        return try await logs(id: id, stdout: stdout, stderr: stderr)
+    }
+
     func latestCreatedContainerID() -> String? {
         requests.isEmpty ? nil : "service-container-\(requests.count)"
     }
@@ -282,6 +305,8 @@ private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
     func deletedContainerIDs() -> [String] { deletedIDs }
 
     func createdImages() -> [String] { requests.map(\.image) }
+
+    func lastLogOptions() -> DockerRuntimeLogOptions? { lastOptions }
 }
 
 extension DockerControlPlane {

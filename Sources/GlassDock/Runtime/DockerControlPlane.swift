@@ -7,9 +7,26 @@ protocol DockerControlPlaneRuntime: Sendable {
     func startContainer(id: String) async throws
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput
+    func logs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> DockerRuntimeProcessOutput
 }
 
 extension GuestRuntime: DockerControlPlaneRuntime {}
+
+extension DockerControlPlaneRuntime {
+    func logs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> DockerRuntimeProcessOutput {
+        try await logs(id: id, stdout: stdout, stderr: stderr)
+    }
+}
 
 /// Stores the Docker control-plane objects that do not belong to a running
 /// container. The persistent guest runtime has no Swarm manager, so this
@@ -981,7 +998,7 @@ struct DockerControlPlaneRoutes: RouteCollection {
         guard let service = await controlPlane.inspectService(id: try parameter("id", req)) else {
             throw Abort(.notFound, reason: "service not found")
         }
-        return try await logsResponse(taskID: service.taskID)
+        return try await logsResponse(taskID: service.taskID, request: req)
     }
 
     private func listTasks(_ req: Request) async throws -> Response {
@@ -1003,7 +1020,7 @@ struct DockerControlPlaneRoutes: RouteCollection {
         guard await controlPlane.inspectTask(id: taskID) != nil else {
             throw Abort(.notFound, reason: "task not found")
         }
-        return try await logsResponse(taskID: taskID)
+        return try await logsResponse(taskID: taskID, request: req)
     }
 
     private func listPlugins(_ req: Request) async throws -> Response {
@@ -1128,22 +1145,86 @@ struct DockerControlPlaneRoutes: RouteCollection {
         return response
     }
 
-    private func logsResponse(taskID: String) async throws -> Response {
+    private func logsResponse(taskID: String, request: Request) async throws -> Response {
         guard let runtime else {
             throw Abort(.serviceUnavailable, reason: "service scheduler is unavailable")
         }
         guard let containerID = await controlPlane.taskContainerID(id: taskID) else {
             throw Abort(.serviceUnavailable, reason: "service task has not been scheduled")
         }
-        let output = try await runtime.logs(id: containerID, stdout: true, stderr: true)
+        let hasStreamSelection =
+            request.query[String.self, at: "stdout"] != nil
+            || request.query[String.self, at: "stderr"] != nil
+        let stdout =
+            hasStreamSelection
+            ? Self.mobyBool(request.query[String.self, at: "stdout"])
+            : true
+        let stderr =
+            hasStreamSelection
+            ? Self.mobyBool(request.query[String.self, at: "stderr"])
+            : true
+        guard stdout || stderr else {
+            throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
+        }
+        let options = try Self.logOptions(request)
+        var output = try await runtime.logs(
+            id: containerID, stdout: stdout, stderr: stderr, options: options
+        )
+        if let tail = request.query[String.self, at: "tail"] {
+            output = try Self.applyTail(output, value: tail)
+        }
         var data = Data()
-        data.append(Self.rawStreamFrame(output.stdout, stream: 1))
-        data.append(Self.rawStreamFrame(output.stderr, stream: 2))
+        if stdout { data.append(Self.rawStreamFrame(output.stdout, stream: 1)) }
+        if stderr { data.append(Self.rawStreamFrame(output.stderr, stream: 2)) }
         let response = Response(status: .ok, body: .init(data: data))
         response.headers.contentType = HTTPMediaType(
             type: "application", subType: "vnd.docker.raw-stream"
         )
         return response
+    }
+
+    private static func mobyBool(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value == "1" || value.lowercased() == "true"
+    }
+
+    private static func logOptions(_ req: Request) throws -> DockerRuntimeLogOptions {
+        func parse(_ name: String) throws -> Int64? {
+            guard let raw = req.query[String.self, at: name], !raw.isEmpty, raw != "0" else {
+                return nil
+            }
+            if let seconds = Double(raw), seconds >= 0, seconds.isFinite {
+                return Int64(seconds)
+            }
+            if let date = ISO8601DateFormatter().date(from: raw), date.timeIntervalSince1970 >= 0 {
+                return Int64(date.timeIntervalSince1970)
+            }
+            throw Abort(.badRequest, reason: "Invalid \(name) value: \(raw)")
+        }
+        return DockerRuntimeLogOptions(
+            timestamps: mobyBool(req.query[String.self, at: "timestamps"]),
+            details: mobyBool(req.query[String.self, at: "details"]),
+            since: try parse("since"),
+            until: try parse("until")
+        )
+    }
+
+    private static func applyTail(
+        _ output: DockerRuntimeProcessOutput, value: String
+    ) throws -> DockerRuntimeProcessOutput {
+        guard value != "all" else { return output }
+        guard let count = Int(value), count >= 0 else {
+            throw Abort(.badRequest, reason: "Invalid tail value: \(value)")
+        }
+        func tail(_ data: Data) -> Data {
+            guard count > 0 else { return Data() }
+            let lines = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+            let start = max(0, lines.count - count - (lines.last?.isEmpty == true ? 1 : 0))
+            return Data(lines[start...].joined(separator: [0x0A]))
+        }
+        return DockerRuntimeProcessOutput(
+            stdout: tail(output.stdout), stderr: tail(output.stderr), exitCode: output.exitCode
+        )
     }
 
     private func containerRequest(
