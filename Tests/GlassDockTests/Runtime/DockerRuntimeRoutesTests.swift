@@ -393,7 +393,7 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
-    @Test("network prune protects the guest bridge and network delete reports 403")
+    @Test("network prune protects the guest bridge and deletes custom networks")
     func networkMutationRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
@@ -409,10 +409,14 @@ struct DockerRuntimeRoutesTests {
             try await app.testing().test(.DELETE, "/v1.51/networks/bridge") { response async in
                 #expect(response.status == .forbidden)
             }
+            try await app.testing().test(.DELETE, "/v1.51/networks/frontend") { response async in
+                #expect(response.status == .noContent)
+            }
             try await app.testing().test(.DELETE, "/v1.51/networks/missing") { response async in
                 #expect(response.status == .notFound)
             }
         }
+        #expect(await backend.lastNetworkDelete == "network-frontend")
     }
 
     @Test("image list honors reference, dangling, and label filters")
@@ -484,7 +488,7 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
-    @Test("runtime and unsupported routes expose Docker statuses")
+    @Test("runtime and build routes expose Docker statuses")
     func explicitUnsupportedRoutes() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withApp(configure: { _ in }) { app in
@@ -505,13 +509,19 @@ struct DockerRuntimeRoutesTests {
             ) { response async in
                 #expect(response.status == .switchingProtocols)
             }
-            for (method, path) in [
-                (HTTPMethod.POST, "/v1.51/build"),
-                (HTTPMethod.POST, "/v1.51/build/prune"),
-            ] {
-                try await app.testing().test(method, path) { response async in
-                    #expect(response.status == .notImplemented)
-                }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/build?t=example.test%2Fbuilt%3Alatest",
+                body: ByteBuffer(string: "context")
+            ) { response async throws in
+                #expect(response.status == .ok)
+                #expect(String(decoding: response.body.readableBytesView, as: UTF8.self).contains("Successfully built"))
+            }
+            try await app.testing().test(.POST, "/v1.51/build/prune") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect((value?["CachesDeleted"] as? [String])?.isEmpty == true)
+                #expect(value?["SpaceReclaimed"] as? Int == 0)
             }
             try await app.testing().test(.GET, "/v1.51/system/df") { response async throws in
                 #expect(response.status == .ok)
@@ -800,12 +810,12 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastDelete == nil)
     }
 
-    @Test("healthy wait stays explicit while detached exec runs in the guest")
+    @Test("healthy wait reports the Docker error for a container without a healthcheck")
     func unsupportedRuntimeVariants() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
             try await app.testing().test(.POST, "/v1.51/containers/container-1/wait?condition=healthy") { response async in
-                #expect(response.status == .notImplemented)
+                #expect(response.status == .badRequest)
             }
             try await app.testing().test(
                 .POST,
@@ -963,6 +973,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastPush: Push?
     private(set) var lastCommit: Commit?
     private(set) var lastImportedData: Data?
+    private(set) var lastBuild: (Data, String, [String])?
     private(set) var lastTopArguments: [String]?
     private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
@@ -971,6 +982,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastNetworkCreate: DockerRuntimeNetwork?
     private(set) var lastNetworkConnect: (String, String)?
     private(set) var lastNetworkDisconnect: (String, String)?
+    private(set) var lastNetworkDelete: String?
     private(set) var startCount = 0
     private var running = false
     private var paused = false
@@ -1069,6 +1081,11 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         return [DockerRuntimeImage(reference: "example.test/fixture:loaded", digest: "sha256:loaded")]
     }
 
+    func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
+        lastBuild = (context, dockerfile, tags)
+        return DockerRuntimeImage(reference: tags.first ?? "glassdock/build:latest", digest: "sha256:built")
+    }
+
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
         lastExportReferences = references
         return AsyncThrowingStream { continuation in
@@ -1140,10 +1157,17 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     }
 
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork {
+        if id == "frontend" || id == "network-frontend" {
+            return customNetwork()
+        }
         guard id == "bridge" || id == "glassdock0" else {
             throw DockerRuntimeRouteError.notFound("No such network: \(id)")
         }
         return network()
+    }
+
+    func deleteNetwork(id: String) async throws {
+        lastNetworkDelete = id
     }
 
     func createNetwork(
@@ -1328,6 +1352,25 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
                     )
                 ]
             ),
+            options: [:],
+            containers: [:],
+            labels: [:]
+        )
+    }
+
+    private func customNetwork() -> DockerRuntimeNetwork {
+        DockerRuntimeNetwork(
+            id: "network-frontend",
+            name: "frontend",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            scope: "local",
+            driver: "bridge",
+            enableIPv4: true,
+            enableIPv6: false,
+            internalNetwork: false,
+            attachable: false,
+            ingress: false,
+            ipam: NetworkIPAM(Driver: "default", Config: []),
             options: [:],
             containers: [:],
             labels: [:]

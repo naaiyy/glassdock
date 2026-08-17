@@ -56,36 +56,36 @@
       "method": "POST",
       "path": "/build",
       "operationId": "ImageBuild",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "implemented",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Builds a Dockerfile context in the persistent guest runtime and returns Docker JSON progress."
     },
     {
       "method": "POST",
       "path": "/build/prune",
       "operationId": "BuildPrune",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "implemented",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "object",
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "BuildKit and image commit are not owned by the persistent guest runtime."
+      "owner": "DockerRuntimeRoutes",
+      "note": "Validates Docker build-cache filters and returns an empty prune result because build layers are image-owned."
     },
     {
       "method": "POST",
       "path": "/commit",
       "operationId": "ImageCommit",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -100,7 +100,7 @@
       "method": "GET",
       "path": "/configs",
       "operationId": "ConfigList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -115,7 +115,7 @@
       "method": "POST",
       "path": "/configs/create",
       "operationId": "ConfigCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -131,7 +131,7 @@
       "method": "DELETE",
       "path": "/configs/{id}",
       "operationId": "ConfigDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -147,7 +147,7 @@
       "method": "GET",
       "path": "/configs/{id}",
       "operationId": "ConfigInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -163,7 +163,7 @@
       "method": "POST",
       "path": "/configs/{id}/update",
       "operationId": "ConfigUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -180,7 +180,7 @@
       "method": "POST",
       "path": "/containers/create",
       "operationId": "ContainerCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -191,13 +191,13 @@
       ],
       "responseSchema": "#/definitions/ContainerCreateResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Persistent containerd creation with explicit 501 responses for unsupported options."
+      "note": "Persistent containerd creation with Docker-compatible errors for unavailable optional options."
     },
     {
       "method": "GET",
       "path": "/containers/json",
       "operationId": "ContainerList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -212,7 +212,7 @@
       "method": "POST",
       "path": "/containers/prune",
       "operationId": "ContainerPrune",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -226,7 +226,7 @@
       "method": "DELETE",
       "path": "/containers/{id}",
       "operationId": "ContainerDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -243,7 +243,7 @@
       "method": "GET",
       "path": "/containers/{id}/archive",
       "operationId": "ContainerArchive",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -259,7 +259,7 @@
       "method": "HEAD",
       "path": "/containers/{id}/archive",
       "operationId": "ContainerArchiveInfo",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -275,7 +275,7 @@
       "method": "PUT",
       "path": "/containers/{id}/archive",
       "operationId": "PutContainerArchive",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -292,7 +292,7 @@
       "method": "POST",
       "path": "/containers/{id}/attach",
       "operationId": "ContainerAttach",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         101,
@@ -309,7 +309,7 @@
       "method": "GET",
       "path": "/containers/{id}/attach/ws",
       "operationId": "ContainerAttachWebsocket",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         101,
@@ -326,7 +326,7 @@
       "method": "GET",
       "path": "/containers/{id}/changes",
       "operationId": "ContainerChanges",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -341,7 +341,7 @@
       "method": "POST",
       "path": "/containers/{id}/exec",
       "operationId": "ContainerExec",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -357,7 +357,7 @@
       "method": "GET",
       "path": "/containers/{id}/export",
       "operationId": "ContainerExport",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -372,7 +372,7 @@
       "method": "GET",
       "path": "/containers/{id}/json",
       "operationId": "ContainerInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -403,7 +403,7 @@
       "method": "GET",
       "path": "/containers/{id}/logs",
       "operationId": "ContainerLogs",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -449,7 +449,7 @@
       "method": "POST",
       "path": "/containers/{id}/resize",
       "operationId": "ContainerResize",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -464,7 +464,7 @@
       "method": "POST",
       "path": "/containers/{id}/restart",
       "operationId": "ContainerRestart",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -495,7 +495,7 @@
       "method": "GET",
       "path": "/containers/{id}/stats",
       "operationId": "ContainerStats",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -510,7 +510,7 @@
       "method": "POST",
       "path": "/containers/{id}/stop",
       "operationId": "ContainerStop",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -526,7 +526,7 @@
       "method": "GET",
       "path": "/containers/{id}/top",
       "operationId": "ContainerTop",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -556,7 +556,7 @@
       "method": "POST",
       "path": "/containers/{id}/update",
       "operationId": "ContainerUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -571,7 +571,7 @@
       "method": "POST",
       "path": "/containers/{id}/wait",
       "operationId": "ContainerWait",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -581,7 +581,7 @@
       ],
       "responseSchema": "#/definitions/ContainerWaitResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Default, next-exit, not-running, and removed waits; healthy waits are explicit 501 responses."
+      "note": "Default, next-exit, not-running, and removed waits; healthy waits report the Docker error when no healthcheck exists."
     },
     {
       "method": "GET",
@@ -617,7 +617,7 @@
       "method": "GET",
       "path": "/exec/{id}/json",
       "operationId": "ExecInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -632,7 +632,7 @@
       "method": "POST",
       "path": "/exec/{id}/resize",
       "operationId": "ExecResize",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -648,7 +648,7 @@
       "method": "POST",
       "path": "/exec/{id}/start",
       "operationId": "ExecStart",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -663,7 +663,7 @@
       "method": "POST",
       "path": "/images/create",
       "operationId": "ImageCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -678,7 +678,7 @@
       "method": "GET",
       "path": "/images/get",
       "operationId": "ImageGetAll",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -692,7 +692,7 @@
       "method": "GET",
       "path": "/images/json",
       "operationId": "ImageList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -706,7 +706,7 @@
       "method": "POST",
       "path": "/images/load",
       "operationId": "ImageLoad",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -720,7 +720,7 @@
       "method": "POST",
       "path": "/images/prune",
       "operationId": "ImagePrune",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -734,7 +734,7 @@
       "method": "GET",
       "path": "/images/search",
       "operationId": "ImageSearch",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -764,7 +764,7 @@
       "method": "GET",
       "path": "/images/{name}/get",
       "operationId": "ImageGet",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -778,7 +778,7 @@
       "method": "GET",
       "path": "/images/{name}/history",
       "operationId": "ImageHistory",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -793,7 +793,7 @@
       "method": "GET",
       "path": "/images/{name}/json",
       "operationId": "ImageInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -808,7 +808,7 @@
       "method": "POST",
       "path": "/images/{name}/push",
       "operationId": "ImagePush",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -840,7 +840,7 @@
       "method": "GET",
       "path": "/info",
       "operationId": "SystemInfo",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -854,7 +854,7 @@
       "method": "GET",
       "path": "/networks",
       "operationId": "NetworkList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -862,13 +862,13 @@
       ],
       "responseSchema": "array",
       "owner": "DockerRuntimeRoutes",
-      "note": "Lists the guest runtime's private bridge and prepared container endpoints; custom network objects are unsupported."
+      "note": "Lists guest-owned bridge and custom network objects with prepared container endpoints."
     },
     {
       "method": "POST",
       "path": "/networks/create",
       "operationId": "NetworkCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -885,7 +885,7 @@
       "method": "POST",
       "path": "/networks/prune",
       "operationId": "NetworkPrune",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -893,13 +893,13 @@
       ],
       "responseSchema": "object",
       "owner": "DockerRuntimeRoutes",
-      "note": "Validates Docker network filters and protects the guest runtime's private bridge; custom network deletion is unsupported."
+      "note": "Validates Docker network filters, deletes eligible custom networks, and protects the guest runtime's private bridge."
     },
     {
       "method": "DELETE",
       "path": "/networks/{id}",
       "operationId": "NetworkDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -909,13 +909,13 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Returns Docker's protected-network error for the guest runtime bridge; custom network deletion is unsupported."
+      "note": "Deletes eligible custom networks and returns Docker's protected-network error for the guest runtime bridge."
     },
     {
       "method": "GET",
       "path": "/networks/{id}",
       "operationId": "NetworkInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -924,13 +924,13 @@
       ],
       "responseSchema": "#/definitions/Network",
       "owner": "DockerRuntimeRoutes",
-      "note": "Inspects the guest runtime's private bridge by name or ID; custom network objects are unsupported."
+      "note": "Inspects guest-owned bridge and custom network objects by name or ID."
     },
     {
       "method": "POST",
       "path": "/networks/{id}/connect",
       "operationId": "NetworkConnect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -947,7 +947,7 @@
       "method": "POST",
       "path": "/networks/{id}/disconnect",
       "operationId": "NetworkDisconnect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -963,7 +963,7 @@
       "method": "GET",
       "path": "/nodes",
       "operationId": "NodeList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -978,7 +978,7 @@
       "method": "DELETE",
       "path": "/nodes/{id}",
       "operationId": "NodeDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -994,7 +994,7 @@
       "method": "GET",
       "path": "/nodes/{id}",
       "operationId": "NodeInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1010,7 +1010,7 @@
       "method": "POST",
       "path": "/nodes/{id}/update",
       "operationId": "NodeUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1027,7 +1027,7 @@
       "method": "GET",
       "path": "/plugins",
       "operationId": "PluginList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1041,7 +1041,7 @@
       "method": "POST",
       "path": "/plugins/create",
       "operationId": "PluginCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1055,7 +1055,7 @@
       "method": "GET",
       "path": "/plugins/privileges",
       "operationId": "GetPluginPrivileges",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1069,7 +1069,7 @@
       "method": "POST",
       "path": "/plugins/pull",
       "operationId": "PluginPull",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1083,7 +1083,7 @@
       "method": "DELETE",
       "path": "/plugins/{name}",
       "operationId": "PluginDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1098,7 +1098,7 @@
       "method": "POST",
       "path": "/plugins/{name}/disable",
       "operationId": "PluginDisable",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1113,7 +1113,7 @@
       "method": "POST",
       "path": "/plugins/{name}/enable",
       "operationId": "PluginEnable",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1128,7 +1128,7 @@
       "method": "GET",
       "path": "/plugins/{name}/json",
       "operationId": "PluginInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1143,7 +1143,7 @@
       "method": "POST",
       "path": "/plugins/{name}/push",
       "operationId": "PluginPush",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1158,7 +1158,7 @@
       "method": "POST",
       "path": "/plugins/{name}/set",
       "operationId": "PluginSet",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1173,7 +1173,7 @@
       "method": "POST",
       "path": "/plugins/{name}/upgrade",
       "operationId": "PluginUpgrade",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1188,7 +1188,7 @@
       "method": "GET",
       "path": "/secrets",
       "operationId": "SecretList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1203,7 +1203,7 @@
       "method": "POST",
       "path": "/secrets/create",
       "operationId": "SecretCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -1219,7 +1219,7 @@
       "method": "DELETE",
       "path": "/secrets/{id}",
       "operationId": "SecretDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1235,7 +1235,7 @@
       "method": "GET",
       "path": "/secrets/{id}",
       "operationId": "SecretInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1251,7 +1251,7 @@
       "method": "POST",
       "path": "/secrets/{id}/update",
       "operationId": "SecretUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1268,7 +1268,7 @@
       "method": "GET",
       "path": "/services",
       "operationId": "ServiceList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1283,7 +1283,7 @@
       "method": "POST",
       "path": "/services/create",
       "operationId": "ServiceCreate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -1301,7 +1301,7 @@
       "method": "DELETE",
       "path": "/services/{id}",
       "operationId": "ServiceDelete",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1317,7 +1317,7 @@
       "method": "GET",
       "path": "/services/{id}",
       "operationId": "ServiceInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1333,7 +1333,7 @@
       "method": "GET",
       "path": "/services/{id}/logs",
       "operationId": "ServiceLogs",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1349,7 +1349,7 @@
       "method": "POST",
       "path": "/services/{id}/update",
       "operationId": "ServiceUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1366,7 +1366,7 @@
       "method": "POST",
       "path": "/session",
       "operationId": "Session",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 101,
       "responseStatuses": [
         101,
@@ -1381,7 +1381,7 @@
       "method": "GET",
       "path": "/swarm",
       "operationId": "SwarmInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1397,7 +1397,7 @@
       "method": "POST",
       "path": "/swarm/init",
       "operationId": "SwarmInit",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1413,7 +1413,7 @@
       "method": "POST",
       "path": "/swarm/join",
       "operationId": "SwarmJoin",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1429,7 +1429,7 @@
       "method": "POST",
       "path": "/swarm/leave",
       "operationId": "SwarmLeave",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1444,7 +1444,7 @@
       "method": "POST",
       "path": "/swarm/unlock",
       "operationId": "SwarmUnlock",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1459,7 +1459,7 @@
       "method": "GET",
       "path": "/swarm/unlockkey",
       "operationId": "SwarmUnlockkey",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1474,7 +1474,7 @@
       "method": "POST",
       "path": "/swarm/update",
       "operationId": "SwarmUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1490,7 +1490,7 @@
       "method": "GET",
       "path": "/system/df",
       "operationId": "SystemDataUsage",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1504,7 +1504,7 @@
       "method": "GET",
       "path": "/tasks",
       "operationId": "TaskList",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1519,7 +1519,7 @@
       "method": "GET",
       "path": "/tasks/{id}",
       "operationId": "TaskInspect",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1535,7 +1535,7 @@
       "method": "GET",
       "path": "/tasks/{id}/logs",
       "operationId": "TaskLogs",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1638,7 +1638,7 @@
       "method": "PUT",
       "path": "/volumes/{name}",
       "operationId": "VolumeUpdate",
-      "support": "partial",
+      "support": "implemented",
       "expectedStatus": 200,
       "responseStatuses": [
         200,

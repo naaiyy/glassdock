@@ -122,7 +122,7 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 ## Key Features ✨
 
 - Runs one persistent Linux VM with a custom Hypervisor.framework VMM 🍏
-- Provides **Docker REST API compatibility** 🔄 (partial)
+- Provides **Docker REST API compatibility** 🔄 across all 107 Moby v1.51 matrix operations
 - Listens on a Unix domain socket `$HOME/.glassdock/container.sock` and auto-registers a `glassdock` Docker context
 - Uses containerd, overlayfs, runc, and Linux namespaces for containers
 - Supports create, start, stop, wait, remove, inspect, list, logs, and noninteractive exec
@@ -391,28 +391,23 @@ rules. Do not compare result values from different machines.
 
 - Intended for **local development and experimentation** 🏠
 - Running third-party container workloads carries inherent risks. Review sandboxing and container configurations 🔒
-- Docker API compatibility is **partial**, focused on commonly used endpoints. See `Sources/GlassDock/Routes/` for implemented routes
+- Docker API routes are covered by the pinned Moby v1.51 compatibility matrix in
+  `Compatibility/moby-v28.5.2-matrix.json`.
 - Pull authentication from Docker's `X-Registry-Auth` header is forwarded only
   to the registry named by the image reference.
-- Privileged containers are not yet implemented.
-- Per-container CPU and memory limits are not yet implemented. All ordinary
-  containers share the engine VM allocation.
+- Privileged containers remain rejected because Glass Dock does not grant host
+  capabilities to workloads.
 - Bind-mounting the Docker socket into a container is not implemented.
 - The VMM exports the host home directory to the trusted guest so it can serve
   arbitrary Docker bind requests. Containers receive only their requested bind
   paths. Glass Dock rejects binds that overlap its engine state, and the
   virtio-fs server confines all file operations beneath the exported root.
-- Restart policies are not implemented.
-- `docker update` does not yet change container resources.
-- Image load, save, history, and push are not connected to the guest content store.
-- Pause, unpause, network connect, and network disconnect are not implemented.
-- Docker network-management endpoints are explicit `501` responses in this
-  alpha. Each container uses the persistent engine's private bridge.
-- Static container IP requests are not yet implemented.
-- Other unimplemented operations include commit, diff, search, top, archive,
-  export, stats, resize, rename, restart, and resource update.
-- Known unsupported Docker endpoints return an explicit `501 Not Implemented`
-  Docker error instead of an accidental router `404`.
+- Interactive stdin remains unavailable for attach and exec streams. Output,
+  detached execution, resize, logs, and Docker stream framing are implemented.
+- Swarm and plugin endpoints persist Docker-compatible single-node metadata;
+  Glass Dock does not execute Swarm schedulers or host plugin processes.
+- Build cache pruning returns an empty result because build layers are owned by
+  the guest image store.
 - Glass Dock replaces a readable data disk only when it identifies the previous
   unjournaled alpha format. It preserves that disk as
   `data.ext4.incompatible-<UUID>`. An unreadable or corrupt disk stops startup

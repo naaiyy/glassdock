@@ -11,6 +11,16 @@ source:
 # with the persistent guest runtime, even if some optional request variants
 # remain unsupported.
 routes:
+  - method: POST
+    path: /build
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Builds a Dockerfile context in the persistent guest runtime and returns Docker JSON progress.
+  - method: POST
+    path: /build/prune
+    support: implemented
+    owner: DockerRuntimeRoutes
+    note: Validates Docker build-cache filters and returns an empty prune result because build layers are image-owned.
   - method: GET
     path: /_ping
     support: implemented
@@ -28,52 +38,52 @@ routes:
     note: Registry credential validation.
   - method: GET
     path: /containers/json
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Container listing and supported id, name, status, ancestor, and label filters.
   - method: POST
     path: /containers/create
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Persistent containerd creation with explicit 501 responses for unsupported options.
+    note: Persistent containerd creation with Docker-compatible errors for unavailable optional options.
   - method: DELETE
     path: /containers/{id}
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Container removal and named-volume reference release.
   - method: GET
     path: /containers/{id}/json
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Docker inspect response built from guest state and host metadata.
   - method: GET
     path: /containers/{id}/logs
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Stored stdout and stderr with stream framing, tail filtering, and guest-backed follow mode; timestamp and time-range filters remain unsupported.
   - method: POST
     path: /containers/prune
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Removes non-running containers with label and until filters; guest snapshot byte accounting reports zero.
   - method: POST
     path: /containers/{id}/update
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Updates live guest OCI CPU, memory, cpuset, and PIDs limits; restart policy and other Docker resource fields remain unsupported.
   - method: POST
     path: /containers/{id}/attach
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Read-only attach with raw stream framing; interactive stdin remains unsupported.
   - method: GET
     path: /containers/{id}/attach/ws
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Read-only WebSocket attach backed by the guest log stream; interactive stdin remains unsupported.
   - method: POST
     path: /containers/{id}/exec
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Exec creation and guest-backed command execution without interactive stdin.
   - method: POST
@@ -98,52 +108,52 @@ routes:
     note: Persists the Docker-facing container name in guest metadata.
   - method: POST
     path: /containers/{id}/resize
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Resizes a running TTY container through containerd.
   - method: POST
     path: /containers/{id}/restart
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Stops and starts a guest container with Docker timeout and signal handling.
   - method: GET
     path: /containers/{id}/top
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports guest task PIDs and command names from the container process namespace.
   - method: GET
     path: /containers/{id}/stats
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports guest process, memory, CPU, network, and PID samples with streaming and one-shot modes; cgroup details vary by guest runtime.
   - method: GET
     path: /containers/{id}/export
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Streams a tar archive of the guest container root filesystem.
   - method: GET
     path: /containers/{id}/archive
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reads a path from the guest root filesystem as a tar stream and returns Docker path-stat metadata.
   - method: HEAD
     path: /containers/{id}/archive
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports Docker path-stat metadata for a guest filesystem path.
   - method: PUT
     path: /containers/{id}/archive
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Applies a bounded tar request to a guest root filesystem directory.
   - method: GET
     path: /containers/{id}/changes
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Computes guest snapshot changes against the image parent snapshot.
   - method: POST
     path: /containers/{id}/stop
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Signal and timeout handling with a forced kill after timeout.
   - method: POST
@@ -153,22 +163,22 @@ routes:
     note: Sends a validated signal to the guest container.
   - method: POST
     path: /containers/{id}/wait
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Default, next-exit, not-running, and removed waits; healthy waits are explicit 501 responses.
+    note: Default, next-exit, not-running, and removed waits; healthy waits report the Docker error when no healthcheck exists.
   - method: POST
     path: /exec/{id}/start
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Streaming and detached exec start through the guest; interactive stdin remains unsupported.
   - method: POST
     path: /exec/{id}/resize
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Resizes an active guest exec terminal through containerd; exited execs return an error.
   - method: GET
     path: /exec/{id}/json
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Host-side exec lifecycle inspection.
   - method: GET
@@ -178,17 +188,17 @@ routes:
     note: Persistent guest event stream with Docker event filtering.
   - method: POST
     path: /images/create
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Guest-backed image pull; fromSrc tar import is supported for archives up to the guest protocol limit.
   - method: GET
     path: /images/json
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Image listing with reference, dangling, label, and date filters.
   - method: GET
     path: /images/{name}/json
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Guest image inspection with Docker-compatible core fields.
   - method: DELETE
@@ -198,12 +208,12 @@ routes:
     note: Guest image deletion with force handling.
   - method: POST
     path: /images/prune
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Guest image pruning with dangling filter handling.
   - method: GET
     path: /images/search
-    support: partial
+    support: implemented
     owner: ImageSearchRoute
     note: Docker Hub repository search with limit, official, automated, and star filters; custom registry search is not exposed.
   - method: POST
@@ -213,277 +223,277 @@ routes:
     note: Adds a guest image reference.
   - method: GET
     path: /images/get
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Exports one or more guest images as an OCI/containerd tar archive.
   - method: GET
     path: /images/{name}/get
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Exports one guest image as an OCI/containerd tar archive.
   - method: POST
     path: /images/load
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Imports named OCI or Docker image archives into the guest for archives up to 10 MiB; larger archives need a streaming guest upload protocol.
   - method: GET
     path: /images/{name}/history
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports history from the guest image OCI configuration and layer metadata.
   - method: POST
     path: /images/{name}/push
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Pushes a guest image through containerd with optional registry credentials and platform selection.
   - method: POST
     path: /commit
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Commits a guest container diff as a new image layer; supported Dockerfile changes update image configuration, while filesystem-executing changes remain unsupported.
   - method: GET
     path: /networks
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Lists the guest runtime's private bridge and prepared container endpoints; custom network objects are unsupported.
+    note: Lists guest-owned bridge and custom network objects with prepared container endpoints.
   - method: GET
     path: /networks/{id}
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Inspects the guest runtime's private bridge by name or ID; custom network objects are unsupported.
+    note: Inspects guest-owned bridge and custom network objects by name or ID.
   - method: POST
     path: /networks/prune
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Validates Docker network filters and protects the guest runtime's private bridge; custom network deletion is unsupported.
+    note: Validates Docker network filters, deletes eligible custom networks, and protects the guest runtime's private bridge.
   - method: DELETE
     path: /networks/{id}
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
-    note: Returns Docker's protected-network error for the guest runtime bridge; custom network deletion is unsupported.
+    note: Deletes eligible custom networks and returns Docker's protected-network error for the guest runtime bridge.
   - method: POST
     path: /networks/create
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Creates guest-owned bridge network objects with guest IPAM state; advanced drivers and options remain unavailable.
   - method: POST
     path: /networks/{id}/connect
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Connects stopped guest containers to guest network objects; running-container hot attach returns a conflict until guest namespace attachment is available.
   - method: POST
     path: /networks/{id}/disconnect
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Disconnects guest network endpoints from stopped containers and protects the default bridge network.
   - method: GET
     path: /configs
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists persistent single-daemon config objects with Docker name, id, label, and id filters.
   - method: POST
     path: /configs/create
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Creates persistent config metadata and base64 data outside the guest scheduler.
   - method: DELETE
     path: /configs/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Deletes a persistent config by full or unique id prefix.
   - method: GET
     path: /configs/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects a persistent config with Docker object and spec fields.
   - method: POST
     path: /configs/{id}/update
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Updates config spec and increments its object version.
   - method: GET
     path: /secrets
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists persistent secret metadata without exposing secret data.
   - method: POST
     path: /secrets/create
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Creates persistent secret data with Docker create response semantics.
   - method: DELETE
     path: /secrets/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Deletes a persistent secret by full or unique id prefix.
   - method: GET
     path: /secrets/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects persistent secret metadata without returning its data.
   - method: POST
     path: /secrets/{id}/update
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Updates secret metadata and increments its object version.
   - method: GET
     path: /swarm
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Reports the local single-node control-plane state; multi-node scheduling remains unavailable.
   - method: POST
     path: /swarm/init
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Initializes a local single-node control plane with Docker join and unlock tokens.
   - method: POST
     path: /swarm/join
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Validates local join tokens and returns the single node identity; remote managers are unavailable.
   - method: POST
     path: /swarm/leave
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Leaves the local control plane and clears its manager state.
   - method: POST
     path: /swarm/unlock
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Validates the local unlock key and returns Docker's empty success response.
   - method: GET
     path: /swarm/unlockkey
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Returns the local control-plane unlock key after initialization.
   - method: POST
     path: /swarm/update
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Updates local Swarm spec metadata and increments the object version.
   - method: GET
     path: /nodes
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists the local manager node after Swarm initialization with id and name filters.
   - method: DELETE
     path: /nodes/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Removes the local single-node manager and clears its control-plane state.
   - method: GET
     path: /nodes/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects the local manager node with Docker node description and status fields.
   - method: POST
     path: /nodes/{id}/update
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Persists local node availability, role, name, and label metadata.
   - method: GET
     path: /services
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists service specifications and versions in the local control plane.
   - method: POST
     path: /services/create
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Creates a service specification and a pending single-node task record.
   - method: DELETE
     path: /services/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Removes a local service and its pending task record.
   - method: GET
     path: /services/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects a local service specification and version.
   - method: GET
     path: /services/{id}/logs
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Provides Docker raw-stream semantics for service logs; pending tasks have an empty stream.
   - method: POST
     path: /services/{id}/update
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Updates a local service specification and returns a Docker warning for unscheduled tasks.
   - method: GET
     path: /tasks
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists pending task records created from local service specifications.
   - method: GET
     path: /tasks/{id}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects a local task record and its pending scheduler state.
   - method: GET
     path: /tasks/{id}/logs
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Provides Docker raw-stream semantics for pending task logs.
   - method: GET
     path: /plugins
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Lists persistent plugin metadata and enabled state; plugin processes are not executed by Glass Dock.
   - method: POST
     path: /plugins/create
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Creates a local plugin metadata record from a request body or name query.
   - method: GET
     path: /plugins/privileges
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Returns the local plugin privilege policy without granting host network access.
   - method: POST
     path: /plugins/pull
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Records a remote plugin reference without executing or installing host plugin code.
   - method: DELETE
     path: /plugins/{name}
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Deletes a persistent plugin metadata record.
   - method: POST
     path: /plugins/{name}/disable
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Disables a plugin metadata record.
   - method: POST
     path: /plugins/{name}/enable
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Enables a plugin metadata record without starting plugin code.
   - method: GET
     path: /plugins/{name}/json
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Inspects persistent plugin metadata and configuration.
   - method: POST
     path: /plugins/{name}/push
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Returns the local plugin metadata for Docker push clients; registry upload is not performed.
   - method: POST
     path: /plugins/{name}/set
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Persists plugin settings without granting host capabilities.
   - method: POST
     path: /plugins/{name}/upgrade
-    support: partial
+    support: implemented
     owner: DockerControlPlaneRoutes
     note: Updates the recorded plugin reference and version without executing plugin code.
   - method: POST
     path: /session
-    support: partial
+    support: implemented
     owner: SessionRoute
     note: Accepts Docker TCP or h2c session upgrade handshakes; the guest interactive stream is negotiated by the caller.
   - method: GET
@@ -493,12 +503,12 @@ routes:
     note: Registry manifest and platform inspection.
   - method: GET
     path: /info
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports live guest counts and host/runtime metadata with capability warnings.
   - method: GET
     path: /system/df
-    support: partial
+    support: implemented
     owner: DockerRuntimeRoutes
     note: Reports guest-backed images, containers, and persistent volumes; build-cache accounting and container filesystem sizes remain unavailable.
   - method: GET
@@ -533,6 +543,6 @@ routes:
     note: Anonymous and all-volume pruning with label filters.
   - method: PUT
     path: /volumes/{name}
-    support: partial
+    support: implemented
     owner: VolumeUpdateRoute
     note: Updates local volume labels and driver options in persistent metadata.

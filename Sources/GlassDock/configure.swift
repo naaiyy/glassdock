@@ -110,9 +110,6 @@ func configure(
     try app.register(collection: VolumePruneRoute(client: volumeClient))
     try app.register(collection: VolumeUpdateRoute(client: volumeClient))
 
-    // Build routes are intentionally absent until the guest runtime owns
-    // BuildKit. The former builder service created another Apple VM.
-
     // --- miscellaneous ---
     try app.register(collection: VersionRoute())
 

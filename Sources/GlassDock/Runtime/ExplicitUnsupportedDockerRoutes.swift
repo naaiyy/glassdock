@@ -9,10 +9,7 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
         let pattern: String
     }
 
-    private static let endpoints = [
-        Endpoint(method: .POST, pattern: "/build"),
-        Endpoint(method: .POST, pattern: "/build/prune"),
-    ]
+    private static let endpoints: [Endpoint] = []
 
     func boot(routes: RoutesBuilder) throws {
         for endpoint in Self.endpoints {

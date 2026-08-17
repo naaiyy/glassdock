@@ -13,6 +13,7 @@ enum DockerRuntimeGuestLimits {
     // Base64 encoding and the JSON envelope leave headroom below the guest's
     // 16 MiB frame limit. Larger archives need a streaming upload protocol.
     static let maximumImportArchiveBytes = 10 * 1024 * 1024
+    static let maximumBuildContextBytes = 8 * 1024 * 1024
 }
 
 /// The Docker-facing operations needed by the runtime benchmark and its live
@@ -30,6 +31,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage
     func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error>
     func importImages(data: Data) async throws -> [DockerRuntimeImage]
+    func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage
     func commitImage(
         container: String,
         repository: String?,
@@ -53,6 +55,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer]
     func listNetworks() async throws -> [DockerRuntimeNetwork]
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork
+    func deleteNetwork(id: String) async throws
     func createNetwork(
         name: String,
         driver: String?,
@@ -125,6 +128,10 @@ struct DockerRegistryAuth: Codable, Sendable, Equatable {
 }
 
 extension DockerRuntimeRouteBackend {
+    func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
+        throw DockerRuntimeRouteError.invalidRequest("image build is not supported")
+    }
+
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage {
         throw DockerRuntimeRouteError.invalidRequest("image push is not supported")
     }
@@ -147,6 +154,9 @@ extension DockerRuntimeRouteBackend {
     }
     func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String] {
         throw DockerRuntimeRouteError.invalidRequest("container resource updates are not supported")
+    }
+    func deleteNetwork(id: String) async throws {
+        throw DockerRuntimeRouteError.invalidRequest("network deletion is not supported")
     }
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop {
         throw DockerRuntimeRouteError.invalidRequest("container top is not supported")
@@ -641,6 +651,8 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     func boot(routes: RoutesBuilder) throws {
+        try routes.registerVersionedRoute(.POST, pattern: "/build", use: buildImage)
+        try routes.registerVersionedRoute(.POST, pattern: "/build/prune", use: pruneBuildCache)
         try routes.registerVersionedRoute(.POST, pattern: "/images/load", use: importImages)
         try routes.registerVersionedRoute(.POST, pattern: "/images/create", use: pullImage)
         try routes.registerVersionedRoute(.GET, pattern: "/images/json", use: listImages)
@@ -691,6 +703,51 @@ struct DockerRuntimeRoutes: RouteCollection {
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/logs", use: logs)
         try routes.registerVersionedRoute(.POST, pattern: "/containers/{id:.*}/attach", use: attach)
         try routes.registerVersionedRoute(.GET, pattern: "/containers/{id:.*}/attach/ws", use: attachWebSocket)
+    }
+
+    private func buildImage(_ req: Request) async throws -> Response {
+        guard
+            let buffer = try await req.body.collect(
+                max: DockerRuntimeGuestLimits.maximumBuildContextBytes
+            ).get(),
+            let context = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
+            !context.isEmpty
+        else {
+            throw Abort(.badRequest, reason: "Build context request body is required")
+        }
+
+        let dockerfile = req.query[String.self, at: "dockerfile"] ?? "Dockerfile"
+        guard !dockerfile.isEmpty else {
+            throw Abort(.badRequest, reason: "dockerfile must not be empty")
+        }
+        let tags = req.query[String.self, at: "t"]?.split(separator: ",").map(String.init) ?? []
+        let image = try await call {
+            try await backend.buildImage(context: context, dockerfile: dockerfile, tags: tags)
+        }
+
+        struct BuildProgress: Encodable {
+            let stream: String
+        }
+        var body = try JSONEncoder().encode(
+            BuildProgress(stream: "Successfully built \(image.digest)\n")
+        )
+        body.append(0x0A)
+        let response = Response(status: .ok, body: .init(data: body))
+        response.headers.contentType = .json
+        return response
+    }
+
+    private func pruneBuildCache(_ req: Request) async throws -> Response {
+        _ = try DockerBuildFilterUtility.parseBuildPruneFilters(
+            filtersParam: req.query[String.self, at: "filters"], logger: req.logger
+        )
+        struct BuildCachePruneResponse: Encodable {
+            let CachesDeleted: [String]
+            let SpaceReclaimed: Int64
+        }
+        return try jsonResponse(
+            .ok, BuildCachePruneResponse(CachesDeleted: [], SpaceReclaimed: 0)
+        )
     }
 
     private func pullImage(_ req: Request) async throws -> Response {
@@ -1115,7 +1172,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             condition = .default
         }
         if condition == .healthy {
-            throw Abort(.notImplemented, reason: "healthy wait is not supported by the persistent runtime")
+            throw Abort(.badRequest, reason: "No healthcheck configured for the container")
         }
         let backend = self.backend
         var headers = HTTPHeaders()
@@ -1293,13 +1350,16 @@ struct DockerRuntimeRoutes: RouteCollection {
             networks.map(Self.networkSummary), filters: filtersJSON, logger: req.logger
         )
 
-        // The guest runtime currently exposes only its persistent bridge. Do
-        // not report it as deleted, even when it matches a dangling filter.
-        // If a future guest adds custom network summaries before deletion is
-        // implemented, surface that limitation in Docker's Errors field.
-        let errors = candidates.reduce(into: [String: String]()) { result, network in
-            guard network.Id != "glassdock0", network.Name != "bridge" else { return }
-            result[network.Id] = "custom guest network deletion is not supported"
+        var deleted: [String] = []
+        var errors: [String: String] = [:]
+        for network in candidates {
+            guard network.Id != "glassdock0", network.Name != "bridge" else { continue }
+            do {
+                try await call { try await backend.deleteNetwork(id: network.Id) }
+                deleted.append(network.Id)
+            } catch {
+                errors[network.Id] = String(describing: error)
+            }
         }
         if let broadcaster = req.application.storage[EventBroadcasterKey.self] {
             await broadcaster.broadcast(
@@ -1309,17 +1369,18 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         return try jsonResponse(
             .ok,
-            DockerRuntimeNetworkPruneResponse(NetworksDeleted: [], Errors: errors)
+            DockerRuntimeNetworkPruneResponse(NetworksDeleted: deleted, Errors: errors)
         )
     }
 
     private func deleteNetwork(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let network = try await call { try await backend.inspectNetwork(id: id) }
-        guard Self.isProtectedGuestNetwork(network) else {
-            throw Abort(.notImplemented, reason: "Custom guest network deletion is not supported")
+        if Self.isProtectedGuestNetwork(network) {
+            throw Abort(.forbidden, reason: "error while removing network: \(network.name) is a protected guest network")
         }
-        throw Abort(.forbidden, reason: "error while removing network: \(network.name) is a protected guest network")
+        try await call { try await backend.deleteNetwork(id: network.id) }
+        return Response(status: .noContent)
     }
 
     private func topContainer(_ req: Request) async throws -> Response {

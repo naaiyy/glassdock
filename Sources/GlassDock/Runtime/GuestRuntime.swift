@@ -132,6 +132,10 @@ private struct GuestImageImportPayload: Decodable {
     let images: [GuestImagePayload]
 }
 
+private struct GuestImageBuildPayload: Decodable {
+    let image: GuestImageDetailPayload
+}
+
 private struct GuestExitPayload: Decodable {
     let id: String
     let exitCode: UInt32
@@ -581,6 +585,24 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
         return payload.images.map { DockerRuntimeImage(reference: $0.name, digest: $0.digest) }
     }
 
+    func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
+        guard context.count <= DockerRuntimeGuestLimits.maximumBuildContextBytes else {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "build context exceeds the 8 MiB guest protocol limit"
+            )
+        }
+        let response = try await request(
+            "image.build",
+            [
+                "context": .string(context.base64EncodedString()),
+                "dockerfile": .string(dockerfile),
+                "tags": .array(tags.map(JSONValue.string)),
+            ]
+        )
+        let payload: GuestImageBuildPayload = try decode(response)
+        return Self.dockerImage(payload.image)
+    }
+
     func commitImage(
         container: String,
         repository: String?,
@@ -898,7 +920,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
 
     func waitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32 {
         guard condition != .healthy else {
-            throw DockerRuntimeRouteError.invalidRequest("healthy wait is not supported")
+            throw DockerRuntimeRouteError.invalidRequest("No healthcheck configured for the container")
         }
         if condition != .removed, let code = exitCodes.code(for: id) { return code }
         let resolved: String
@@ -1008,6 +1030,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             throw DockerRuntimeRouteError.notFound("No such network: \(id)")
         }
         return network
+    }
+
+    func deleteNetwork(id: String) async throws {
+        _ = try await request("network.delete", ["id": .string(id)])
     }
 
     func createNetwork(
