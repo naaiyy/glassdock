@@ -272,6 +272,10 @@ func filterBuildContext(contextData []byte, dockerfile string, copies []buildCop
 	var output bytes.Buffer
 	writer := tar.NewWriter(&output)
 	defer writer.Close()
+	matchedSources := make([][]bool, len(copies))
+	for index, copyInstruction := range copies {
+		matchedSources[index] = make([]bool, len(copyInstruction.sources))
+	}
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
@@ -281,16 +285,27 @@ func filterBuildContext(contextData []byte, dockerfile string, copies []buildCop
 			return nil, fmt.Errorf("read build context: %w", err)
 		}
 		entryName := cleanBuildPath(header.Name)
+		for copyIndex, copyInstruction := range copies {
+			for sourceIndex, source := range copyInstruction.sources {
+				if buildSourceMatches(entryName, source) {
+					matchedSources[copyIndex][sourceIndex] = true
+				}
+			}
+		}
 		if entryName == cleanBuildPath(dockerfile) || entryName == ".dockerignore" {
 			continue
 		}
 		for _, copyInstruction := range copies {
 			for _, source := range copyInstruction.sources {
-				sourceName := strings.TrimSuffix(cleanBuildPath(source), "/")
-				if entryName != sourceName && !strings.HasPrefix(entryName, sourceName+"/") {
+				sourceName := cleanBuildPath(source)
+				if !buildSourceMatches(entryName, source) {
 					continue
 				}
-				targetName := copyTargetName(entryName, sourceName, copyInstruction.destination, len(copyInstruction.sources) > 1, header)
+				targetSourceName := sourceName
+				if strings.ContainsAny(sourceName, "*?[") {
+					targetSourceName = entryName
+				}
+				targetName := copyTargetName(entryName, targetSourceName, copyInstruction.destination, len(copyInstruction.sources) > 1, header)
 				copyHeader := *header
 				copyHeader.Name = targetName
 				if err := writer.WriteHeader(&copyHeader); err != nil {
@@ -305,10 +320,29 @@ func filterBuildContext(contextData []byte, dockerfile string, copies []buildCop
 			}
 		}
 	}
+	for copyIndex, copyInstruction := range copies {
+		for sourceIndex, matched := range matchedSources[copyIndex] {
+			if !matched {
+				return nil, fmt.Errorf("build source %q was not found in the context", copyInstruction.sources[sourceIndex])
+			}
+		}
+	}
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("close build context: %w", err)
 	}
 	return output.Bytes(), nil
+}
+
+func buildSourceMatches(entryName, source string) bool {
+	sourceName := strings.TrimSuffix(cleanBuildPath(source), "/")
+	if sourceName == "" {
+		return entryName != ""
+	}
+	if strings.ContainsAny(sourceName, "*?[") {
+		matched, err := path.Match(sourceName, entryName)
+		return err == nil && matched
+	}
+	return entryName == sourceName || strings.HasPrefix(entryName, sourceName+"/")
 }
 
 func copyTargetName(entryName, sourceName, destination string, multipleSources bool, header *tar.Header) string {
