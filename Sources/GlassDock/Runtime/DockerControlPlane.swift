@@ -1321,6 +1321,7 @@ struct DockerControlPlaneRoutes: RouteCollection {
             labels: labels,
             tty: Self.bool(containerSpec["TTY"]) ?? false,
             autoRemove: false,
+            stopTimeout: nil,
             mounts: mounts,
             ports: []
         )

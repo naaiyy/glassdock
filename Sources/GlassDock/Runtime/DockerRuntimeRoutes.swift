@@ -457,6 +457,7 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
     let labels: [String: String]
     let tty: Bool
     let autoRemove: Bool
+    let stopTimeout: Int?
     let mounts: [DockerRuntimeMount]
     let ports: [DockerRuntimePortBinding]
 }
@@ -472,6 +473,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let labels: [String: String]
     let tty: Bool
     let ports: [DockerRuntimePortBinding]
+    let stopTimeout: Int?
     let sizeRw: Int64
     let sizeRootFs: Int64
 
@@ -487,7 +489,8 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         tty: Bool,
         ports: [DockerRuntimePortBinding],
         sizeRw: Int64 = -1,
-        sizeRootFs: Int64 = -1
+        sizeRootFs: Int64 = -1,
+        stopTimeout: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -501,6 +504,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         self.ports = ports
         self.sizeRw = sizeRw
         self.sizeRootFs = sizeRootFs
+        self.stopTimeout = stopTimeout
     }
 }
 
@@ -1079,6 +1083,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             labels: body.Labels ?? [:],
             tty: body.Tty ?? false,
             autoRemove: body.HostConfig?.AutoRemove ?? false,
+            stopTimeout: body.StopTimeout,
             mounts: mounts,
             ports: Self.ports(from: body.HostConfig)
         )
@@ -1151,8 +1156,8 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func restartContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        let timeout = req.query[Int.self, at: "t"] ?? 10
         let container = try await call { try await backend.inspectContainer(id: id) }
+        let timeout = req.query[Int.self, at: "t"] ?? container.stopTimeout ?? 10
         if container.state == .running || container.state == .paused {
             if container.state == .paused {
                 try await call { try await backend.resumeContainer(id: id) }
@@ -1204,7 +1209,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard let signal = DockerSignal.number(signalText) else {
             throw Abort(.badRequest, reason: "Invalid stop signal: \(signalText)")
         }
-        let timeout = req.query[Int.self, at: "t"] ?? 10
+        let timeout = req.query[Int.self, at: "t"] ?? container.stopTimeout ?? 10
         try await stopAndWait(id: id, signal: signal, timeout: timeout)
         return Response(status: .noContent)
     }
@@ -2716,6 +2721,7 @@ private struct CreateRequest: Content {
     let Hostname: String?
     let Labels: [String: String]?
     let Tty: Bool?
+    let StopTimeout: Int?
     let HostConfig: CreateHostConfig?
 }
 
@@ -2774,7 +2780,10 @@ private struct InspectResponse: Content {
         let Labels: [String: String]
     }
     struct NetworkSettingsPayload: Content { let Ports: [String: [CreatePortBinding]] }
-    struct HostConfigPayload: Content { let PortBindings: [String: [CreatePortBinding]] }
+    struct HostConfigPayload: Content {
+        let PortBindings: [String: [CreatePortBinding]]
+        let StopTimeout: Int?
+    }
 
     let Id: String
     let Name: String
@@ -2802,7 +2811,7 @@ private struct InspectResponse: Content {
                 .init(HostIp: binding.hostIP, HostPort: binding.hostPort.map(String.init))
             )
         }
-        HostConfig = .init(PortBindings: ports)
+        HostConfig = .init(PortBindings: ports, StopTimeout: container.stopTimeout)
         NetworkSettings = .init(Ports: ports)
     }
 }

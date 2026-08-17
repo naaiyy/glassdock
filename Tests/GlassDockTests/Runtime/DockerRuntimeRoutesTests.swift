@@ -145,12 +145,13 @@ struct DockerRuntimeRoutesTests {
 
     @Test("container lifecycle maps Docker create fields and status codes")
     func containerLifecycle() async throws {
-        let backend = DockerRuntimeBackendMock()
+        let backend = DockerRuntimeBackendMock(stopTimeout: -1)
         try await withRuntimeRoutes(backend) { app in
             let createBody = #"""
                 {
                   "Image":"fixture@sha256:abc",
                   "Cmd":["/bin/true"],
+                  "StopTimeout":-1,
                   "Env":["A=B"],
                   "WorkingDir":"/work",
                   "Labels":{"test":"true"},
@@ -189,6 +190,7 @@ struct DockerRuntimeRoutesTests {
                 let hostConfig = value?["HostConfig"] as? [String: Any]
                 let portBindings = hostConfig?["PortBindings"] as? [String: Any]
                 #expect(portBindings?["80/tcp"] != nil)
+                #expect(hostConfig?["StopTimeout"] as? Int == -1)
             }
             try await app.testing().test(.GET, "/v1.51/containers/json?all=1") { response async throws in
                 #expect(response.status == .ok)
@@ -205,6 +207,7 @@ struct DockerRuntimeRoutesTests {
         let create = try #require(await backend.lastCreate)
         #expect(create.name == "bench")
         #expect(create.command == ["/bin/true"])
+        #expect(create.stopTimeout == -1)
         #expect(create.environment == ["A=B"])
         #expect(create.autoRemove)
         #expect(create.mounts == [.init(source: "/private/tmp/source", target: "/data", readOnly: true)])
@@ -745,6 +748,18 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastKillSignals == [15])
     }
 
+    @Test("stop uses the container timeout when the query is omitted")
+    func stopUsesContainerTimeoutByDefault() async throws {
+        let backend = DockerRuntimeBackendMock(
+            running: true, stopTimeout: -1, waitDelayNanoseconds: 50_000_000)
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/stop") { response async in
+                #expect(response.status == .noContent)
+            }
+        }
+        #expect(await backend.lastKillSignals == [15])
+    }
+
     @Test("guest network objects can be created and connected while stopped")
     func networkObjectOperations() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -1065,6 +1080,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private let imageRows: [DockerRuntimeImage]
     private let containerSizeRw: Int64
     private let containerSizeRootFs: Int64
+    private let stopTimeout: Int?
     private let waitDelayNanoseconds: UInt64
 
     init(
@@ -1073,6 +1089,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         containerSizeRw: Int64 = -1,
         containerSizeRootFs: Int64 = -1,
         running: Bool = false,
+        stopTimeout: Int? = nil,
         waitDelayNanoseconds: UInt64 = 0
     ) {
         self.logOutput = logOutput
@@ -1083,6 +1100,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         self.containerSizeRw = containerSizeRw
         self.containerSizeRootFs = containerSizeRootFs
         self.running = running
+        self.stopTimeout = stopTimeout
         self.waitDelayNanoseconds = waitDelayNanoseconds
     }
 
@@ -1428,7 +1446,8 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             tty: false,
             ports: [.init(containerPort: 80, proto: "tcp", hostIP: "127.0.0.1", hostPort: 18080)],
             sizeRw: containerSizeRw,
-            sizeRootFs: containerSizeRootFs
+            sizeRootFs: containerSizeRootFs,
+            stopTimeout: stopTimeout
         )
     }
 

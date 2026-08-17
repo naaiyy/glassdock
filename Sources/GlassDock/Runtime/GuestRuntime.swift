@@ -79,6 +79,7 @@ private struct GuestContainerMetadata: Decodable {
     let labels: [String: String]?
     let terminal: Bool?
     let autoRemove: Bool?
+    let stopTimeout: Int?
     let portBindings: [DockerRuntimePortBinding]?
     let publishedPorts: [GuestPublishedPort]?
 }
@@ -433,6 +434,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
         let labels: [String: String]
         let tty: Bool
         let autoRemove: Bool
+        let stopTimeout: Int?
         let image: String
         let createdAt: Date
         var ports: [DockerRuntimePortBinding]
@@ -688,6 +690,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
                 "labels": .object(request.labels.mapValues(JSONValue.string)),
                 "terminal": .bool(request.tty),
                 "autoRemove": .bool(request.autoRemove),
+                "stopTimeout": request.stopTimeout.map { .number(Double($0)) } ?? .null,
                 "portBindings": .array(request.ports.map(Self.portBindingJSON)),
             ]),
         ]
@@ -707,6 +710,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             labels: request.labels,
             tty: request.tty,
             autoRemove: request.autoRemove,
+            stopTimeout: request.stopTimeout,
             image: guest.container.image,
             createdAt: guest.container.createdAt,
             ports: request.ports,
@@ -1503,7 +1507,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             command: meta?.command ?? [], createdAt: guest.createdAt, state: state,
             exitCode: guest.exitCode.map(Int32.init), labels: meta?.labels ?? [:],
             tty: meta?.tty ?? false, ports: meta?.ports ?? [],
-            sizeRw: guest.sizeRw ?? -1, sizeRootFs: guest.sizeRootFs ?? -1
+            sizeRw: guest.sizeRw ?? -1, sizeRootFs: guest.sizeRootFs ?? -1,
+            stopTimeout: meta?.stopTimeout
         )
     }
 
@@ -1552,6 +1557,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             labels: stored.labels ?? [:],
             tty: stored.terminal ?? false,
             autoRemove: stored.autoRemove ?? false,
+            stopTimeout: stored.stopTimeout,
             image: guest.image,
             createdAt: guest.createdAt,
             ports: stored.portBindings ?? [],
@@ -1575,7 +1581,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             tty: meta.tty,
             ports: meta.ports,
             sizeRw: -1,
-            sizeRootFs: -1
+            sizeRootFs: -1,
+            stopTimeout: meta.stopTimeout
         )
     }
 

@@ -180,6 +180,7 @@ type ContainerCreateRequest struct {
 	Network        Network           `json:"network,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
 	AutoRemove     bool              `json:"autoRemove,omitempty"`
+	StopTimeout    *int              `json:"stopTimeout,omitempty"`
 	Snapshotter    string            `json:"snapshotter,omitempty"`
 	Runtime        string            `json:"runtime,omitempty"`
 	RuntimeBinary  string            `json:"runtimeBinary,omitempty"`
