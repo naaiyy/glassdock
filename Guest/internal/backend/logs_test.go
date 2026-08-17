@@ -77,7 +77,7 @@ func TestBoundedLogSubscriberReceivesExistingAndLiveBytes(t *testing.T) {
 	var received []byte
 	var receivedMu sync.Mutex
 	complete := make(chan struct{})
-	unsubscribe, err := writer.subscribe(func(data []byte) error {
+	unsubscribe, err := writer.subscribe(api.ContainerLogsRequest{Stdout: true}, func(data []byte) error {
 		receivedMu.Lock()
 		received = append(received, data...)
 		if string(received) == "before-after" {
@@ -120,7 +120,7 @@ func TestSlowLogSubscriberDoesNotBlockContainerOutput(t *testing.T) {
 	defer file.Close()
 	writer := &boundedLogWriter{file: file}
 	release := make(chan struct{})
-	_, err = writer.subscribe(func([]byte) error {
+	_, err = writer.subscribe(api.ContainerLogsRequest{Stdout: true}, func([]byte) error {
 		<-release
 		return nil
 	})
@@ -150,7 +150,7 @@ func TestLiveLogStreamContinuesAfterRetentionLimit(t *testing.T) {
 	defer file.Close()
 	writer := &boundedLogWriter{file: file, written: maxLogBytes}
 	received := make(chan string, 1)
-	_, err = writer.subscribe(func(data []byte) error {
+	_, err = writer.subscribe(api.ContainerLogsRequest{Stdout: true}, func(data []byte) error {
 		received <- string(data)
 		return nil
 	})
@@ -167,6 +167,56 @@ func TestLiveLogStreamContinuesAfterRetentionLimit(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("live output stopped at the retention limit")
+	}
+}
+
+func TestLiveLogSubscriberAppliesTimestampOptions(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	file, err := os.Create(filepath.Join(directory, "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	index, err := os.Create(filepath.Join(directory, "stdout.timestamps"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	writer := &boundedLogWriter{file: file, index: index}
+	received := make(chan string, 1)
+	_, err = writer.subscribe(api.ContainerLogsRequest{Stdout: true, Timestamps: true}, func(data []byte) error {
+		received <- string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("live\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-received:
+		if !strings.HasSuffix(got, " live\n") || !strings.Contains(got, "T") {
+			t.Fatalf("timestamped live output = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscriber did not receive timestamped live output")
+	}
+}
+
+func TestFormatLogChunkHonorsTimeWindow(t *testing.T) {
+	t.Parallel()
+	when := time.Unix(20, 0).UTC()
+	request := api.ContainerLogsRequest{Since: 20, Until: 21}
+	if got := formatLogChunk(when, []byte("included\n"), request); string(got) != "included\n" {
+		t.Fatalf("included chunk = %q", got)
+	}
+	if got := formatLogChunk(time.Unix(19, 0), []byte("old\n"), request); got != nil {
+		t.Fatalf("old chunk = %q, want nil", got)
+	}
+	if got := formatLogChunk(time.Unix(21, 0), []byte("new\n"), request); got != nil {
+		t.Fatalf("until chunk = %q, want nil", got)
 	}
 }
 

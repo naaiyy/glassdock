@@ -31,8 +31,9 @@ type boundedLogWriter struct {
 }
 
 type logSubscriber struct {
-	chunks chan []byte
-	stop   chan struct{}
+	chunks  chan []byte
+	stop    chan struct{}
+	options api.ContainerLogsRequest
 }
 
 func (w *boundedLogWriter) Write(p []byte) (int, error) {
@@ -47,7 +48,7 @@ func (w *boundedLogWriter) Write(p []byte) (int, error) {
 		if err := w.writeRecordLocked(when, live); err != nil {
 			return 0, err
 		}
-		w.publishLocked(live)
+		w.publishLocked(when, live)
 		return originalLength, nil
 	}
 	if int64(len(p)) > remaining {
@@ -62,7 +63,7 @@ func (w *boundedLogWriter) Write(p []byte) (int, error) {
 	if err := w.writeRecordLocked(when, live); err != nil {
 		return written, err
 	}
-	w.publishLocked(live)
+	w.publishLocked(when, live)
 	// Report the full input as consumed. Once the limit is reached, logs must not
 	// apply backpressure to the container process.
 	return originalLength, nil
@@ -80,10 +81,14 @@ func (w *boundedLogWriter) writeRecordLocked(when time.Time, data []byte) error 
 	return err
 }
 
-func (w *boundedLogWriter) publishLocked(data []byte) {
+func (w *boundedLogWriter) publishLocked(when time.Time, data []byte) {
 	for id, subscriber := range w.subscribers {
+		filtered := formatLogChunk(when, data, subscriber.options)
+		if len(filtered) == 0 {
+			continue
+		}
 		select {
-		case subscriber.chunks <- append([]byte(nil), data...):
+		case subscriber.chunks <- filtered:
 		default:
 			delete(w.subscribers, id)
 			close(subscriber.stop)
@@ -91,9 +96,11 @@ func (w *boundedLogWriter) publishLocked(data []byte) {
 	}
 }
 
-func (w *boundedLogWriter) subscribe(subscriber func([]byte) error) (func(), error) {
+func (w *boundedLogWriter) subscribe(
+	options api.ContainerLogsRequest, subscriber func([]byte) error,
+) (func(), error) {
 	w.mu.Lock()
-	data, err := os.ReadFile(w.file.Name())
+	data, err := w.initialDataLocked(options)
 	if err != nil {
 		w.mu.Unlock()
 		return nil, err
@@ -103,7 +110,9 @@ func (w *boundedLogWriter) subscribe(subscriber func([]byte) error) (func(), err
 	if w.subscribers == nil {
 		w.subscribers = make(map[uint64]*logSubscriber)
 	}
-	entry := &logSubscriber{chunks: make(chan []byte, 64), stop: make(chan struct{})}
+	entry := &logSubscriber{
+		chunks: make(chan []byte, 64), stop: make(chan struct{}), options: options,
+	}
 	if len(data) > 0 {
 		entry.chunks <- data
 	}
@@ -134,6 +143,21 @@ func (w *boundedLogWriter) subscribe(subscriber func([]byte) error) (func(), err
 		}
 	}()
 	return unsubscribe, nil
+}
+
+func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) ([]byte, error) {
+	if options.Timestamps || options.Since != 0 || options.Until != 0 {
+		if w.index != nil {
+			data, err := readFilteredRecords(w.index.Name(), options)
+			if err == nil {
+				return data, nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+	}
+	return os.ReadFile(w.file.Name())
 }
 
 type logCapture struct {
@@ -280,11 +304,15 @@ type logRecord struct {
 }
 
 func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRequest) ([]byte, error) {
-	file, err := os.Open(b.logIndexPath(id, stream))
+	data, err := readFilteredRecords(b.logIndexPath(id, stream), request)
 	if errors.Is(err, os.ErrNotExist) {
-		data, readErr := os.ReadFile(b.logPath(id, stream))
-		return data, readErr
+		return os.ReadFile(b.logPath(id, stream))
 	}
+	return data, err
+}
+
+func readFilteredRecords(path string, request api.ContainerLogsRequest) ([]byte, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +342,20 @@ func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRe
 		return nil, err
 	}
 	return output, nil
+}
+
+func formatLogChunk(when time.Time, data []byte, request api.ContainerLogsRequest) []byte {
+	seconds := when.Unix()
+	if request.Since != 0 && seconds < request.Since {
+		return nil
+	}
+	if request.Until != 0 && seconds >= request.Until {
+		return nil
+	}
+	if request.Timestamps {
+		return appendTimestamped(nil, when, data)
+	}
+	return append([]byte(nil), data...)
 }
 
 func appendTimestamped(output []byte, timestamp time.Time, data []byte) []byte {
@@ -372,14 +414,18 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 		}
 	}()
 	if request.Stdout {
-		unsubscribe, err := capture.stdout.subscribe(func(data []byte) error { return stream("stdout", data) })
+		unsubscribe, err := capture.stdout.subscribe(
+			request, func(data []byte) error { return stream("stdout", data) },
+		)
 		if err != nil {
 			return 0, err
 		}
 		unsubscribers = append(unsubscribers, unsubscribe)
 	}
 	if request.Stderr {
-		unsubscribe, err := capture.stderr.subscribe(func(data []byte) error { return stream("stderr", data) })
+		unsubscribe, err := capture.stderr.subscribe(
+			request, func(data []byte) error { return stream("stderr", data) },
+		)
 		if err != nil {
 			return 0, err
 		}
