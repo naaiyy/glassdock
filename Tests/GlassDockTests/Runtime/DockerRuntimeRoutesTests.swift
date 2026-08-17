@@ -855,7 +855,7 @@ struct DockerRuntimeRoutesTests {
             }
             try await app.testing().test(
                 .PUT,
-                "/v1.51/containers/container-1/archive?path=%2Ftmp",
+                "/v1.51/containers/container-1/archive?path=%2Ftmp&noOverwriteDirNonDir=1",
                 body: ByteBuffer(string: "container-tar")
             ) { response async in
                 #expect(response.status == .ok)
@@ -869,6 +869,7 @@ struct DockerRuntimeRoutesTests {
         }
         #expect(await backend.lastTopArguments == ["-ef"])
         #expect(await backend.lastArchiveData == Data("container-tar".utf8))
+        #expect(await backend.lastArchiveNoOverwriteDirNonDir)
     }
 
     @Test("container prune removes stopped containers and reports Docker fields")
@@ -1064,6 +1065,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastBuild: (Data, String, [String])?
     private(set) var lastTopArguments: [String]?
     private(set) var lastArchiveData: Data?
+    private(set) var lastArchiveNoOverwriteDirNonDir = false
     private(set) var lastRename: String?
     private(set) var lastResize: (UInt32, UInt32)?
     private(set) var lastKillSignals: [UInt32] = []
@@ -1406,6 +1408,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         id: String, path: String, data: Data, noOverwriteDirNonDir: Bool
     ) async throws {
         lastArchiveData = data
+        lastArchiveNoOverwriteDirNonDir = noOverwriteDirNonDir
     }
 
     func containerChanges(id: String) async throws -> [DockerRuntimeContainerChange] {

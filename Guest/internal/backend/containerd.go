@@ -1882,6 +1882,11 @@ func (b *Backend) PutArchive(ctx context.Context, request api.ContainerArchivePu
 	if !info.IsDir() {
 		return fmt.Errorf("archive destination %q is not a directory", request.Path)
 	}
+	if request.NoOverwriteDirNonDir {
+		if err := validateNoOverwriteDirNonDir(target, request.Data); err != nil {
+			return err
+		}
+	}
 	_, err = rootfsarchive.Apply(
 		b.ctx(ctx), target, bytes.NewReader(request.Data), rootfsarchive.WithNoSameOwner(),
 	)
