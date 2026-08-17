@@ -8,7 +8,7 @@ import VaporTesting
 
 @Suite("Plugin-compatible control-plane routes")
 struct PluginControlPlaneRoutesTests {
-    @Test("plugin lifecycle keeps metadata and enabled state coherent")
+    @Test("plugin mutations report the unavailable plugin manager")
     func pluginLifecycle() async throws {
         let controlPlane = DockerControlPlane()
         try await withApp(configure: { _ in }) { app in
@@ -21,19 +21,16 @@ struct PluginControlPlaneRoutesTests {
                 "/v1.51/plugins/create?name=demo",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Name":"demo","Description":"local"}"#)
-            ) { response async throws in
-                #expect(response.status == .created)
-                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
-                #expect(value?["Name"] as? String == "demo")
-                #expect(value?["Enabled"] as? Bool == false)
+            ) { response async in
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(.GET, "/v1.51/plugins") { response async throws in
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
-                #expect(value?.count == 1)
+                #expect(value?.isEmpty == true)
             }
             try await app.testing().test(.GET, "/v1.51/plugins/demo/json") { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notFound)
             }
             try await app.testing().test(.GET, "/v1.51/plugins/privileges") { response async throws in
                 #expect(response.status == .ok)
@@ -41,7 +38,7 @@ struct PluginControlPlaneRoutesTests {
                 #expect(value?.isEmpty == true)
             }
             try await app.testing().test(.POST, "/v1.51/plugins/demo/enable") { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(
                 .POST,
@@ -49,28 +46,28 @@ struct PluginControlPlaneRoutesTests {
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Env":["MODE=local"]}"#)
             ) { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notFound)
             }
             try await app.testing().test(.POST, "/v1.51/plugins/demo/push") { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(
                 .POST,
                 "/v1.51/plugins/demo/upgrade?remote=demo:v2"
             ) { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(.POST, "/v1.51/plugins/demo/disable") { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(
                 .POST,
                 "/v1.51/plugins/pull?remote=other/plugin:latest&name=other"
             ) { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notImplemented)
             }
             try await app.testing().test(.DELETE, "/v1.51/plugins/demo") { response async in
-                #expect(response.status == .ok)
+                #expect(response.status == .notFound)
             }
         }
     }

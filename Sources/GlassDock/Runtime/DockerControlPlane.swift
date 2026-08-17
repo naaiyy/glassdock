@@ -5,6 +5,7 @@ import Vapor
 protocol DockerControlPlaneRuntime: Sendable {
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer
     func startContainer(id: String) async throws
+    func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput
 }
 
@@ -256,12 +257,14 @@ actor DockerControlPlane {
 
     func currentSwarm() -> Swarm? { swarm }
 
-    func joinSwarm(spec: SwarmSpec, token: String) -> Swarm? {
+    func joinSwarm(spec: SwarmSpec, token: String, remoteAddresses: [String]) -> Swarm? {
+        guard Self.validJoinToken(token), !remoteAddresses.isEmpty,
+            remoteAddresses.allSatisfy(Self.validRemoteAddress)
+        else { return nil }
         if let swarm {
             guard token == swarm.workerToken || token == swarm.managerToken else { return nil }
             return swarm
         }
-        guard token.contains("SWMTKN-") else { return nil }
         return initializeSwarm(spec: spec)
     }
 
@@ -628,6 +631,31 @@ actor DockerControlPlane {
     private static func identifier() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
+
+    private static func validJoinToken(_ token: String) -> Bool {
+        let parts = token.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts[0] == "SWMTKN", parts[1] == "1",
+            parts[2].count >= 16, parts[3].count >= 6
+        else { return false }
+        return parts.dropFirst(2).allSatisfy { part in
+            part.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == ".") }
+        }
+    }
+
+    private static func validRemoteAddress(_ address: String) -> Bool {
+        guard !address.isEmpty, !address.contains(where: { $0.isWhitespace || $0 == "/" }) else { return false }
+        if address.first == "[" {
+            guard let closing = address.firstIndex(of: "]"), address[closing...].hasPrefix("]:"),
+                let port = Int(address[address.index(closing, offsetBy: 2)...])
+            else { return false }
+            return address.index(after: closing) < address.endIndex && (1...65535).contains(port)
+        }
+        guard let separator = address.lastIndex(of: ":"), separator != address.startIndex,
+            separator < address.index(before: address.endIndex), !address[..<separator].contains(":"),
+            let port = Int(address[address.index(after: separator)...])
+        else { return false }
+        return (1...65535).contains(port)
+    }
 }
 
 struct DockerControlPlaneRoutes: RouteCollection {
@@ -762,7 +790,13 @@ struct DockerControlPlaneRoutes: RouteCollection {
 
     private func joinSwarm(_ req: Request) async throws -> Response {
         let payload = try await decodeSwarmRequest(req)
-        guard let swarm = await controlPlane.joinSwarm(spec: payload.spec, token: payload.token ?? "") else {
+        guard
+            let swarm = await controlPlane.joinSwarm(
+                spec: payload.spec,
+                token: payload.token ?? "",
+                remoteAddresses: payload.remoteAddresses
+            )
+        else {
             throw Abort(.badRequest, reason: "invalid swarm join token")
         }
         return try jsonResponse(.ok, JoinResponse(NodeID: swarm.nodeID))
@@ -841,7 +875,12 @@ struct DockerControlPlaneRoutes: RouteCollection {
             let container = try await runtime.createContainer(
                 try containerRequest(serviceName: name, specification: spec)
             )
-            try await runtime.startContainer(id: container.id)
+            do {
+                try await runtime.startContainer(id: container.id)
+            } catch {
+                try? await runtime.deleteContainer(id: container.id, force: true, removeVolumes: true)
+                throw error
+            }
             guard
                 await controlPlane.attachTaskContainer(
                     taskID: service.taskID, containerID: container.id
@@ -874,15 +913,65 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func updateService(_ req: Request) async throws -> Response {
-        let service = await controlPlane.updateService(
-            id: try parameter("id", req), spec: try await decodeObject(req, message: "service specification")
-        )
-        guard let service else { throw Abort(.notFound, reason: "service not found") }
-        return try jsonResponse(.ok, ServiceUpdateResponse(service: service))
+        guard let runtime else {
+            throw Abort(.serviceUnavailable, reason: "service scheduler is unavailable")
+        }
+        let serviceID = try parameter("id", req)
+        let specification = try await decodeObject(req, message: "service specification")
+        guard let current = await controlPlane.inspectService(id: serviceID) else {
+            throw Abort(.notFound, reason: "service not found")
+        }
+        let oldContainerID = await controlPlane.taskContainerID(id: current.taskID)
+        guard case .string(let name) = specification["Name"], !name.isEmpty else {
+            throw Abort(.badRequest, reason: "service Name is required")
+        }
+
+        let replacement: DockerRuntimeContainer
+        do {
+            replacement = try await runtime.createContainer(
+                try containerRequest(serviceName: name, specification: specification)
+            )
+            do {
+                try await runtime.startContainer(id: replacement.id)
+            } catch {
+                try? await runtime.deleteContainer(id: replacement.id, force: true, removeVolumes: true)
+                throw error
+            }
+            guard let service = await controlPlane.updateService(id: serviceID, spec: specification) else {
+                try? await runtime.deleteContainer(id: replacement.id, force: true, removeVolumes: true)
+                throw Abort(.notFound, reason: "service not found")
+            }
+            guard await controlPlane.attachTaskContainer(taskID: service.taskID, containerID: replacement.id) else {
+                try? await runtime.deleteContainer(id: replacement.id, force: true, removeVolumes: true)
+                throw Abort(.internalServerError, reason: "service task was not retained")
+            }
+            if let oldContainerID, oldContainerID != replacement.id {
+                try await runtime.deleteContainer(id: oldContainerID, force: true, removeVolumes: true)
+            }
+            return try jsonResponse(.ok, ServiceUpdateResponse(service: service))
+        } catch let abort as Abort {
+            throw abort
+        } catch {
+            throw Abort(.serviceUnavailable, reason: "service task could not be reconciled: \(error)")
+        }
     }
 
     private func deleteService(_ req: Request) async throws -> Response {
-        guard await controlPlane.removeService(id: try parameter("id", req)) else {
+        guard let runtime else {
+            throw Abort(.serviceUnavailable, reason: "service scheduler is unavailable")
+        }
+        let serviceID = try parameter("id", req)
+        guard let service = await controlPlane.inspectService(id: serviceID) else {
+            throw Abort(.notFound, reason: "service not found")
+        }
+        if let containerID = await controlPlane.taskContainerID(id: service.taskID) {
+            do {
+                try await runtime.deleteContainer(id: containerID, force: true, removeVolumes: true)
+            } catch {
+                throw Abort(.serviceUnavailable, reason: "service task could not be removed: \(error)")
+            }
+        }
+        guard await controlPlane.removeService(id: service.id) else {
             throw Abort(.notFound, reason: "service not found")
         }
         return try jsonResponse(.ok, WarningsResponse())
@@ -926,27 +1015,11 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func createPlugin(_ req: Request) async throws -> Response {
-        let data = try await bodyData(req, allowEmpty: true)
-        let object =
-            (try? JSONDecoder().decode(
-                [String: DockerControlPlane.JSONValue].self, from: data
-            )) ?? [:]
-        let name =
-            req.query[String.self, at: "name"]
-            ?? (object["Name"].flatMap(Self.stringValue))
-            ?? "local-plugin"
-        let plugin = await controlPlane.createPlugin(name: name, config: object)
-        return try jsonResponse(.created, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func pullPlugin(_ req: Request) async throws -> Response {
-        let reference =
-            req.query[String.self, at: "remote"]
-            ?? req.query[String.self, at: "name"]
-            ?? "local-plugin"
-        let name = req.query[String.self, at: "name"] ?? reference
-        let plugin = await controlPlane.pullPlugin(name: name, reference: reference)
-        return try jsonResponse(.ok, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func inspectPlugin(_ req: Request) async throws -> Response {
@@ -956,26 +1029,15 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func disablePlugin(_ req: Request) async throws -> Response {
-        let plugin = await controlPlane.setPluginEnabled(
-            name: try parameter("name", req), enabled: false
-        )
-        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
-        return try jsonResponse(.ok, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func enablePlugin(_ req: Request) async throws -> Response {
-        let plugin = await controlPlane.setPluginEnabled(
-            name: try parameter("name", req), enabled: true
-        )
-        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
-        return try jsonResponse(.ok, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func pushPlugin(_ req: Request) async throws -> Response {
-        guard let plugin = await controlPlane.inspectPlugin(name: try parameter("name", req)) else {
-            throw Abort(.notFound, reason: "plugin not found")
-        }
-        return try jsonResponse(.ok, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func setPlugin(_ req: Request) async throws -> Response {
@@ -988,12 +1050,7 @@ struct DockerControlPlaneRoutes: RouteCollection {
     }
 
     private func upgradePlugin(_ req: Request) async throws -> Response {
-        let plugin = await controlPlane.upgradePlugin(
-            name: try parameter("name", req),
-            reference: req.query[String.self, at: "remote"]
-        )
-        guard let plugin else { throw Abort(.notFound, reason: "plugin not found") }
-        return try jsonResponse(.ok, PluginResponse(plugin))
+        throw Abort(.notImplemented, reason: "Docker plugins require an unavailable plugin manager")
     }
 
     private func deletePlugin(_ req: Request) async throws -> Response {
@@ -1190,24 +1247,37 @@ struct DockerControlPlaneRoutes: RouteCollection {
         let labels: [String: String]?
         let token: String?
         let unlockKey: String?
+        let remoteAddresses: [String]
 
         enum CodingKeys: String, CodingKey {
             case name = "Name"
             case labels = "Labels"
             case token = "JoinToken"
             case unlockKey = "UnlockKey"
+            case remoteAddresses = "RemoteAddrs"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decodeIfPresent(String.self, forKey: .name)
+            labels = try container.decodeIfPresent([String: String].self, forKey: .labels)
+            token = try container.decodeIfPresent(String.self, forKey: .token)
+            unlockKey = try container.decodeIfPresent(String.self, forKey: .unlockKey)
+            remoteAddresses = try container.decodeIfPresent([String].self, forKey: .remoteAddresses) ?? []
         }
 
         init(
             name: String? = nil,
             labels: [String: String]? = nil,
             token: String? = nil,
-            unlockKey: String? = nil
+            unlockKey: String? = nil,
+            remoteAddresses: [String] = []
         ) {
             self.name = name
             self.labels = labels
             self.token = token
             self.unlockKey = unlockKey
+            self.remoteAddresses = remoteAddresses
         }
 
         var spec: DockerControlPlane.SwarmSpec {

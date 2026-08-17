@@ -105,6 +105,51 @@ struct SwarmControlPlaneRoutesTests {
         }
     }
 
+    @Test("swarm join validates the token shape and remote manager addresses")
+    func swarmJoinValidation() async throws {
+        let controlPlane = DockerControlPlane()
+        try await withApp(configure: { _ in }) { app in
+            let router = app.regexRouter(with: app.logger)
+            app.setRegexRouter(router)
+            try app.register(collection: DockerControlPlaneRoutes(controlPlane: controlPlane))
+
+            try await app.testing().test(
+                .POST,
+                "/v1.51/swarm/init",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"ListenAddr":"127.0.0.1:2377"}"#)
+            ) { response async in
+                #expect(response.status == .ok)
+            }
+            let swarm = try #require(await controlPlane.currentSwarm())
+            let validJoinBody = #"{"JoinToken":""# + swarm.workerToken + #"","RemoteAddrs":["127.0.0.1:2377"]}"#
+            try await app.testing().test(
+                .POST,
+                "/v1.51/swarm/join",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: validJoinBody)
+            ) { response async in
+                #expect(response.status == .ok)
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/swarm/join",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"JoinToken":"SWMTKN-1-invalid","RemoteAddrs":["127.0.0.1:2377"]}"#)
+            ) { response async in
+                #expect(response.status == .badRequest)
+            }
+            try await app.testing().test(
+                .POST,
+                "/v1.51/swarm/join",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"JoinToken":"SWMTKN-1-invalid-token-with-enough-length-0123456789","RemoteAddrs":["127.0.0.1"]}"#)
+            ) { response async in
+                #expect(response.status == .badRequest)
+            }
+        }
+    }
+
     @Test("nodes, services, and tasks share single-node control-plane state")
     func nodesServicesAndTasks() async throws {
         let controlPlane = DockerControlPlane()
@@ -166,10 +211,14 @@ struct SwarmControlPlaneRoutesTests {
                 .POST,
                 "/v1.51/services/\(serviceID)/update",
                 headers: ["Content-Type": "application/json"],
-                body: ByteBuffer(string: #"{"Name":"web-v2","TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}"#)
+                body: ByteBuffer(string: #"{"Name":"web-v2","TaskTemplate":{"ContainerSpec":{"Image":"busybox"}}}"#)
             ) { response async in
                 #expect(response.status == .ok)
             }
+            let replacementContainerID = try #require(await runtime.latestCreatedContainerID())
+            #expect(replacementContainerID != "service-container-1")
+            #expect(await runtime.deletedContainerIDs() == ["service-container-1"])
+            #expect(await runtime.createdImages() == ["alpine", "busybox"])
             try await app.testing().test(.GET, "/v1.51/tasks") { response async throws in
                 #expect(response.status == .ok)
                 let tasks = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
@@ -186,15 +235,21 @@ struct SwarmControlPlaneRoutesTests {
             try await app.testing().test(.DELETE, "/v1.51/services/\(serviceID)") { response async in
                 #expect(response.status == .ok)
             }
+            #expect(await runtime.deletedContainerIDs() == ["service-container-1", replacementContainerID])
         }
     }
 }
 
 private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
+    private var requests: [DockerRuntimeContainerCreate] = []
+    private var deletedIDs: [String] = []
+
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
-        DockerRuntimeContainer(
-            id: "service-container",
-            name: request.name ?? "service-container",
+        requests.append(request)
+        let id = "service-container-\(requests.count)"
+        return DockerRuntimeContainer(
+            id: id,
+            name: request.name ?? id,
             image: request.image,
             command: request.command,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -208,6 +263,10 @@ private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
 
     func startContainer(id: String) async throws {}
 
+    func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws {
+        deletedIDs.append(id)
+    }
+
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {
         DockerRuntimeProcessOutput(
             stdout: stdout ? Data("service output\n".utf8) : Data(),
@@ -215,6 +274,14 @@ private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
             exitCode: 0
         )
     }
+
+    func latestCreatedContainerID() -> String? {
+        requests.isEmpty ? nil : "service-container-\(requests.count)"
+    }
+
+    func deletedContainerIDs() -> [String] { deletedIDs }
+
+    func createdImages() -> [String] { requests.map(\.image) }
 }
 
 extension DockerControlPlane {
