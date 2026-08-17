@@ -8,8 +8,8 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
     private struct Metadata: Codable {
         let name: String
         let driver: String
-        let options: [String: String]
-        let labels: [String: String]
+        var options: [String: String]
+        var labels: [String: String]
         let createdAt: Date
         var referencedContainers: Set<String> = []
 
@@ -161,6 +161,31 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             throw Abort(.notFound, reason: "No such volume: \(name)")
         }
         return try volume(from: readMetadata(at: metadataURL))
+    }
+
+    func update(name: String, request: RESTVolumeUpdate) throws -> Volume {
+        try Self.validate(name)
+        let metadataURL = volumeDirectory(name).appendingPathComponent(
+            "metadata.json", isDirectory: false
+        )
+        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+            throw Abort(.notFound, reason: "No such volume: \(name)")
+        }
+        var metadata = try readMetadata(at: metadataURL)
+        if let labels = request.Labels {
+            guard !LabelNormalization.containsReservedKey(labels) else {
+                throw Abort(
+                    .badRequest,
+                    reason: "Label key '\(LabelNormalization.mappingKey)' is reserved for internal use"
+                )
+            }
+            metadata.labels = LabelNormalization.sanitize(labels)
+        }
+        if let options = request.DriverOpts {
+            metadata.options = options
+        }
+        try write(metadata)
+        return try volume(from: metadata)
     }
 
     private func prepareRoot() throws {

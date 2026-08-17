@@ -12,8 +12,6 @@ struct ExplicitUnsupportedDockerRoutes: RouteCollection {
     private static let endpoints = [
         Endpoint(method: .POST, pattern: "/build"),
         Endpoint(method: .POST, pattern: "/build/prune"),
-        Endpoint(method: .POST, pattern: "/session"),
-        Endpoint(method: .PUT, pattern: "/volumes/{name:.*}"),
     ]
 
     func boot(routes: RoutesBuilder) throws {

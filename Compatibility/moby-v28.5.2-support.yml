@@ -481,6 +481,11 @@ routes:
     support: partial
     owner: DockerControlPlaneRoutes
     note: Updates the recorded plugin reference and version without executing plugin code.
+  - method: POST
+    path: /session
+    support: partial
+    owner: SessionRoute
+    note: Accepts Docker TCP or h2c session upgrade handshakes; the guest interactive stream is negotiated by the caller.
   - method: GET
     path: /distribution/{name}/json
     support: implemented
@@ -526,3 +531,8 @@ routes:
     support: implemented
     owner: VolumePruneRoute
     note: Anonymous and all-volume pruning with label filters.
+  - method: PUT
+    path: /volumes/{name}
+    support: partial
+    owner: VolumeUpdateRoute
+    note: Updates local volume labels and driver options in persistent metadata.

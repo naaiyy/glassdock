@@ -99,6 +99,7 @@ func configure(
     try app.register(collection: ImageSearchRoute())
     try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())
+    try app.register(collection: SessionRoute())
     try app.register(collection: ExplicitUnsupportedDockerRoutes())
 
     // /volumes
@@ -107,6 +108,7 @@ func configure(
     try app.register(collection: VolumeInspectRoute(client: volumeClient))
     try app.register(collection: VolumeListRoute(client: volumeClient))
     try app.register(collection: VolumePruneRoute(client: volumeClient))
+    try app.register(collection: VolumeUpdateRoute(client: volumeClient))
 
     // Build routes are intentionally absent until the guest runtime owns
     // BuildKit. The former builder service created another Apple VM.

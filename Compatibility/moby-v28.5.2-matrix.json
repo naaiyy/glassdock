@@ -1366,16 +1366,16 @@
       "method": "POST",
       "path": "/session",
       "operationId": "Session",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 101,
       "responseStatuses": [
         101,
         400,
         500
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "Interactive sessions require a guest terminal handoff that is not implemented."
+      "owner": "SessionRoute",
+      "note": "Accepts Docker TCP or h2c session upgrade handshakes; the guest interactive stream is negotiated by the caller."
     },
     {
       "method": "GET",
@@ -1638,8 +1638,8 @@
       "method": "PUT",
       "path": "/volumes/{name}",
       "operationId": "VolumeUpdate",
-      "support": "unsupported",
-      "expectedStatus": 501,
+      "support": "partial",
+      "expectedStatus": 200,
       "responseStatuses": [
         200,
         400,
@@ -1648,8 +1648,8 @@
         503
       ],
       "responseSchema": null,
-      "owner": "ExplicitUnsupportedDockerRoutes",
-      "note": "No persistent guest runtime implementation is registered for this Docker API operation."
+      "owner": "VolumeUpdateRoute",
+      "note": "Updates local volume labels and driver options in persistent metadata."
     }
   ]
 }

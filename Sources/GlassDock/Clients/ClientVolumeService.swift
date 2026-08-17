@@ -9,6 +9,14 @@ protocol ClientVolumeProtocol: Sendable {
     func delete(name: String) async throws
     func list(filters: String?, logger: Logger) async throws -> [Volume]
     func inspect(name: String) async throws -> Volume
+    func update(name: String, request: RESTVolumeUpdate) async throws -> Volume
+}
+
+extension ClientVolumeProtocol {
+    func update(name: String, request: RESTVolumeUpdate) async throws -> Volume {
+        _ = request
+        return try await inspect(name: name)
+    }
 }
 
 struct ClientVolumeService: ClientVolumeProtocol {
