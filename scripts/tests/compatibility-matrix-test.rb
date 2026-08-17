@@ -58,12 +58,21 @@ assert(
 )
 assert(
   validate_contract_response(
-    {"method" => "POST", "path" => "/containers/create"},
+    {"method" => "POST", "path" => "/configs/create"},
     201,
-    '{"Warnings":[]}',
+    '{"ID":"config-id"}',
     "application/json"
-  ).include?("Id"),
-  "container create responses must require Id"
+  ).nil?,
+  "config create responses must accept the Docker identity shape"
+)
+assert(
+  validate_contract_response(
+    {"method" => "POST", "path" => "/configs/create"},
+    201,
+    '{"Id":"config-id"}',
+    "application/json"
+  ).include?("ID"),
+  "config create responses must require ID"
 )
 assert(
   validate_contract_response(

@@ -166,7 +166,7 @@ def validate_success_schema(row, status, body, content_type)
              when "/containers/create"
                %w[Id Warnings]
              when "/configs/create", "/secrets/create"
-               %w[Id]
+               %w[ID]
              when "/networks/create"
                %w[Id Warning]
              when "/volumes/create"
@@ -199,7 +199,7 @@ def check_side_effect(socket:, row:, status:, body:, timeout:)
       checks << "volume #{name} was not removable after create" unless delete_status == 204
     end
   when "/networks/create"
-    id = value["Id"]
+    id = response_identity(value)
     if id
       inspect_status, = request(socket: socket, method: "GET", path: "/networks/#{id}", timeout: timeout)
       checks << "network #{id} was not inspectable after create" unless inspect_status == 200
@@ -207,7 +207,7 @@ def check_side_effect(socket:, row:, status:, body:, timeout:)
       checks << "network #{id} was not removable after create" unless delete_status == 204
     end
   when "/configs/create", "/secrets/create"
-    id = value["Id"]
+    id = response_identity(value)
     if id
       prefix = row.fetch("path").split("/").first(2).join("/")
       inspect_status, = request(socket: socket, method: "GET", path: "#{prefix}/#{id}", timeout: timeout)
@@ -217,6 +217,10 @@ def check_side_effect(socket:, row:, status:, body:, timeout:)
     end
   end
   checks
+end
+
+def response_identity(value)
+  value["Id"] || value["ID"]
 end
 
 def main(options = parse_options)
