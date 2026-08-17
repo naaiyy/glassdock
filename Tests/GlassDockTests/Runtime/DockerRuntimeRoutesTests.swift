@@ -742,7 +742,7 @@ struct DockerRuntimeRoutesTests {
                 "/v1.51/networks/frontend/connect",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(
-                    string: #"{"Container":"container-1","EndpointConfig":{"Aliases":["api","frontend"]}}"#
+                    string: #"{"Container":"container-1","EndpointConfig":{"Aliases":["api","frontend"],"Links":["db:database"]}}"#
                 )
             ) { response async in
                 #expect(response.status == .ok)
@@ -763,7 +763,7 @@ struct DockerRuntimeRoutesTests {
         let connected = await backend.lastNetworkConnect
         #expect(connected?.0 == "frontend")
         #expect(connected?.1 == "container-1")
-        #expect(await backend.lastNetworkAliases == ["api", "frontend"])
+        #expect(await backend.lastNetworkAliases == ["api", "frontend", "database"])
         let disconnected = await backend.lastNetworkDisconnect
         #expect(disconnected?.0 == "frontend")
         #expect(disconnected?.1 == "container-1")

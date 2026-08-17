@@ -1316,7 +1316,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             try await backend.connectNetwork(
                 id: id,
                 containerID: body.Container,
-                aliases: body.EndpointConfig?.Aliases,
+                aliases: Self.endpointAliases(body.EndpointConfig),
                 ipv4Address: body.EndpointConfig?.IPAMConfig?.IPv4Address,
                 ipv6Address: body.EndpointConfig?.IPAMConfig?.IPv6Address
             )
@@ -1967,6 +1967,19 @@ struct DockerRuntimeRoutes: RouteCollection {
     private static func mobyBool(_ value: String?) -> Bool {
         guard let value else { return false }
         return value == "1" || value.lowercased() == "true"
+    }
+
+    private static func endpointAliases(_ config: DockerNetworkEndpointConfig?) -> [String]? {
+        guard let config else { return nil }
+        var result: [String] = []
+        for alias in config.Aliases ?? [] {
+            if !alias.isEmpty, !result.contains(alias) { result.append(alias) }
+        }
+        for link in config.Links ?? [] {
+            let alias = link.split(separator: ":", omittingEmptySubsequences: true).last.map(String.init)
+            if let alias, !result.contains(alias) { result.append(alias) }
+        }
+        return result.isEmpty ? nil : result
     }
 
     private static func logOptions(_ req: Request) throws -> DockerRuntimeLogOptions {
@@ -2688,6 +2701,7 @@ private struct DockerNetworkDisconnectRequest: Content {
 private struct DockerNetworkEndpointConfig: Content {
     let IPAMConfig: ContainerIPAMConfig?
     let Aliases: [String]?
+    let Links: [String]?
 }
 
 private struct CreateRequest: Content {
