@@ -13,6 +13,12 @@ protocol DockerControlPlaneRuntime: Sendable {
         stderr: Bool,
         options: DockerRuntimeLogOptions
     ) async throws -> DockerRuntimeProcessOutput
+    func streamLogs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
 }
 
 extension GuestRuntime: DockerControlPlaneRuntime {}
@@ -25,6 +31,37 @@ extension DockerControlPlaneRuntime {
         options: DockerRuntimeLogOptions
     ) async throws -> DockerRuntimeProcessOutput {
         try await logs(id: id, stdout: stdout, stderr: stderr)
+    }
+
+    func streamLogs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
+        let output = try await logs(id: id, stdout: stdout, stderr: stderr, options: options)
+        return AsyncThrowingStream { continuation in
+            if stdout, !output.stdout.isEmpty {
+                continuation.yield(.init(stream: .stdout, data: output.stdout, exitCode: nil))
+            }
+            if stderr, !output.stderr.isEmpty {
+                continuation.yield(.init(stream: .stderr, data: output.stderr, exitCode: nil))
+            }
+            continuation.finish()
+        }
+    }
+}
+
+extension GuestRuntime {
+    func streamLogs(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
+        try await attachContainer(
+            id: id, stdout: stdout, stderr: stderr, options: options
+        )
     }
 }
 
@@ -1167,6 +1204,26 @@ struct DockerControlPlaneRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
         }
         let options = try Self.logOptions(request)
+        if Self.mobyBool(request.query[String.self, at: "follow"]) {
+            let stream = try await runtime.streamLogs(
+                id: containerID, stdout: stdout, stderr: stderr, options: options
+            )
+            let response = Response(
+                status: .ok,
+                body: .init(managedAsyncStream: { writer in
+                    for try await frame in stream {
+                        let data = Self.rawStreamFrame(
+                            frame.data, stream: frame.stream == .stderr ? 2 : 1
+                        )
+                        try await writer.writeBuffer(ByteBuffer(data: data))
+                    }
+                })
+            )
+            response.headers.contentType = HTTPMediaType(
+                type: "application", subType: "vnd.docker.raw-stream"
+            )
+            return response
+        }
         var output = try await runtime.logs(
             id: containerID, stdout: stdout, stderr: stderr, options: options
         )

@@ -198,6 +198,7 @@ struct SwarmControlPlaneRoutesTests {
                 #expect((value?["Id"] as? String)?.isEmpty == false)
             }
             let serviceID = try #require(await controlPlane.listServices(filters: nil).first?.id)
+            let initialTaskID = try #require(await controlPlane.listTasks(filters: nil).first?.id)
             try await app.testing().test(.GET, "/v1.51/services") { response async throws in
                 #expect(response.status == .ok)
                 let services = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
@@ -218,6 +219,14 @@ struct SwarmControlPlaneRoutesTests {
                             timestamps: true, details: false, since: nil, until: nil
                         ))
                 #expect(Data(buffer: response.body).contains(0x01))
+            }
+            try await app.testing().test(
+                .GET,
+                "/v1.51/tasks/\(initialTaskID)/logs?follow=1&stdout=1&stderr=1"
+            ) { response async in
+                #expect(response.status == .ok)
+                #expect(response.headers.contentType?.description.contains("raw-stream") == true)
+                #expect(Data(buffer: response.body).count > 8)
             }
             try await app.testing().test(
                 .POST,
