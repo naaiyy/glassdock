@@ -150,6 +150,9 @@ func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) (
 		if w.index != nil {
 			data, err := readFilteredRecords(w.index.Name(), options)
 			if err == nil {
+				if options.Tail != nil {
+					return tailLog(data, *options.Tail), nil
+				}
 				return data, nil
 			}
 			if !errors.Is(err, os.ErrNotExist) {
@@ -157,7 +160,14 @@ func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) (
 			}
 		}
 	}
-	return os.ReadFile(w.file.Name())
+	data, err := os.ReadFile(w.file.Name())
+	if err != nil {
+		return nil, err
+	}
+	if options.Tail != nil {
+		data = tailLog(data, *options.Tail)
+	}
+	return data, nil
 }
 
 type logCapture struct {
@@ -279,6 +289,10 @@ func (b *Backend) Logs(request api.ContainerLogsRequest) (api.ContainerLogsRespo
 			return api.ContainerLogsResponse{}, err
 		}
 	}
+	if request.Tail != nil {
+		response.Stdout = tailLog(response.Stdout, *request.Tail)
+		response.Stderr = tailLog(response.Stderr, *request.Tail)
+	}
 	if value, ok := b.logCaptures.Load(request.ID); ok {
 		capture := value.(*logCapture)
 		capture.stdout.mu.Lock()
@@ -356,6 +370,25 @@ func formatLogChunk(when time.Time, data []byte, request api.ContainerLogsReques
 		return appendTimestamped(nil, when, data)
 	}
 	return append([]byte(nil), data...)
+}
+
+func tailLog(data []byte, count int) []byte {
+	if count <= 0 {
+		return nil
+	}
+	hasTrailingNewline := len(data) > 0 && data[len(data)-1] == '\n'
+	lines := bytes.Split(data, []byte{'\n'})
+	if hasTrailingNewline {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= count {
+		return data
+	}
+	result := bytes.Join(lines[len(lines)-count:], []byte{'\n'})
+	if hasTrailingNewline {
+		result = append(result, '\n')
+	}
+	return result
 }
 
 func appendTimestamped(output []byte, timestamp time.Time, data []byte) []byte {

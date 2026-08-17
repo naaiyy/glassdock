@@ -1262,8 +1262,17 @@ struct DockerControlPlaneRoutes: RouteCollection {
             timestamps: mobyBool(req.query[String.self, at: "timestamps"]),
             details: mobyBool(req.query[String.self, at: "details"]),
             since: try parse("since"),
-            until: try parse("until")
+            until: try parse("until"),
+            tail: try parseTail(req.query[String.self, at: "tail"])
         )
+    }
+
+    private static func parseTail(_ raw: String?) throws -> Int? {
+        guard let raw, !raw.isEmpty, raw != "all" else { return nil }
+        guard let count = Int(raw), count >= 0 else {
+            throw Abort(.badRequest, reason: "Invalid tail value: \(raw)")
+        }
+        return count
     }
 
     private static func applyTail(

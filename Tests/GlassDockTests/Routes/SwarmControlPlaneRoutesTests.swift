@@ -216,7 +216,7 @@ struct SwarmControlPlaneRoutesTests {
                 #expect(
                     await runtime.lastLogOptions()
                         == DockerRuntimeLogOptions(
-                            timestamps: true, details: false, since: nil, until: nil
+                            timestamps: true, details: false, since: nil, until: nil, tail: 1
                         ))
                 #expect(Data(buffer: response.body).contains(0x01))
             }

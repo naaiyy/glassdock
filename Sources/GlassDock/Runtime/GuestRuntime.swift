@@ -1301,7 +1301,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             stdout: stdout,
             stderr: stderr,
             options: DockerRuntimeLogOptions(
-                timestamps: false, details: false, since: nil, until: nil
+                timestamps: false, details: false, since: nil, until: nil, tail: nil
             )
         )
     }
@@ -1388,7 +1388,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
             stdout: stdout,
             stderr: stderr,
             options: DockerRuntimeLogOptions(
-                timestamps: false, details: false, since: nil, until: nil
+                timestamps: false, details: false, since: nil, until: nil, tail: nil
             )
         )
     }
@@ -1420,6 +1420,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
         if options.details { payload["details"] = .bool(true) }
         if let since = options.since { payload["since"] = .number(Double(since)) }
         if let until = options.until { payload["until"] = .number(Double(until)) }
+        if let tail = options.tail { payload["tail"] = .number(Double(tail)) }
     }
 
     private func resolve(_ reference: String) async throws -> String {

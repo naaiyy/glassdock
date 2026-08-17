@@ -369,6 +369,20 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("container logs reject invalid tail values")
+    func logsRejectInvalidTail() async throws {
+        let backend = DockerRuntimeBackendMock(logOutput: "output\n")
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/logs?stdout=1&tail=not-a-number"
+            ) { response async throws in
+                #expect(response.status == .badRequest)
+                #expect(String(buffer: response.body).contains("Invalid tail value: not-a-number"))
+            }
+        }
+    }
+
     @Test("container list applies exact label filters")
     func listLabelFilters() async throws {
         let backend = DockerRuntimeBackendMock()

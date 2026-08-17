@@ -372,6 +372,7 @@ type ContainerLogsRequest struct {
 	Details    bool   `json:"details,omitempty"`
 	Since      int64  `json:"since,omitempty"`
 	Until      int64  `json:"until,omitempty"`
+	Tail       *int   `json:"tail,omitempty"`
 }
 type ContainerLogsResponse struct {
 	Stdout    []byte `json:"stdout,omitempty"`

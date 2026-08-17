@@ -220,6 +220,19 @@ func TestFormatLogChunkHonorsTimeWindow(t *testing.T) {
 	}
 }
 
+func TestTailLogKeepsTheFinalLines(t *testing.T) {
+	t.Parallel()
+	if got := string(tailLog([]byte("one\ntwo\nthree\n"), 2)); got != "two\nthree\n" {
+		t.Fatalf("tail = %q", got)
+	}
+	if got := string(tailLog([]byte("one\ntwo\n"), 0)); got != "" {
+		t.Fatalf("zero tail = %q", got)
+	}
+	if got := string(tailLog([]byte("one\ntwo"), 1)); got != "two" {
+		t.Fatalf("tail without newline = %q", got)
+	}
+}
+
 func TestAppendTimestampedPrefixesEachLogLine(t *testing.T) {
 	t.Parallel()
 	when := time.Date(2026, 8, 17, 12, 34, 56, 123456789, time.UTC)
