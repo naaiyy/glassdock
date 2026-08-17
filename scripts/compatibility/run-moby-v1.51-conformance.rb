@@ -95,8 +95,16 @@ def contract_path(path)
     "#{concrete}?follow=false&tail=0"
   when "/containers/{id}/stats"
     "#{concrete}?stream=false"
+  when "/containers/{id}/archive"
+    "#{concrete}?path=%2Ftmp"
+  when "/images/{name}/push"
+    "#{concrete}?tag=latest"
+  when "/images/{name}/tag"
+    "#{concrete}?repo=glassdock-compat-tag&tag=latest"
   when "/events"
     "#{concrete}?since=0&until=1"
+  when "/system/df"
+    "#{concrete}?type=container"
   else
     concrete
   end
@@ -104,17 +112,33 @@ end
 
 def contract_body(row)
   path = row.fetch("path")
-  return tar_context if path == "/build"
+  return tar_context if path == "/build" || path == "/containers/{id}/archive"
   return '{"username":"probe","password":"probe"}' if path == "/auth"
   return '{"Image":"alpine"}' if path == "/containers/create"
   return '{"Name":"glassdock-compat-volume"}' if path == "/volumes/create"
   return '{"Name":"glassdock-compat-network"}' if path == "/networks/create"
   return '{"Name":"glassdock-compat-config","Data":"Y29uZmln"}' if path == "/configs/create"
   return '{"Name":"glassdock-compat-secret","Data":"c2VjcmV0"}' if path == "/secrets/create"
+  return '{"Name":"glassdock-compat-config","Data":"Y29uZmln"}' if path == "/configs/{id}/update"
+  return '{"Name":"glassdock-compat-secret","Data":"c2VjcmV0"}' if path == "/secrets/{id}/update"
   return '{"Name":"glassdock-compat-service","TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}' if path == "/services/create"
+  return '{"Version":{"Index":1},"Spec":{"TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}}' if path == "/services/{id}/update"
+  return '{"Version":{"Index":1},"Spec":{}}' if path == "/nodes/{id}/update"
+  return '{"Container":"glassdock-compat-missing","EndpointConfig":{"Aliases":["compat"]}}' if path == "/networks/{id}/connect"
+  return '{"Container":"glassdock-compat-missing","Force":true}' if path == "/networks/{id}/disconnect"
+  return '{"Cmd":["true"],"AttachStdout":true,"AttachStderr":true}' if path == "/containers/{id}/exec"
+  return '{"Detach":true,"Tty":false}' if path == "/exec/{id}/start"
+  return '{"Signal":"TERM"}' if path == "/containers/{id}/kill"
+  return '{"name":"glassdock-compat-renamed"}' if path == "/containers/{id}/rename"
+  return '{"Width":80,"Height":24}' if path == "/containers/{id}/resize" || path == "/exec/{id}/resize"
+  return '{"condition":"not-running"}' if path == "/containers/{id}/wait"
+  return '{"filters":"{}"}' if path == "/containers/prune" || path == "/images/prune" || path == "/networks/prune" || path == "/volumes/prune"
+  return '{"Force":true}' if path == "/swarm/leave"
+  return '{"ListenAddr":"127.0.0.1:2377"}' if path == "/swarm/update"
+  return '{"Env":[]}' if path == "/plugins/{name}/set"
+  return '{"Labels":{"com.glassdock.compat":"1"}}' if path == "/volumes/{name}"
   return '{"ListenAddr":"127.0.0.1:2377"}' if path == "/swarm/init"
   return '{"RemoteAddrs":["127.0.0.1:2377"],"JoinToken":"SWMTKN-1-invalid"}' if path == "/swarm/join"
-  return '{"Force":true}' if path == "/swarm/leave"
   "{}"
 end
 
@@ -253,7 +277,7 @@ def main(options = parse_options)
       status, body, content_type = request(
         socket: options[:socket], method: method, path: path, timeout: options[:timeout],
         body: contract_body(row),
-        body_content_type: row.fetch("path") == "/build" ? "application/x-tar" : nil
+        body_content_type: ["/build", "/containers/{id}/archive"].include?(row.fetch("path")) ? "application/x-tar" : nil
       )
       if (failure = validate_contract_response(row, status, body, content_type))
         failures << failure

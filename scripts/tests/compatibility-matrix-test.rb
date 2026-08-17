@@ -95,5 +95,26 @@ build_row = operations.find { |row| row.fetch("path") == "/build" }
 assert(build_row, "the matrix must include the build operation")
 assert(contract_body(build_row).start_with?("Dockerfile"), "the build contract must use a tar context")
 assert(contract_path("/build").include?("t=glassdock-compat:latest"), "the build contract must include a tag")
+assert(
+  contract_body(operations.find { |row| row.fetch("path") == "/containers/{id}/archive" }).start_with?("Dockerfile"),
+  "archive PUT must use a tar request body"
+)
+assert(
+  contract_path("/images/{name}/push").include?("tag=latest"),
+  "image push contracts must include the tag query"
+)
+assert(
+  contract_path("/images/{name}/tag").include?("repo=glassdock-compat-tag"),
+  "image tag contracts must include the repository query"
+)
+fixture_paths = %w[
+  /containers/{id}/exec /exec/{id}/start /networks/{id}/connect
+  /networks/{id}/disconnect /services/{id}/update /volumes/{name}
+]
+fixture_paths.each do |path|
+  row = operations.find { |operation| operation.fetch("path") == path }
+  assert(row, "the matrix must include fixture path #{path}")
+  assert(contract_body(row) != "{}", "#{path} must not use an empty contract body")
+end
 
 puts "compatibility script checks: ok"
