@@ -354,6 +354,21 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("container logs identify invalid time filters")
+    func logsRejectInvalidTimeFilter() async throws {
+        let backend = DockerRuntimeBackendMock(logOutput: "output\n")
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .GET,
+                "/v1.51/containers/container-1/logs?stdout=1&since=not-a-time"
+            ) { response async throws in
+                #expect(response.status == .badRequest)
+                let body = String(buffer: response.body)
+                #expect(body.contains("Invalid since value: not-a-time"))
+            }
+        }
+    }
+
     @Test("container list applies exact label filters")
     func listLabelFilters() async throws {
         let backend = DockerRuntimeBackendMock()
