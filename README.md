@@ -122,7 +122,7 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 ## Key Features ✨
 
 - Runs one persistent Linux VM with a custom Hypervisor.framework VMM 🍏
-- Provides **Docker REST API compatibility** 🔄 across all 107 Moby v1.51 matrix operations
+- Tracks Docker REST API compatibility 🔄 across 107 Moby v1.51 operations; 18 are implemented and 89 remain partial
 - Listens on a Unix domain socket `$HOME/.glassdock/container.sock` and auto-registers a `glassdock` Docker context
 - Uses containerd, overlayfs, runc, and Linux namespaces for containers
 - Supports create, start, stop, wait, remove, inspect, list, logs, and noninteractive exec

@@ -10,7 +10,7 @@ Run the drift check with:
 make api-compatibility-check
 ```
 
-The matrix contains 107 Moby operations. All 107 operations have registered Docker routes with implemented request, response, and error behavior. The guest runtime owns container, image, network, and build execution; the host keeps Docker metadata and control-plane state.
+The matrix contains 107 Moby operations: 18 implemented and 89 partial. Partial rows have a registered route, but at least one request variant, response field, backend effect, or error case still needs work. The guest runtime owns container, image, network, and build execution; the host keeps Docker metadata and control-plane state.
 
 Probe a running daemon with:
 
@@ -18,4 +18,4 @@ Probe a running daemon with:
 GLASSDOCK_SOCKET=/path/to/glassdock.sock make api-compatibility-conformance
 ```
 
-The live harness smoke-tests the core routes. The harness uses a concrete placeholder for path parameters, so it does not mutate daemon state.
+The live harness currently probes explicit unsupported rows and seven core smoke routes. It uses concrete placeholders for path parameters and does not provide full valid-request, error-case, schema, header, or side-effect coverage for every operation. Route tests and guest backend tests provide additional mocked and component-level evidence.

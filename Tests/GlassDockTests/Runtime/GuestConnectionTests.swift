@@ -72,9 +72,14 @@ struct GuestConnectionTests {
         defer { try? pair.peer.close() }
         let connection = try await GuestConnection.connect { pair.client }
         let streams = LockedFrames()
+        let peerComplete = AsyncStream<Void>.makeStream()
 
         let peer = pair.peer
         Thread.detachNewThread {
+            defer {
+                peerComplete.continuation.yield(())
+                peerComplete.continuation.finish()
+            }
             do {
                 var codec = GuestFrameCodec()
                 var request: GuestFrame?
@@ -136,6 +141,7 @@ struct GuestConnectionTests {
         #expect(received.map(\.data) == [Data("out".utf8), Data("err".utf8)])
         #expect(end.kind == .end)
         #expect(end.exitCode == 7)
+        for await _ in peerComplete.stream { break }
         await connection.close()
     }
 
@@ -156,7 +162,12 @@ struct GuestConnectionTests {
         }
 
         let peer = pair.peer
+        let peerComplete = AsyncStream<Void>.makeStream()
         Thread.detachNewThread {
+            defer {
+                peerComplete.continuation.yield(())
+                peerComplete.continuation.finish()
+            }
             do {
                 var codec = GuestFrameCodec()
                 var next: GuestFrame?
@@ -184,6 +195,7 @@ struct GuestConnectionTests {
         }
         let response = try await connection.request(method: "ping", payload: .object([:]))
         #expect(response.payload == .object(["ok": .bool(true)]))
+        for await _ in peerComplete.stream { break }
         await connection.close()
     }
 
