@@ -75,6 +75,13 @@ protocol DockerRuntimeRouteBackend: Sendable {
         ipv4Address: String?,
         ipv6Address: String?
     ) async throws
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        aliases: [String]?,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws
     func disconnectNetwork(id: String, containerID: String, force: Bool) async throws
     func topContainer(id: String, psArguments: [String]) async throws -> DockerRuntimeTop
     func statsContainer(id: String) async throws -> DockerRuntimeStats
@@ -128,6 +135,22 @@ struct DockerRegistryAuth: Codable, Sendable, Equatable {
 }
 
 extension DockerRuntimeRouteBackend {
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        aliases: [String]?,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
+        _ = aliases
+        try await connectNetwork(
+            id: id,
+            containerID: containerID,
+            ipv4Address: ipv4Address,
+            ipv6Address: ipv6Address
+        )
+    }
+
     func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
         throw DockerRuntimeRouteError.invalidRequest("image build is not supported")
     }
@@ -1293,6 +1316,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             try await backend.connectNetwork(
                 id: id,
                 containerID: body.Container,
+                aliases: body.EndpointConfig?.Aliases,
                 ipv4Address: body.EndpointConfig?.IPAMConfig?.IPv4Address,
                 ipv6Address: body.EndpointConfig?.IPAMConfig?.IPv6Address
             )
@@ -2663,6 +2687,7 @@ private struct DockerNetworkDisconnectRequest: Content {
 
 private struct DockerNetworkEndpointConfig: Content {
     let IPAMConfig: ContainerIPAMConfig?
+    let Aliases: [String]?
 }
 
 private struct CreateRequest: Content {

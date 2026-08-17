@@ -1085,11 +1085,30 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend {
         ipv4Address: String?,
         ipv6Address: String?
     ) async throws {
+        try await connectNetwork(
+            id: id,
+            containerID: containerID,
+            aliases: nil,
+            ipv4Address: ipv4Address,
+            ipv6Address: ipv6Address
+        )
+    }
+
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        aliases: [String]?,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
         let resolved = try await resolve(containerID)
         var payload: [String: JSONValue] = [
             "networkId": .string(id),
             "containerId": .string(resolved),
         ]
+        if let aliases, !aliases.isEmpty {
+            payload["aliases"] = .array(aliases.map(JSONValue.string))
+        }
         if let ipv4Address { payload["ipv4Address"] = .string(ipv4Address) }
         if let ipv6Address { payload["ipv6Address"] = .string(ipv6Address) }
         _ = try await request("network.connect", payload)

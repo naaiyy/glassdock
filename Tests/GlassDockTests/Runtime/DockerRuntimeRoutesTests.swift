@@ -741,7 +741,9 @@ struct DockerRuntimeRoutesTests {
                 .POST,
                 "/v1.51/networks/frontend/connect",
                 headers: ["Content-Type": "application/json"],
-                body: ByteBuffer(string: #"{"Container":"container-1"}"#)
+                body: ByteBuffer(
+                    string: #"{"Container":"container-1","EndpointConfig":{"Aliases":["api","frontend"]}}"#
+                )
             ) { response async in
                 #expect(response.status == .ok)
             }
@@ -761,6 +763,7 @@ struct DockerRuntimeRoutesTests {
         let connected = await backend.lastNetworkConnect
         #expect(connected?.0 == "frontend")
         #expect(connected?.1 == "container-1")
+        #expect(await backend.lastNetworkAliases == ["api", "frontend"])
         let disconnected = await backend.lastNetworkDisconnect
         #expect(disconnected?.0 == "frontend")
         #expect(disconnected?.1 == "container-1")
@@ -1026,6 +1029,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastUpdate: DockerRuntimeContainerUpdate?
     private(set) var lastNetworkCreate: DockerRuntimeNetwork?
     private(set) var lastNetworkConnect: (String, String)?
+    private(set) var lastNetworkAliases: [String]?
     private(set) var lastNetworkDisconnect: (String, String)?
     private(set) var lastNetworkDelete: String?
     private(set) var startCount = 0
@@ -1268,6 +1272,22 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         ipv6Address: String?
     ) async throws {
         lastNetworkConnect = (id, containerID)
+    }
+
+    func connectNetwork(
+        id: String,
+        containerID: String,
+        aliases: [String]?,
+        ipv4Address: String?,
+        ipv6Address: String?
+    ) async throws {
+        lastNetworkAliases = aliases
+        try await connectNetwork(
+            id: id,
+            containerID: containerID,
+            ipv4Address: ipv4Address,
+            ipv6Address: ipv6Address
+        )
     }
 
     func disconnectNetwork(id: String, containerID: String, force: Bool) async throws {
