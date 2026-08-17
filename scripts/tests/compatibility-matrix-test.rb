@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 
+require "json"
 require "tmpdir"
 
 require_relative "../compatibility/generate-moby-v1.51-matrix"
@@ -41,5 +42,17 @@ end
 assert(body_is_valid?("HEAD", ""), "HEAD error bodies should not require a message")
 assert(body_is_valid?("GET", "operation not implemented"), "Docker not-implemented errors should be accepted")
 assert(!body_is_valid?("GET", ""), "empty GET error bodies should be rejected")
+
+generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
+operations = generated_matrix.fetch("operations")
+assert(operations.size == 107, "the generated matrix must contain 107 operations")
+assert(
+  operations.all? { |row| !contract_path(row.fetch("path")).empty? && !contract_body(row).nil? },
+  "every matrix operation must have an executable contract request"
+)
+build_row = operations.find { |row| row.fetch("path") == "/build" }
+assert(build_row, "the matrix must include the build operation")
+assert(contract_body(build_row).start_with?("Dockerfile"), "the build contract must use a tar context")
+assert(contract_path("/build").include?("t=glassdock-compat:latest"), "the build contract must include a tag")
 
 puts "compatibility script checks: ok"

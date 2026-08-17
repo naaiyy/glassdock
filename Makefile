@@ -178,7 +178,7 @@ api-compatibility-test:
 .PHONY: api-compatibility-conformance
 api-compatibility-conformance:
 	@test -n "$(GLASSDOCK_SOCKET)" || (echo "Set GLASSDOCK_SOCKET to a running Glass Dock Unix socket" >&2; exit 1)
-	@ruby scripts/compatibility/run-moby-v1.51-conformance.rb --socket "$(GLASSDOCK_SOCKET)" --smoke
+	@ruby scripts/compatibility/run-moby-v1.51-conformance.rb --socket "$(GLASSDOCK_SOCKET)" --all --smoke
 
 # Prevent Foundation's Pipe() from being used when passing fds to Apple Container
 # APIs (createProcess/bootstrap). Apple closes those fds immediately after duping
