@@ -11,6 +11,13 @@ ROOT = File.expand_path("../..", __dir__)
 SUPPORT_FILE = File.join(ROOT, "Compatibility", "moby-v28.5.2-support.yml")
 DEFAULT_OUTPUT = File.join(ROOT, "Compatibility", "moby-v28.5.2-matrix.json")
 ROUTE_SOURCE = File.join(ROOT, "Sources", "GlassDock", "Runtime", "ExplicitUnsupportedDockerRoutes.swift")
+REGISTERED_ROUTE_ROOTS = [
+  File.join(ROOT, "Sources", "GlassDock", "Runtime"),
+  File.join(ROOT, "Sources", "GlassDock", "Routes", "Images", "ImageSearchRoute.swift"),
+  File.join(ROOT, "Sources", "GlassDock", "Routes", "Registry"),
+  File.join(ROOT, "Sources", "GlassDock", "Routes", "Server"),
+  File.join(ROOT, "Sources", "GlassDock", "Routes", "Volumes"),
+].freeze
 METHODS = %w[get post put delete head options patch].freeze
 
 class MatrixError < StandardError; end
@@ -86,15 +93,38 @@ def unsupported_reason(path)
 end
 
 def parse_options
-  options = { output: DEFAULT_OUTPUT, spec: nil, check: false, check_routes: false }
+  options = {
+    output: DEFAULT_OUTPUT, spec: nil, check: false, check_routes: false,
+    check_registered_routes: false
+  }
   OptionParser.new do |parser|
     parser.banner = "Usage: generate-moby-v1.51-matrix.rb [options]"
     parser.on("--spec PATH", "Read the pinned Swagger file from PATH") { |value| options[:spec] = value }
     parser.on("--output PATH", "Write the generated JSON matrix to PATH") { |value| options[:output] = value }
     parser.on("--check", "Fail if the checked-in matrix is not current") { options[:check] = true }
     parser.on("--check-routes", "Verify every generated unsupported row has a 501 route") { options[:check_routes] = true }
+    parser.on(
+      "--check-registered-routes",
+      "Verify every matrix operation has a registered route in the configured collections"
+    ) { options[:check_registered_routes] = true }
   end.parse!
   options
+end
+
+def registered_routes(roots = REGISTERED_ROUTE_ROOTS)
+  files = roots.flat_map do |root|
+    File.directory?(root) ? Dir[File.join(root, "**", "*.swift")] : [root]
+  end
+  files.flat_map do |path|
+    File.read(path).scan(/registerVersionedRoute\(\.([A-Z]+),\s*pattern:\s*"([^"]+)"/)
+      .map { |method, route| key(method, route) }
+  end.to_set
+end
+
+def check_registered_routes(matrix, roots: REGISTERED_ROUTE_ROOTS)
+  expected = matrix.fetch("operations").map { |row| key(row["method"], row["path"]) }.to_set
+  missing = expected - registered_routes(roots)
+  raise MatrixError, "missing registered routes: #{missing.to_a.sort.join(", ")}" unless missing.empty?
 end
 
 def build_matrix(spec, source, configured_routes, digest)
@@ -152,7 +182,7 @@ def check_routes(matrix)
   raise MatrixError, problems.join("\n") unless problems.empty?
 end
 
-begin
+def main
   options = parse_options
   support = read_yaml(SUPPORT_FILE)
   spec, digest = read_spec(support.fetch("source"), options[:spec])
@@ -165,6 +195,7 @@ begin
   end
   matrix = build_matrix(spec, support.fetch("source"), configured_routes, digest)
   check_routes(matrix) if options[:check_routes]
+  check_registered_routes(matrix) if options[:check_registered_routes]
   generated = JSON.pretty_generate(matrix) + "\n"
   if options[:check]
     actual = File.read(options[:output])
@@ -181,3 +212,5 @@ rescue MatrixError => error
   warn "compatibility matrix error: #{error.message}"
   exit 1
 end
+
+main if __FILE__ == $PROGRAM_NAME

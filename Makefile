@@ -84,7 +84,8 @@ help:
 	@echo "  benchmark-preflight - Validate runtime benchmark configuration"
 	@echo "  benchmark-tools-test - Test benchmark tool install/uninstall plans"
 	@echo "  benchmark        - Run the configured runtime benchmark matrix"
-	@echo "  api-compatibility-check - Validate the pinned Moby v28.5.2 matrix and 501 route coverage"
+	@echo "  api-compatibility-check - Validate the pinned Moby v28.5.2 matrix and registered route coverage"
+	@echo "  api-compatibility-test  - Test compatibility validation scripts"
 	@echo "  api-compatibility-conformance - Probe a running Glass Dock socket against the matrix"
 	@echo "  fmt              - Format source code"
 	@echo "  clean            - Clean build artifacts"
@@ -169,6 +170,10 @@ benchmark:
 .PHONY: api-compatibility-check
 api-compatibility-check:
 	@scripts/compatibility/check-moby-v1.51.sh
+
+.PHONY: api-compatibility-test
+api-compatibility-test:
+	@ruby scripts/tests/compatibility-matrix-test.rb
 
 .PHONY: api-compatibility-conformance
 api-compatibility-conformance:
