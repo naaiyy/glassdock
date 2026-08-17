@@ -161,6 +161,11 @@ def validate_contract_response(row, status, body, content_type)
   method = row.fetch("method")
   path = row.fetch("path")
   return nil if status == 101
+  declared_statuses = row["responseStatuses"]
+  if declared_statuses &&
+      !declared_statuses.include?(status) && !(row["support"] == "partial" && status == 501)
+    return "#{method} #{path}: status #{status} is not declared by the Moby contract #{declared_statuses.inspect}"
+  end
   if status >= 500 && status != 501 && status != 503
     return "#{method} #{path}: unexpected server error #{status}"
   end

@@ -83,6 +83,33 @@ assert(
   ).nil?,
   "version responses must accept the Docker version shape"
 )
+assert(
+  validate_contract_response(
+    {"method" => "GET", "path" => "/version", "support" => "implemented", "responseStatuses" => [200, 500]},
+    200,
+    '{"ApiVersion":"1.51","Version":"test"}',
+    "application/json"
+  ).nil?,
+  "declared success statuses must be accepted"
+)
+assert(
+  validate_contract_response(
+    {"method" => "GET", "path" => "/version", "support" => "implemented", "responseStatuses" => [200]},
+    404,
+    '{"message":"missing"}',
+    "application/json"
+  ).include?("not declared"),
+  "undeclared statuses must fail the contract probe"
+)
+assert(
+  validate_contract_response(
+    {"method" => "POST", "path" => "/plugins/create", "support" => "partial", "responseStatuses" => [204, 500]},
+    501,
+    '{"message":"not implemented"}',
+    "application/json"
+  ).nil?,
+  "partial rows may explicitly expose a 501 capability boundary"
+)
 
 generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
 operations = generated_matrix.fetch("operations")
