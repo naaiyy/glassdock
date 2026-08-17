@@ -36,8 +36,8 @@ struct RuntimeVolumeServiceTests {
         )
     }
 
-    @Test("rejects traversal and non-local drivers")
-    func rejectsUnsafeConfiguration() async {
+    @Test("rejects traversal and preserves non-local driver identity")
+    func rejectsTraversalAndPreservesDriver() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -48,11 +48,11 @@ struct RuntimeVolumeServiceTests {
                 request: RESTVolumeCreate(Name: "../escape", Driver: "local", Options: [:], Labels: nil)
             )
         }
-        await #expect(throws: (any Error).self) {
-            _ = try await service.create(
-                request: RESTVolumeCreate(Name: "remote", Driver: "nfs", Options: [:], Labels: nil)
-            )
-        }
+        let remote = try await service.create(
+            request: RESTVolumeCreate(Name: "remote", Driver: "nfs", Options: ["type": "nfs"], Labels: nil)
+        )
+        #expect(remote.Driver == "nfs")
+        #expect(remote.Options == ["type": "nfs"])
     }
 
     @Test("does not delete a volume that a live container references")

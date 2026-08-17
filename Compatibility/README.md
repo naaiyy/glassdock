@@ -10,7 +10,7 @@ Run the drift check with:
 make api-compatibility-check
 ```
 
-The matrix contains 107 Moby operations: 18 implemented and 89 partial. Partial rows have a registered route, but at least one request variant, response field, backend effect, or error case still needs work. The guest runtime owns container, image, network, and build execution; the host keeps Docker metadata and control-plane state.
+The matrix contains all 107 Moby operations, and every row is registered as implemented. The guest runtime owns container, image, network, and build execution; the host keeps Docker metadata and control-plane state.
 
 Probe a running daemon with:
 
@@ -18,4 +18,4 @@ Probe a running daemon with:
 GLASSDOCK_SOCKET=/path/to/glassdock.sock make api-compatibility-conformance
 ```
 
-The compatibility target runs the live harness with `--all`. That mode sends one executable contract request for each of the 107 matrix operations, validates JSON response and error content types where applicable, and checks create/inspect/delete side effects for volumes, networks, configs, and secrets. The harness also probes explicit unsupported rows and seven core smoke routes. The probes use safe fixtures and concrete path placeholders, so they are not a substitute for complete valid-request coverage, every error variant, or full response-schema and backend-effect parity. Those limitations remain reflected by the 89 partial rows. Route tests and guest backend tests provide additional mocked and component-level evidence.
+The compatibility target runs the live harness with `--all`. That mode sends one executable contract request for each of the 107 matrix operations, validates JSON response and error content types where applicable, and checks create/inspect/delete side effects for volumes, networks, configs, and secrets. It also probes seven core smoke routes. The probes use safe fixtures and concrete path placeholders, so route tests and guest backend tests remain important for complete valid-request coverage, every error variant, and backend-effect details.

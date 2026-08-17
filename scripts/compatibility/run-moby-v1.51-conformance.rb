@@ -31,7 +31,7 @@ def concrete_path(path)
   path.gsub(/\{[^}]+\}/, "glassdock-compat-missing")
 end
 
-def request(socket:, method:, path:, timeout:, body: nil, body_content_type: nil)
+def request(socket:, method:, path:, timeout:, body: nil, body_content_type: nil, headers: {})
   url = "http://localhost/v1.51#{concrete_path(path)}"
   args = [
     "curl", "--silent", "--show-error", "--max-time", timeout.to_s,
@@ -39,6 +39,7 @@ def request(socket:, method:, path:, timeout:, body: nil, body_content_type: nil
     "-H", "Accept: application/json",
     "-w", "\n%{http_code}\n%{content_type}\n", url
   ]
+  headers.each { |name, value| args.insert(-2, "-H", "#{name}: #{value}") }
   stdin_data = nil
   unless method == "GET" || method == "HEAD"
     args.insert(-2, "--data-binary", "@-")
@@ -101,6 +102,19 @@ def contract_path(path)
     "#{concrete}?tag=latest"
   when "/images/{name}/tag"
     "#{concrete}?repo=glassdock-compat-tag&tag=latest"
+  when "/configs/{id}/update", "/secrets/{id}/update", "/nodes/{id}/update",
+       "/services/{id}/update", "/swarm/update"
+    "#{concrete}?version=1"
+  when "/volumes/{name}"
+    "#{concrete}?version=1"
+  when "/plugins/create"
+    "#{concrete}?name=glassdock-compat-plugin"
+  when "/plugins/pull"
+    "#{concrete}?remote=glassdock-compat/plugin:latest&name=glassdock-compat-plugin"
+  when "/plugins/privileges"
+    "#{concrete}?remote=glassdock-compat/plugin:latest"
+  when "/plugins/{name}/upgrade"
+    "#{concrete}?remote=glassdock-compat/plugin:latest"
   when "/events"
     "#{concrete}?since=0&until=1"
   when "/system/df"
@@ -122,7 +136,7 @@ def contract_body(row)
   return '{"Name":"glassdock-compat-config","Data":"Y29uZmln"}' if path == "/configs/{id}/update"
   return '{"Name":"glassdock-compat-secret","Data":"c2VjcmV0"}' if path == "/secrets/{id}/update"
   return '{"Name":"glassdock-compat-service","TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}' if path == "/services/create"
-  return '{"Version":{"Index":1},"Spec":{"TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}}' if path == "/services/{id}/update"
+  return '{"Name":"glassdock-compat-service","TaskTemplate":{"ContainerSpec":{"Image":"alpine"}}}' if path == "/services/{id}/update"
   return '{"Version":{"Index":1},"Spec":{}}' if path == "/nodes/{id}/update"
   return '{"Container":"glassdock-compat-missing","EndpointConfig":{"Aliases":["compat"]}}' if path == "/networks/{id}/connect"
   return '{"Container":"glassdock-compat-missing","Force":true}' if path == "/networks/{id}/disconnect"
@@ -162,8 +176,7 @@ def validate_contract_response(row, status, body, content_type)
   path = row.fetch("path")
   return nil if status == 101
   declared_statuses = row["responseStatuses"]
-  if declared_statuses &&
-      !declared_statuses.include?(status) && !(row["support"] == "partial" && status == 501)
+  if declared_statuses && !declared_statuses.include?(status)
     return "#{method} #{path}: status #{status} is not declared by the Moby contract #{declared_statuses.inspect}"
   end
   if status >= 500 && status != 501 && status != 503
@@ -279,10 +292,16 @@ def main(options = parse_options)
     matrix.fetch("operations").each do |row|
       method = row.fetch("method")
       path = contract_path(row.fetch("path"))
+      request_headers = if row.fetch("path") == "/images/{name}/push"
+        {"X-Registry-Auth" => "e30="}
+      else
+        {}
+      end
       status, body, content_type = request(
         socket: options[:socket], method: method, path: path, timeout: options[:timeout],
         body: contract_body(row),
-        body_content_type: ["/build", "/containers/{id}/archive"].include?(row.fetch("path")) ? "application/x-tar" : nil
+        body_content_type: ["/build", "/containers/{id}/archive"].include?(row.fetch("path")) ? "application/x-tar" : nil,
+        headers: request_headers
       )
       if (failure = validate_contract_response(row, status, body, content_type))
         failures << failure
@@ -311,7 +330,7 @@ def main(options = parse_options)
 
   if failures.empty?
     coverage = options[:all] ? " plus 107 operation contract probes and side-effect checks" : ""
-    puts "Moby v28.5.2 conformance passed: #{unsupported.size} explicit 501 operations#{options[:smoke] ? " plus core smoke probes" : ""}#{coverage}."
+    puts "Moby v28.5.2 conformance passed: #{unsupported.size} explicit unsupported operations#{options[:smoke] ? " plus core smoke probes" : ""}#{coverage}."
     return 0
   end
 

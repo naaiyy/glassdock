@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,7 @@ type boundedLogWriter struct {
 	written     int64
 	truncated   bool
 	nextID      uint64
+	details     string
 	subscribers map[uint64]*logSubscriber
 }
 
@@ -83,7 +86,7 @@ func (w *boundedLogWriter) writeRecordLocked(when time.Time, data []byte) error 
 
 func (w *boundedLogWriter) publishLocked(when time.Time, data []byte) {
 	for id, subscriber := range w.subscribers {
-		filtered := formatLogChunk(when, data, subscriber.options)
+		filtered := formatLogChunk(when, data, subscriber.options, w.details)
 		if len(filtered) == 0 {
 			continue
 		}
@@ -148,7 +151,7 @@ func (w *boundedLogWriter) subscribe(
 func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) ([]byte, error) {
 	if options.Timestamps || options.Since != 0 || options.Until != 0 {
 		if w.index != nil {
-			data, err := readFilteredRecords(w.index.Name(), options)
+			data, err := readFilteredRecords(w.index.Name(), options, w.details)
 			if err == nil {
 				if options.Tail != nil {
 					return tailLog(data, *options.Tail), nil
@@ -166,6 +169,9 @@ func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) (
 	}
 	if options.Tail != nil {
 		data = tailLog(data, *options.Tail)
+	}
+	if options.Details {
+		data = prependDetails(data, w.details)
 	}
 	return data, nil
 }
@@ -195,16 +201,22 @@ func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 		return nil, err
 	}
 	open := func(stream string) (*boundedLogWriter, error) {
-		file, err := os.OpenFile(b.logPath(id, stream), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		file, err := os.OpenFile(b.logPath(id, stream), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, err
 		}
-		index, err := os.OpenFile(b.logIndexPath(id, stream), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		index, err := os.OpenFile(b.logIndexPath(id, stream), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			_ = file.Close()
 			return nil, err
 		}
-		return &boundedLogWriter{file: file, index: index}, nil
+		var written int64
+		if info, statErr := file.Stat(); statErr == nil {
+			written = info.Size()
+		}
+		return &boundedLogWriter{
+			file: file, index: index, written: written, truncated: written >= maxLogBytes,
+		}, nil
 	}
 	stdout, err := open("stdout")
 	if err != nil {
@@ -219,6 +231,13 @@ func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 		_ = os.Remove(b.logPath(id, "stdout"))
 		_ = os.Remove(b.logIndexPath(id, "stdout"))
 		return nil, err
+	}
+	if container, err := b.client.LoadContainer(b.ctx(context.Background()), id); err == nil {
+		if labels, err := container.Labels(b.ctx(context.Background())); err == nil {
+			prefix := detailsPrefix(labels)
+			stdout.details = prefix
+			stderr.details = prefix
+		}
 	}
 	return &logCapture{stdout: stdout, stderr: stderr}, nil
 }
@@ -266,15 +285,25 @@ func (b *Backend) Logs(request api.ContainerLogsRequest) (api.ContainerLogsRespo
 		return api.ContainerLogsResponse{}, errors.New("stdout or stderr must be requested")
 	}
 	response := api.ContainerLogsResponse{}
+	details := ""
+	if request.Details {
+		details = b.detailsPrefix(request.ID)
+	}
 	read := func(stream string) ([]byte, error) {
 		if request.Timestamps || request.Since != 0 || request.Until != 0 {
-			return b.readFilteredLog(request.ID, stream, request)
+			return b.readFilteredLog(request.ID, stream, request, details)
 		}
 		data, err := os.ReadFile(b.logPath(request.ID, stream))
 		if errors.Is(err, os.ErrNotExist) {
 			return []byte{}, nil
 		}
-		return data, err
+		if err != nil {
+			return nil, err
+		}
+		if request.Details {
+			data = prependDetails(data, details)
+		}
+		return data, nil
 	}
 	var err error
 	if request.Stdout {
@@ -317,15 +346,22 @@ type logRecord struct {
 	Data []byte    `json:"data"`
 }
 
-func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRequest) ([]byte, error) {
-	data, err := readFilteredRecords(b.logIndexPath(id, stream), request)
+func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRequest, details ...string) ([]byte, error) {
+	data, err := readFilteredRecords(b.logIndexPath(id, stream), request, details...)
 	if errors.Is(err, os.ErrNotExist) {
-		return os.ReadFile(b.logPath(id, stream))
+		data, readErr := os.ReadFile(b.logPath(id, stream))
+		if readErr != nil {
+			return nil, readErr
+		}
+		if request.Details {
+			data = prependDetails(data, firstString(details))
+		}
+		return data, nil
 	}
 	return data, err
 }
 
-func readFilteredRecords(path string, request api.ContainerLogsRequest) ([]byte, error) {
+func readFilteredRecords(path string, request api.ContainerLogsRequest, details ...string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -347,9 +383,13 @@ func readFilteredRecords(path string, request api.ContainerLogsRequest) ([]byte,
 			continue
 		}
 		if request.Timestamps {
-			output = appendTimestamped(output, record.Time, record.Data)
+			output = appendTimestamped(output, record.Time, record.Data, firstString(details))
 		} else {
-			output = append(output, record.Data...)
+			if request.Details {
+				output = append(output, prependDetails(record.Data, firstString(details))...)
+			} else {
+				output = append(output, record.Data...)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -358,7 +398,7 @@ func readFilteredRecords(path string, request api.ContainerLogsRequest) ([]byte,
 	return output, nil
 }
 
-func formatLogChunk(when time.Time, data []byte, request api.ContainerLogsRequest) []byte {
+func formatLogChunk(when time.Time, data []byte, request api.ContainerLogsRequest, details ...string) []byte {
 	seconds := when.Unix()
 	if request.Since != 0 && seconds < request.Since {
 		return nil
@@ -367,7 +407,10 @@ func formatLogChunk(when time.Time, data []byte, request api.ContainerLogsReques
 		return nil
 	}
 	if request.Timestamps {
-		return appendTimestamped(nil, when, data)
+		return appendTimestamped(nil, when, data, firstString(details))
+	}
+	if request.Details {
+		return prependDetails(data, firstString(details))
 	}
 	return append([]byte(nil), data...)
 }
@@ -391,11 +434,13 @@ func tailLog(data []byte, count int) []byte {
 	return result
 }
 
-func appendTimestamped(output []byte, timestamp time.Time, data []byte) []byte {
+func appendTimestamped(output []byte, timestamp time.Time, data []byte, details ...string) []byte {
 	const format = "2006-01-02T15:04:05.000000000Z07:00"
+	prefix := firstString(details)
 	for len(data) > 0 {
 		output = append(output, timestamp.Format(format)...)
 		output = append(output, ' ')
+		output = append(output, prefix...)
 		newline := bytes.IndexByte(data, '\n')
 		if newline < 0 {
 			output = append(output, data...)
@@ -405,6 +450,62 @@ func appendTimestamped(output []byte, timestamp time.Time, data []byte) []byte {
 		data = data[newline+1:]
 	}
 	return output
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func prependDetails(data []byte, prefix string) []byte {
+	if prefix == "" || len(data) == 0 {
+		return append([]byte(nil), data...)
+	}
+	var output []byte
+	for len(data) > 0 {
+		output = append(output, prefix...)
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			output = append(output, data...)
+			break
+		}
+		output = append(output, data[:newline+1]...)
+		data = data[newline+1:]
+	}
+	return output
+}
+
+func detailsPrefix(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		if strings.HasPrefix(key, "com.glassdock.") {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var output strings.Builder
+	for _, key := range keys {
+		output.WriteString(key)
+		output.WriteByte('=')
+		output.WriteString(labels[key])
+		output.WriteByte(' ')
+	}
+	return output.String()
+}
+
+func (b *Backend) detailsPrefix(id string) string {
+	container, err := b.client.LoadContainer(b.ctx(context.Background()), id)
+	if err != nil {
+		return ""
+	}
+	labels, err := container.Labels(b.ctx(context.Background()))
+	if err != nil {
+		return ""
+	}
+	return detailsPrefix(labels)
 }
 
 func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, stream StreamFunc) (uint32, error) {
@@ -446,6 +547,22 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 			unsubscribe()
 		}
 	}()
+	if request.Logs {
+		logs, err := b.Logs(request)
+		if err != nil {
+			return 0, err
+		}
+		if request.Stdout && len(logs.Stdout) > 0 {
+			if err := stream("stdout", logs.Stdout); err != nil {
+				return 0, err
+			}
+		}
+		if request.Stderr && len(logs.Stderr) > 0 {
+			if err := stream("stderr", logs.Stderr); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if request.Stdout {
 		unsubscribe, err := capture.stdout.subscribe(
 			request, func(data []byte) error { return stream("stdout", data) },

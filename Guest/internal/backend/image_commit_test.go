@@ -2,6 +2,7 @@ package backend
 
 import (
 	"testing"
+	"time"
 
 	containerimages "github.com/containerd/containerd/v2/core/images"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -51,6 +52,29 @@ func TestApplyCommitChangesUsesShellFormForCommands(t *testing.T) {
 	}
 	if got, want := image.Config.Cmd, []string{"/bin/sh", "-c", "echo hello"}; !equalStrings(got, want) {
 		t.Fatalf("got command %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyCommitChangesStoresDockerHealthcheckExtras(t *testing.T) {
+	t.Parallel()
+	extras := dockerConfigExtras{}
+	if err := applyCommitChangesWithExtras(
+		&imagespec.Image{},
+		"HEALTHCHECK --interval=5s --timeout=2s --retries=4 CMD true",
+		nil,
+		&extras,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if extras.Healthcheck == nil {
+		t.Fatal("healthcheck was not stored")
+	}
+	if got, want := extras.Healthcheck.Test, []string{"CMD-SHELL", "true"}; !equalStrings(got, want) {
+		t.Fatalf("got healthcheck test %#v, want %#v", got, want)
+	}
+	if extras.Healthcheck.Interval != int64(5*time.Second) ||
+		extras.Healthcheck.Timeout != int64(2*time.Second) || extras.Healthcheck.Retries != 4 {
+		t.Fatalf("got healthcheck options %#v", extras.Healthcheck)
 	}
 }
 

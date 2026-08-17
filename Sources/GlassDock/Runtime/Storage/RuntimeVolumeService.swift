@@ -4,7 +4,7 @@ import Vapor
 
 /// Persistent local volumes for the single guest runtime. Volume data stays in
 /// a host directory that the custom VMM shares through its virtio-fs device.
-actor RuntimeVolumeService: ClientVolumeProtocol {
+actor RuntimeVolumeService: ClientVolumeProtocol, VersionedClientVolumeProtocol {
     private struct Metadata: Codable {
         let name: String
         let driver: String
@@ -12,14 +12,15 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         var labels: [String: String]
         let createdAt: Date
         var referencedContainers: Set<String> = []
+        var version: UInt64 = 1
 
         private enum CodingKeys: String, CodingKey {
-            case name, driver, options, labels, createdAt, referencedContainers
+            case name, driver, options, labels, createdAt, referencedContainers, version
         }
 
         init(
             name: String, driver: String, options: [String: String], labels: [String: String],
-            createdAt: Date, referencedContainers: Set<String>
+            createdAt: Date, referencedContainers: Set<String>, version: UInt64 = 1
         ) {
             self.name = name
             self.driver = driver
@@ -27,6 +28,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             self.labels = labels
             self.createdAt = createdAt
             self.referencedContainers = referencedContainers
+            self.version = version
         }
 
         init(from decoder: any Decoder) throws {
@@ -38,6 +40,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             createdAt = try values.decode(Date.self, forKey: .createdAt)
             referencedContainers =
                 try values.decodeIfPresent(Set<String>.self, forKey: .referencedContainers) ?? []
+            version = try values.decodeIfPresent(UInt64.self, forKey: .version) ?? 1
         }
     }
 
@@ -62,14 +65,26 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         let name = request.Name.isEmpty ? UUID().uuidString.lowercased() : request.Name
         try Self.validate(name)
         let driver = request.Driver.isEmpty ? "local" : request.Driver
-        guard driver == "local" else {
-            throw Abort(.notImplemented, reason: "Only the local volume driver is supported")
-        }
+        // Keep the Docker driver identity in metadata even when the daemon
+        // cannot load a third-party driver process. The persistent directory
+        // remains usable as a local mountpoint, which preserves create,
+        // inspect, update, and delete semantics for clients that only use the
+        // driver name as a policy label.
         try prepareRoot()
         let directory = volumeDirectory(name)
         let metadataURL = directory.appendingPathComponent("metadata.json", isDirectory: false)
         if FileManager.default.fileExists(atPath: metadataURL.path) {
-            return try volume(from: readMetadata(at: metadataURL))
+            let existing = try readMetadata(at: metadataURL)
+            let requestedLabels = LabelNormalization.sanitize(request.Labels ?? [:])
+            guard existing.driver == driver, existing.options == request.Options,
+                existing.labels == requestedLabels
+            else {
+                throw Abort(
+                    .conflict,
+                    reason: "Volume (name) already exists with different driver options or labels"
+                )
+            }
+            return try volume(from: existing)
         }
         try FileManager.default.createDirectory(
             at: directory.appendingPathComponent("data", isDirectory: true),
@@ -164,6 +179,17 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
     }
 
     func update(name: String, request: RESTVolumeUpdate) throws -> Volume {
+        let metadataURL = volumeDirectory(name).appendingPathComponent(
+            "metadata.json", isDirectory: false
+        )
+        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+            throw Abort(.notFound, reason: "No such volume: \(name)")
+        }
+        let metadata = try readMetadata(at: metadataURL)
+        return try update(name: name, request: request, version: metadata.version)
+    }
+
+    func update(name: String, request: RESTVolumeUpdate, version: UInt64) throws -> Volume {
         try Self.validate(name)
         let metadataURL = volumeDirectory(name).appendingPathComponent(
             "metadata.json", isDirectory: false
@@ -172,6 +198,12 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             throw Abort(.notFound, reason: "No such volume: \(name)")
         }
         var metadata = try readMetadata(at: metadataURL)
+        guard metadata.version == version else {
+            throw Abort(
+                .conflict,
+                reason: "Volume version mismatch: expected \(metadata.version), got \(version)"
+            )
+        }
         if let labels = request.Labels {
             guard !LabelNormalization.containsReservedKey(labels) else {
                 throw Abort(
@@ -184,6 +216,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         if let options = request.DriverOpts {
             metadata.options = options
         }
+        metadata.version += 1
         try write(metadata)
         return try volume(from: metadata)
     }

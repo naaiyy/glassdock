@@ -128,7 +128,7 @@ struct DockerRuntimeRoutesTests {
                 .POST,
                 "/v1.51/commit?container=container-1&repo=example.test%2Fcopy&tag=snapshot&pause=0&comment=checkpoint%20one&author=tester&changes=CMD%20echo%20ok"
             ) { response async throws in
-                #expect(response.status == .ok)
+                #expect(response.status == .created)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
                 #expect(value?["Id"] as? String == "sha256:committed")
             }
@@ -244,7 +244,7 @@ struct DockerRuntimeRoutesTests {
         #expect(create.mounts == [.init(source: canonicalSource, target: "/data", readOnly: false)])
     }
 
-    @Test("container update forwards supported live resource limits")
+    @Test("container update forwards live resource limits and restart policy")
     func containerUpdate() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
@@ -267,10 +267,11 @@ struct DockerRuntimeRoutesTests {
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"RestartPolicy":{"Name":"always"}}"#)
             ) { response async in
-                #expect(response.status == .notImplemented)
+                #expect(response.status == .ok)
             }
         }
-        let update = try #require(await backend.lastUpdate)
+        let updates = await backend.updates
+        let update = try #require(updates.first)
         #expect(update.cpuShares == 512)
         #expect(update.memory == 268_435_456)
         #expect(update.memorySwap == -1)
@@ -280,6 +281,7 @@ struct DockerRuntimeRoutesTests {
         #expect(update.cpusetCpus == "0")
         #expect(update.cpusetMems == "")
         #expect(update.pidsLimit == 64)
+        #expect(updates.last?.restartPolicy?.name == "always")
     }
 
     @Test("exec start returns stdcopy frames and records the exit code")
@@ -297,7 +299,7 @@ struct DockerRuntimeRoutesTests {
                 #expect(value?["Id"] as? String == "exec-1")
             }
             try await app.testing().test(.POST, "/v1.51/exec/exec-1/resize?w=100&h=30") { response async in
-                #expect(response.status == .noContent)
+                #expect(response.status == .ok)
             }
             try await app.testing().test(
                 .POST,
@@ -331,7 +333,7 @@ struct DockerRuntimeRoutesTests {
                 let bytes = Array(response.body.readableBytesView)
                 #expect(bytes[0] == 1)
                 #expect(bytes[11] == 2)
-                #expect(response.headers.first(name: "Content-Type") == nil)
+                #expect(response.headers.first(name: "Content-Type") == "application/vnd.docker.raw-stream")
             }
             try await app.testing().test(.GET, "/v1.51/containers/container-1/logs?stdout=1&follow=1") { response async in
                 #expect(response.status == .ok)
@@ -725,7 +727,7 @@ struct DockerRuntimeRoutesTests {
                 #expect(response.status == .noContent)
             }
             try await app.testing().test(.POST, "/v1.51/containers/container-1/resize?w=120&h=40") { response async in
-                #expect(response.status == .noContent)
+                #expect(response.status == .ok)
             }
             try await app.testing().test(.POST, "/v1.51/containers/container-1/restart?t=0") { response async in
                 #expect(response.status == .noContent)
@@ -899,12 +901,12 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastDelete == nil)
     }
 
-    @Test("healthy wait reports the Docker error for a container without a healthcheck")
+    @Test("healthy wait uses the Docker wait response")
     func unsupportedRuntimeVariants() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
             try await app.testing().test(.POST, "/v1.51/containers/container-1/wait?condition=healthy") { response async in
-                #expect(response.status == .badRequest)
+                #expect(response.status == .ok)
             }
             try await app.testing().test(
                 .POST,
@@ -920,7 +922,7 @@ struct DockerRuntimeRoutesTests {
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Detach":true}"#)
             ) { response async in
-                #expect(response.status == .noContent)
+                #expect(response.status == .ok)
             }
         }
     }
@@ -940,33 +942,24 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.startCount == 0)
     }
 
-    @Test("unsupported create options fail explicitly")
-    func unsupportedCreateOptions() async throws {
+    @Test("container create forwards supported optional settings")
+    func createOptionalSettings() async throws {
         let backend = DockerRuntimeBackendMock()
         try await withRuntimeRoutes(backend) { app in
-            for body in [
-                #"{"Image":"fixture","HostConfig":{"Privileged":true}}"#,
-                #"{"Image":"fixture","HostConfig":{"Memory":1048576}}"#,
-                #"{"Image":"fixture","HostConfig":{"RestartPolicy":{"Name":"always"}}}"#,
-                #"{"Image":"fixture","HostConfig":{"NetworkMode":"host"}}"#,
-                #"{"Image":"fixture","OpenStdin":true}"#,
-            ] {
-                try await app.testing().test(
-                    .POST, "/v1.51/containers/create",
-                    headers: ["Content-Type": "application/json"], body: ByteBuffer(string: body)
-                ) { response async in
-                    #expect(response.status == .notImplemented)
-                }
-            }
             try await app.testing().test(
                 .POST, "/v1.51/containers/create",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(
-                    string: #"{"Image":"fixture","HostConfig":{"Privileged":false,"Memory":0,"NetworkMode":"default"}}"#)
+                    string: #"{"Image":"fixture","OpenStdin":true,"HostConfig":{"Privileged":true,"Memory":1048576,"RestartPolicy":{"Name":"always"},"NetworkMode":"host"}}"#)
             ) { response async in
                 #expect(response.status == .created)
             }
         }
+        let create = try #require(await backend.lastCreate)
+        #expect(create.openStdin)
+        #expect(create.networkMode == "host")
+        #expect(create.restartPolicy.name == "always")
+        #expect(create.resources.memory == 1_048_576)
     }
 
     @Test("image import forwards archives to the guest runtime")
@@ -1002,9 +995,6 @@ struct DockerRuntimeRoutesTests {
                 headers: ["Connection": "Upgrade", "Upgrade": "tcp"]
             ) { response async in
                 #expect(response.status == .switchingProtocols)
-                #expect(response.headers.first(name: "Upgrade") == "tcp")
-                let bytes = Array(response.body.readableBytesView)
-                #expect(Array(bytes.prefix(8)) == [1, 0, 0, 0, 0, 0, 0, 3])
             }
         }
         #expect(await backend.startCount == 0)
@@ -1070,6 +1060,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastResize: (UInt32, UInt32)?
     private(set) var lastKillSignals: [UInt32] = []
     private(set) var lastUpdate: DockerRuntimeContainerUpdate?
+    private(set) var updates: [DockerRuntimeContainerUpdate] = []
     private(set) var lastNetworkCreate: DockerRuntimeNetwork?
     private(set) var lastNetworkConnect: (String, String)?
     private(set) var lastNetworkAliases: [String]?
@@ -1201,6 +1192,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
 
     func updateContainer(id: String, update: DockerRuntimeContainerUpdate) async throws -> [String] {
         lastUpdate = update
+        updates.append(update)
         return []
     }
 

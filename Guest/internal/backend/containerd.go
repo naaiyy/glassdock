@@ -78,6 +78,8 @@ type Backend struct {
 	metadataMu    sync.Mutex
 	statsMu       sync.Mutex
 	lastStats     map[string]api.ContainerStatsResponse
+	healthMu      sync.Mutex
+	healthStops   map[string]chan struct{}
 	execMu        sync.Mutex
 	execProcesses map[string]containerd.Process
 	network       *NetworkManager
@@ -208,6 +210,7 @@ type containerRecord struct {
 	task          containerd.Task
 	taskReaped    bool
 	taskReaping   chan struct{}
+	stdinWriter   io.WriteCloser
 	spec          *specs.Spec
 	persistedExit bool
 	persistedCode uint32
@@ -219,6 +222,18 @@ func (r *containerRecord) setTask(task containerd.Task) {
 	r.taskReaped = false
 	r.taskReaping = nil
 	r.mu.Unlock()
+}
+
+func (r *containerRecord) setStdinWriter(writer io.WriteCloser) {
+	r.mu.Lock()
+	r.stdinWriter = writer
+	r.mu.Unlock()
+}
+
+func (r *containerRecord) getStdinWriter() io.WriteCloser {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stdinWriter
 }
 
 func (r *containerRecord) taskState() (containerd.Task, bool, <-chan struct{}) {
@@ -291,6 +306,7 @@ func New(address, namespace, snapshotter, runtimeName, runtimeBinary string) (*B
 		runtime: runtimeName, runtimeBinary: runtimeBinary,
 		logsDir: "/var/lib/containerd/io.glassdock.logs",
 		network: NewNetworkManager(commandRunner{}), taskCreates: make(chan struct{}, maxConcurrentTaskCreations),
+		healthStops: make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -602,7 +618,27 @@ func (b *Backend) Images(ctx context.Context) ([]api.Image, error) {
 					Comment: entry.Comment, Empty: entry.EmptyLayer,
 				})
 			}
-			item = &api.Image{ID: id, Digest: record.Target().Digest.String(), CreatedAt: created, Size: size, Labels: record.Labels(), RootFSLayers: layers, History: history}
+			configLabels := spec.Config.Labels
+			labels := record.Labels()
+			if len(labels) == 0 {
+				labels = configLabels
+			}
+			dockerExtras := readDockerImageConfig(ctx, record)
+			item = &api.Image{
+				ID: id, Digest: record.Target().Digest.String(), CreatedAt: created, Size: size,
+				Labels: labels, Author: spec.Author, Architecture: spec.Architecture,
+				OS: spec.OS, OSVersion: spec.OSVersion, Variant: spec.Variant,
+				Config: api.ImageConfig{
+					User: spec.Config.User, ExposedPorts: spec.Config.ExposedPorts,
+					Env: spec.Config.Env, Entrypoint: spec.Config.Entrypoint,
+					Cmd: spec.Config.Cmd, Volumes: spec.Config.Volumes,
+					WorkingDir: spec.Config.WorkingDir, Labels: configLabels,
+					StopSignal:  spec.Config.StopSignal,
+					Healthcheck: dockerExtras.Healthcheck,
+					OnBuild:     dockerExtras.OnBuild, Shell: dockerExtras.Shell,
+				},
+				RootFSLayers: layers, History: history,
+			}
 			grouped[id] = item
 		}
 		item.References = append(item.References, record.Name())
@@ -614,6 +650,41 @@ func (b *Backend) Images(ctx context.Context) ([]api.Image, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
+}
+
+type dockerImageConfig struct {
+	Healthcheck *api.HealthConfig
+	OnBuild     []string
+	Shell       []string
+}
+
+// OCI image configuration does not define Docker's Healthcheck, OnBuild, or
+// Shell extensions. Read those fields from the original config blob when it
+// is available, while keeping ordinary OCI images fully valid.
+func readDockerImageConfig(ctx context.Context, image containerd.Image) dockerImageConfig {
+	descriptor, err := image.Config(ctx)
+	if err != nil {
+		return dockerImageConfig{}
+	}
+	data, err := content.ReadBlob(ctx, image.ContentStore(), descriptor)
+	if err != nil {
+		return dockerImageConfig{}
+	}
+	var document struct {
+		Config struct {
+			Healthcheck *api.HealthConfig `json:"Healthcheck"`
+			OnBuild     []string          `json:"OnBuild"`
+			Shell       []string          `json:"Shell"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		return dockerImageConfig{}
+	}
+	return dockerImageConfig{
+		Healthcheck: document.Config.Healthcheck,
+		OnBuild:     document.Config.OnBuild,
+		Shell:       document.Config.Shell,
+	}
 }
 
 func (b *Backend) Image(ctx context.Context, reference string) (api.Image, error) {
@@ -690,6 +761,9 @@ func (b *Backend) PruneImages(ctx context.Context, request api.ImagePruneRequest
 		if !request.All && !isDanglingImage(image) {
 			continue
 		}
+		if !matchesImagePruneFilters(image, request.Filters) {
+			continue
+		}
 		for _, reference := range append([]string(nil), image.References...) {
 			deleted, err := b.DeleteImage(ctx, api.ImageDeleteRequest{Reference: reference})
 			if err != nil {
@@ -704,6 +778,53 @@ func (b *Backend) PruneImages(ctx context.Context, request api.ImagePruneRequest
 		}
 	}
 	return result, nil
+}
+
+func matchesImagePruneFilters(image api.Image, filters map[string][]string) bool {
+	for key, values := range filters {
+		if len(values) == 0 {
+			continue
+		}
+		matched := false
+		for _, value := range values {
+			switch key {
+			case "dangling":
+				want := value == "true" || value == "1"
+				matched = want == isDanglingImage(image)
+			case "label":
+				parts := strings.SplitN(value, "=", 2)
+				actual, exists := image.Labels[parts[0]]
+				matched = exists && (len(parts) == 1 || actual == parts[1])
+			case "until":
+				cutoff, ok := parseImagePruneTime(value)
+				matched = ok && image.CreatedAt.Before(cutoff)
+			default:
+				matched = false
+			}
+			if matched {
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func parseImagePruneTime(value string) (time.Time, bool) {
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.Unix(seconds, 0), true
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, true
+		}
+	}
+	if duration, err := time.ParseDuration(value); err == nil {
+		return time.Now().Add(-duration), true
+	}
+	return time.Time{}, false
 }
 
 func isDanglingImage(image api.Image) bool {
@@ -782,6 +903,7 @@ func (b *Backend) inspect(ctx context.Context, container containerd.Container) (
 	}
 	metadata := decodeRuntimeMetadata(info.Labels)
 	result := api.Container{ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata}
+	result.Health = metadata.Health
 	result.SizeRw, result.SizeRootFs = b.containerUsage(ctx, info)
 	task, err := container.Task(ctx, nil)
 	if err != nil {
@@ -801,6 +923,7 @@ func (b *Backend) inspect(ctx context.Context, container containerd.Container) (
 		code := status.ExitStatus
 		result.ExitCode = &code
 	}
+	result.Health = metadata.Health
 	return result, nil
 }
 
@@ -843,16 +966,42 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		return api.Container{}, fmt.Errorf("wait for private network cleanup: %w", err)
 	}
 	var privateNetwork bool
+	sharedNetworkPath := ""
 	switch request.Network.Mode {
 	case "host":
 	case "", "private":
 		privateNetwork = true
+	case "none":
+		// The runtime keeps the container in an isolated network namespace
+		// without provisioning a guest bridge endpoint.
 	case "path":
 		if request.Network.Path == "" {
 			return api.Container{}, errors.New("network.path is required for path mode")
 		}
+	case "container":
+		return api.Container{}, errors.New("network.container mode requires a target container")
 	default:
-		return api.Container{}, fmt.Errorf("unsupported network mode %q", request.Network.Mode)
+		if strings.HasPrefix(request.Network.Mode, "container:") {
+			targetID := strings.TrimPrefix(request.Network.Mode, "container:")
+			if targetID == "" {
+				return api.Container{}, errors.New("network.container target is required")
+			}
+			target, err := b.client.LoadContainer(b.ctx(ctx), targetID)
+			if err != nil {
+				return api.Container{}, fmt.Errorf("network container %q not found: %w", targetID, err)
+			}
+			task, err := target.Task(b.ctx(ctx), nil)
+			if err != nil {
+				return api.Container{}, fmt.Errorf("network container %q is not running: %w", targetID, err)
+			}
+			status, err := task.Status(b.ctx(ctx))
+			if err != nil || status.Status != containerd.Running {
+				return api.Container{}, fmt.Errorf("network container %q is not running", targetID)
+			}
+			sharedNetworkPath = filepath.Join("/proc", strconv.FormatUint(uint64(task.Pid()), 10), "ns", "net")
+		} else {
+			return api.Container{}, fmt.Errorf("unsupported network mode %q", request.Network.Mode)
+		}
 	}
 	var networkReady *networkPreparation
 	keepNetwork := false
@@ -873,6 +1022,10 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	image, err := b.client.GetImage(ctx, request.Image)
 	if err != nil {
 		return api.Container{}, fmt.Errorf("image must already exist: %w", err)
+	}
+	effectiveHealthcheck := request.Healthcheck
+	if effectiveHealthcheck == nil {
+		effectiveHealthcheck = readDockerImageConfig(ctx, image).Healthcheck
 	}
 	snapshotter := request.Snapshotter
 	if snapshotter == "" {
@@ -914,6 +1067,9 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if request.ReadonlyRootfs {
 		specOpts = append(specOpts, oci.WithRootFSReadonly())
 	}
+	if resourceOpt := initialResourceOpt(request.Resources); resourceOpt != nil {
+		specOpts = append(specOpts, resourceOpt)
+	}
 	mounts, err := toOCIMounts(request.Mounts)
 	if err != nil {
 		return api.Container{}, err
@@ -941,6 +1097,12 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		specOpts = append(specOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: networkPath}))
 	case "path":
 		specOpts = append(specOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: request.Network.Path}))
+	case "none":
+		// Leave the runtime's isolated network namespace without a bridge.
+	default:
+		if sharedNetworkPath != "" {
+			specOpts = append(specOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: sharedNetworkPath}))
+		}
 	}
 	b.createMu.Lock()
 	defer b.createMu.Unlock()
@@ -961,7 +1123,37 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if metadata.Labels == nil {
 		metadata.Labels = request.Labels
 	}
+	if request.Entrypoint != nil {
+		metadata.Entrypoint = append([]string(nil), (*request.Entrypoint)...)
+	}
+	if request.Cmd != nil {
+		metadata.Cmd = append([]string(nil), (*request.Cmd)...)
+	}
+	metadata.Env = append([]string(nil), request.Env...)
+	metadata.Cwd = request.Cwd
+	metadata.User = request.User
+	metadata.Hostname = request.Hostname
 	metadata.AutoRemove = metadata.AutoRemove || request.AutoRemove
+	metadata.Mounts = append([]api.Mount(nil), request.Mounts...)
+	metadata.ReadonlyRootfs = request.ReadonlyRootfs
+	metadata.DNS = append([]string(nil), request.DNS...)
+	metadata.DNSSearch = append([]string(nil), request.DNSSearch...)
+	metadata.ExtraHosts = append([]string(nil), request.ExtraHosts...)
+	metadata.Healthcheck = effectiveHealthcheck
+	metadata.Resources = request.Resources
+	if request.StopSignal != "" {
+		metadata.StopSignal = request.StopSignal
+	}
+	if effectiveHealthcheck != nil && len(effectiveHealthcheck.Test) > 0 && effectiveHealthcheck.Test[0] != "NONE" {
+		metadata.Health = &api.Health{Status: "starting"}
+	}
+	if metadata.RestartPolicy.Name == "" {
+		metadata.RestartPolicy = request.RestartPolicy
+	}
+	if metadata.RestartPolicy.Name == "" {
+		metadata.RestartPolicy.Name = "no"
+	}
+	metadata.NetworkMode = request.Network.Mode
 	if privateNetwork {
 		// Docker create stores network intent. The network namespace is
 		// allocated when start realizes that intent.
@@ -1008,6 +1200,7 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
 	return api.Container{
 		ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata,
+		Health: metadata.Health,
 	}, nil
 }
 
@@ -1042,6 +1235,78 @@ func resolveImageProcessArgs(imageEntrypoint, imageCmd []string, entrypoint, cmd
 		resolvedCmd = *cmd
 	}
 	return append(append([]string(nil), resolvedEntrypoint...), resolvedCmd...)
+}
+
+func initialResourceOpt(request api.Resources) oci.SpecOpts {
+	if request.Memory == 0 && request.MemorySwap == 0 && request.MemoryReservation == 0 &&
+		request.NanoCPUs == 0 &&
+		request.CPUShares == 0 && request.CPUPeriod == 0 && request.CPUQuota == 0 &&
+		request.CPUSetCPUs == "" && request.CPUSetMems == "" && request.PidsLimit == 0 {
+		return nil
+	}
+	return func(_ context.Context, _ oci.Client, _ *containerrecords.Container, spec *oci.Spec) error {
+		if spec.Linux == nil {
+			spec.Linux = &specs.Linux{}
+		}
+		if spec.Linux.Resources == nil {
+			spec.Linux.Resources = &specs.LinuxResources{}
+		}
+		resources := spec.Linux.Resources
+		if request.NanoCPUs != 0 || request.CPUShares != 0 || request.CPUPeriod != 0 || request.CPUQuota != 0 ||
+			request.CPUSetCPUs != "" || request.CPUSetMems != "" {
+			if resources.CPU == nil {
+				resources.CPU = &specs.LinuxCPU{}
+			}
+			if request.CPUShares != 0 {
+				value := uint64(request.CPUShares)
+				resources.CPU.Shares = &value
+			}
+			if request.NanoCPUs != 0 && request.CPUQuota == 0 {
+				period := uint64(100000)
+				if request.CPUPeriod != 0 {
+					period = uint64(request.CPUPeriod)
+				}
+				resources.CPU.Period = &period
+				quota := nanoCPUQuota(request.NanoCPUs, period)
+				resources.CPU.Quota = &quota
+			}
+			if request.CPUPeriod != 0 {
+				value := uint64(request.CPUPeriod)
+				resources.CPU.Period = &value
+			}
+			if request.CPUQuota != 0 {
+				value := request.CPUQuota
+				resources.CPU.Quota = &value
+			}
+			if request.CPUSetCPUs != "" {
+				resources.CPU.Cpus = request.CPUSetCPUs
+			}
+			if request.CPUSetMems != "" {
+				resources.CPU.Mems = request.CPUSetMems
+			}
+		}
+		if request.Memory != 0 || request.MemorySwap != 0 || request.MemoryReservation != 0 {
+			if resources.Memory == nil {
+				resources.Memory = &specs.LinuxMemory{}
+			}
+			if request.Memory != 0 {
+				value := request.Memory
+				resources.Memory.Limit = &value
+			}
+			if request.MemorySwap != 0 {
+				value := request.MemorySwap
+				resources.Memory.Swap = &value
+			}
+			if request.MemoryReservation != 0 {
+				value := request.MemoryReservation
+				resources.Memory.Reservation = &value
+			}
+		}
+		if request.PidsLimit != 0 {
+			resources.Pids = &specs.LinuxPids{Limit: request.PidsLimit}
+		}
+		return nil
+	}
 }
 
 func (b *Backend) persistRunningState(ctx context.Context, container containerd.Container, published []api.PublishedPort) error {
@@ -1132,6 +1397,12 @@ func (b *Backend) UpdateContainerMetadata(ctx context.Context, request api.Conta
 	if request.PortBindings != nil {
 		metadata.PortBindings = request.PortBindings
 	}
+	if request.RestartCount != nil {
+		if *request.RestartCount < 0 {
+			return errors.New("restart count must be non-negative")
+		}
+		metadata.RestartCount = *request.RestartCount
+	}
 	encoded, err := encodeRuntimeMetadata(metadata)
 	if err != nil {
 		return err
@@ -1170,43 +1441,95 @@ func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpda
 	}
 
 	resources, hasResources := containerUpdateResources(request)
-	if !hasResources {
-		return []string{}, nil
-	}
-
-	task, _, _ := record.taskState()
-	if task == nil {
-		var err error
-		task, err = record.container.Task(ctx, nil)
-		if err != nil {
-			return nil, fmt.Errorf("container is not running: %w", err)
+	if hasResources {
+		task, _, _ := record.taskState()
+		if task == nil {
+			loadedTask, err := record.container.Task(ctx, nil)
+			if err == nil {
+				task = loadedTask
+				record.setTask(task)
+			} else if !errdefs.IsNotFound(err) {
+				return nil, err
+			}
 		}
-		record.setTask(task)
-	}
-	if err := task.Update(ctx, containerd.WithResources(resources)); err != nil {
-		return nil, err
-	}
+		if task != nil {
+			status, err := task.Status(ctx)
+			if err != nil && !errdefs.IsNotFound(err) {
+				return nil, err
+			}
+			if err == nil && status.Status != containerd.Stopped {
+				if err := task.Update(ctx, containerd.WithResources(resources)); err != nil {
+					return nil, err
+				}
+			}
+		}
 
-	spec, err := record.container.Spec(ctx)
-	if err != nil {
-		return nil, err
+		spec, err := record.container.Spec(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := applyContainerUpdateToSpec(spec, request); err != nil {
+			return nil, err
+		}
+		encoded, err := typeurl.MarshalAny(spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := record.container.Update(ctx, func(
+			_ context.Context, _ *containerd.Client, container *containerrecords.Container,
+		) error {
+			container.Spec = encoded
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		record.setSpec(spec)
 	}
-	if err := applyContainerUpdateToSpec(spec, request); err != nil {
-		return nil, err
+	if request.RestartPolicy != nil {
+		if err := b.updateRuntimeMetadata(ctx, record.container, func(metadata *api.ContainerMetadata) {
+			metadata.RestartPolicy = *request.RestartPolicy
+		}); err != nil {
+			return nil, err
+		}
 	}
-	encoded, err := typeurl.MarshalAny(spec)
-	if err != nil {
-		return nil, err
+	if hasResources {
+		if err := b.updateRuntimeMetadata(ctx, record.container, func(metadata *api.ContainerMetadata) {
+			resources := metadata.Resources
+			if request.NanoCPUs != nil {
+				resources.NanoCPUs = *request.NanoCPUs
+			}
+			if request.Memory != nil {
+				resources.Memory = *request.Memory
+			}
+			if request.MemorySwap != nil {
+				resources.MemorySwap = *request.MemorySwap
+			}
+			if request.MemoryReservation != nil {
+				resources.MemoryReservation = *request.MemoryReservation
+			}
+			if request.CPUShares != nil {
+				resources.CPUShares = int64(*request.CPUShares)
+			}
+			if request.CPUPeriod != nil {
+				resources.CPUPeriod = int64(*request.CPUPeriod)
+			}
+			if request.CPUQuota != nil {
+				resources.CPUQuota = *request.CPUQuota
+			}
+			if request.CPUSetCPUs != nil {
+				resources.CPUSetCPUs = *request.CPUSetCPUs
+			}
+			if request.CPUSetMems != nil {
+				resources.CPUSetMems = *request.CPUSetMems
+			}
+			if request.PidsLimit != nil {
+				resources.PidsLimit = *request.PidsLimit
+			}
+			metadata.Resources = resources
+		}); err != nil {
+			return nil, err
+		}
 	}
-	if err := record.container.Update(ctx, func(
-		_ context.Context, _ *containerd.Client, container *containerrecords.Container,
-	) error {
-		container.Spec = encoded
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	record.setSpec(spec)
 	return []string{}, nil
 }
 
@@ -1214,9 +1537,18 @@ func containerUpdateResources(request api.ContainerUpdateRequest) (*specs.LinuxR
 	resources := &specs.LinuxResources{}
 	hasResources := false
 
-	if request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
+	if request.NanoCPUs != nil || request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
 		request.CPUSetCPUs != nil || request.CPUSetMems != nil {
 		cpu := &specs.LinuxCPU{}
+		if request.NanoCPUs != nil && request.CPUQuota == nil {
+			period := uint64(100000)
+			if request.CPUPeriod != nil {
+				period = *request.CPUPeriod
+			}
+			cpu.Period = &period
+			quota := nanoCPUQuota(*request.NanoCPUs, period)
+			cpu.Quota = &quota
+		}
 		if request.CPUShares != nil {
 			value := *request.CPUShares
 			cpu.Shares = &value
@@ -1273,7 +1605,7 @@ func applyContainerUpdateToSpec(spec *specs.Spec, request api.ContainerUpdateReq
 	}
 	resources := spec.Linux.Resources
 
-	if request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
+	if request.NanoCPUs != nil || request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
 		request.CPUSetCPUs != nil || request.CPUSetMems != nil {
 		if resources.CPU == nil {
 			resources.CPU = &specs.LinuxCPU{}
@@ -1281,6 +1613,17 @@ func applyContainerUpdateToSpec(spec *specs.Spec, request api.ContainerUpdateReq
 		if request.CPUShares != nil {
 			value := *request.CPUShares
 			resources.CPU.Shares = &value
+		}
+		if request.NanoCPUs != nil && request.CPUQuota == nil {
+			period := uint64(100000)
+			if resources.CPU.Period != nil {
+				period = *resources.CPU.Period
+			} else if request.CPUPeriod != nil {
+				period = *request.CPUPeriod
+				resources.CPU.Period = &period
+			}
+			quota := nanoCPUQuota(*request.NanoCPUs, period)
+			resources.CPU.Quota = &quota
 		}
 		if request.CPUPeriod != nil {
 			value := *request.CPUPeriod
@@ -1323,6 +1666,16 @@ func applyContainerUpdateToSpec(spec *specs.Spec, request api.ContainerUpdateReq
 		resources.Pids.Limit = *request.PidsLimit
 	}
 	return nil
+}
+
+func nanoCPUQuota(nanoCPUs int64, period uint64) int64 {
+	if nanoCPUs <= 0 || period == 0 {
+		return 0
+	}
+	if nanoCPUs > math.MaxInt64/int64(period) {
+		return math.MaxInt64
+	}
+	return nanoCPUs * int64(period) / 1_000_000_000
 }
 
 func toOCIMounts(input []api.Mount) ([]specs.Mount, error) {
@@ -1395,15 +1748,53 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 			return api.Container{}, err
 		}
 	}
-	if err := b.waitNetworkPreparation(ctx, id); err != nil {
-		return api.Container{}, err
-	}
-	published, err := b.prepareNetwork(id, request.PublishedPorts)
+	info, err := container.Info(ctx)
 	if err != nil {
 		return api.Container{}, err
 	}
-	rollbackNetwork := func() { _ = b.network.Delete(id) }
-	task, _, _ := record.taskState()
+	metadata := decodeRuntimeMetadata(info.Labels)
+	privateNetwork := metadata.NetworkMode == "" || metadata.NetworkMode == "private"
+	published := append([]api.PublishedPort(nil), request.PublishedPorts...)
+	rollbackNetwork := func() {}
+	if privateNetwork {
+		if err := b.waitNetworkPreparation(ctx, id); err != nil {
+			return api.Container{}, err
+		}
+		published, err = b.prepareNetwork(id, published)
+		if err != nil {
+			return api.Container{}, err
+		}
+		rollbackNetwork = func() { _ = b.network.Delete(id) }
+	}
+	task, reaped, reaping := record.taskState()
+	if reaping != nil {
+		select {
+		case <-ctx.Done():
+			rollbackNetwork()
+			return api.Container{}, ctx.Err()
+		case <-reaping:
+		}
+		task, reaped, _ = record.taskState()
+	}
+	if reaped {
+		task = nil
+	}
+	if task != nil {
+		status, statusErr := task.Status(ctx)
+		if statusErr != nil && !errdefs.IsNotFound(statusErr) {
+			rollbackNetwork()
+			return api.Container{}, statusErr
+		}
+		if errdefs.IsNotFound(statusErr) || status.Status == containerd.Stopped {
+			if _, deleteErr := task.Delete(ctx); deleteErr != nil && !errdefs.IsNotFound(deleteErr) {
+				rollbackNetwork()
+				return api.Container{}, deleteErr
+			}
+			record.setTask(nil)
+			record.setStdinWriter(nil)
+			task = nil
+		}
+	}
 	if err := b.clearExitState(ctx, record); err != nil {
 		rollbackNetwork()
 		return api.Container{}, err
@@ -1419,17 +1810,28 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 			rollbackNetwork()
 			return api.Container{}, err
 		}
+		var stdinReader io.Reader
+		var stdinWriter *io.PipeWriter
+		if metadata.AttachStdin || metadata.OpenStdin {
+			stdinReader, stdinWriter = io.Pipe()
+		}
 		task, err = container.NewTask(
 			ctx,
-			cio.NewCreator(cio.WithStreams(nil, capture.stdout, capture.stderr)),
+			cio.NewCreator(cio.WithStreams(stdinReader, capture.stdout, capture.stderr)),
 		)
 		if err != nil {
+			if stdinWriter != nil {
+				_ = stdinWriter.Close()
+			}
 			capture.close()
 			b.removeLogs(id)
 			rollbackNetwork()
 			return api.Container{}, err
 		}
 		capture.io = task.IO()
+		if stdinWriter != nil {
+			record.setStdinWriter(stdinWriter)
+		}
 		b.logCaptures.Store(id, capture)
 	}
 	if err := task.Start(ctx); err != nil {
@@ -1449,22 +1851,218 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		rollbackNetwork()
 		return api.Container{}, err
 	}
-	if err := b.syncNetworkFiles(ctx, id); err != nil {
-		_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
-		_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
-		record.setTask(nil)
-		rollbackNetwork()
-		return api.Container{}, err
+	if privateNetwork {
+		if err := b.syncNetworkFiles(ctx, id); err != nil {
+			_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
+			_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
+			record.setTask(nil)
+			rollbackNetwork()
+			return api.Container{}, err
+		}
 	}
-	info, _ := container.Info(ctx)
-	metadata := decodeRuntimeMetadata(info.Labels)
+	b.startHealthMonitor(id, container)
+	info, _ = container.Info(ctx)
+	metadata = decodeRuntimeMetadata(info.Labels)
 	if len(published) == 0 {
 		published = metadata.PublishedPorts
 	}
 	return api.Container{
 		ID: id, Status: string(containerd.Running), PID: task.Pid(),
-		PublishedPorts: published, Metadata: metadata,
+		PublishedPorts: published, Metadata: metadata, Health: metadata.Health,
 	}, nil
+}
+
+func (b *Backend) startHealthMonitor(id string, container containerd.Container) {
+	info, err := container.Info(b.ctx(context.Background()))
+	if err != nil {
+		return
+	}
+	metadata := decodeRuntimeMetadata(info.Labels)
+	config := metadata.Healthcheck
+	if config == nil || len(config.Test) == 0 || strings.EqualFold(config.Test[0], "NONE") {
+		return
+	}
+	b.healthMu.Lock()
+	if previous := b.healthStops[id]; previous != nil {
+		close(previous)
+	}
+	stop := make(chan struct{})
+	b.healthStops[id] = stop
+	b.healthMu.Unlock()
+	go b.healthLoop(id, container, *config, stop)
+}
+
+func (b *Backend) stopHealthMonitor(id string) {
+	b.healthMu.Lock()
+	if stop := b.healthStops[id]; stop != nil {
+		close(stop)
+		delete(b.healthStops, id)
+	}
+	b.healthMu.Unlock()
+}
+
+func (b *Backend) healthLoop(
+	id string, container containerd.Container, config api.HealthConfig, stop <-chan struct{},
+) {
+	starting := true
+	if config.StartPeriod > 0 {
+		timer := time.NewTimer(time.Duration(config.StartPeriod))
+		select {
+		case <-stop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+			starting = false
+		}
+	}
+	for {
+		ctx, cancel := context.WithTimeout(b.ctx(context.Background()), healthTimeout(config))
+		code, output, err := b.runHealthcheck(ctx, id, config)
+		cancel()
+		if err != nil && output == "" {
+			output = err.Error()
+		}
+		_ = b.recordHealth(context.Background(), container, code, output, starting)
+		interval := healthInterval(config, starting)
+		timer := time.NewTimer(interval)
+		select {
+		case <-stop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+		starting = false
+	}
+}
+
+func (b *Backend) runHealthcheck(
+	ctx context.Context, id string, config api.HealthConfig,
+) (int32, string, error) {
+	args := append([]string(nil), config.Test...)
+	if len(args) == 0 {
+		return 0, "", errors.New("healthcheck command is empty")
+	}
+	switch strings.ToUpper(args[0]) {
+	case "CMD":
+		args = args[1:]
+	case "CMD-SHELL":
+		args = []string{"/bin/sh", "-c", strings.Join(args[1:], " ")}
+	}
+	if len(args) == 0 {
+		return 0, "", errors.New("healthcheck command is empty")
+	}
+	var output bytes.Buffer
+	code, err := b.Exec(ctx, api.ContainerExecRequest{
+		ID: id, ExecID: "healthcheck-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Args: args,
+	}, func(stream string, data []byte) error {
+		if output.Len() < 4096 {
+			remaining := 4096 - output.Len()
+			if len(data) > remaining {
+				data = data[:remaining]
+			}
+			_, _ = output.Write(data)
+		}
+		return nil
+	})
+	return code, output.String(), err
+}
+
+func (b *Backend) recordHealth(
+	ctx context.Context, container containerd.Container, code int32, output string, starting bool,
+) error {
+	return b.updateRuntimeMetadata(ctx, container, func(metadata *api.ContainerMetadata) {
+		if metadata.Healthcheck == nil {
+			return
+		}
+		if metadata.Health == nil {
+			metadata.Health = &api.Health{Status: "starting"}
+		}
+		now := time.Now()
+		metadata.Health.Log = append(metadata.Health.Log, api.HealthcheckResult{
+			Start: now, End: time.Now(), ExitCode: int(code), Output: output,
+		})
+		if len(metadata.Health.Log) > 5 {
+			metadata.Health.Log = metadata.Health.Log[len(metadata.Health.Log)-5:]
+		}
+		if code == 0 {
+			metadata.Health.FailingStreak = 0
+			metadata.Health.Status = "healthy"
+			return
+		}
+		if starting {
+			metadata.Health.Status = "starting"
+			return
+		}
+		metadata.Health.FailingStreak++
+		retries := metadata.Healthcheck.Retries
+		if retries <= 0 {
+			retries = 3
+		}
+		if metadata.Health.FailingStreak >= retries {
+			metadata.Health.Status = "unhealthy"
+		} else {
+			metadata.Health.Status = "starting"
+		}
+	})
+}
+
+func healthTimeout(config api.HealthConfig) time.Duration {
+	if config.Timeout > 0 {
+		return time.Duration(config.Timeout)
+	}
+	return 30 * time.Second
+}
+
+func healthInterval(config api.HealthConfig, starting bool) time.Duration {
+	nanos := config.Interval
+	if starting && config.StartInterval > 0 {
+		nanos = config.StartInterval
+	}
+	if nanos <= 0 {
+		nanos = int64(30 * time.Second)
+	}
+	return time.Duration(nanos)
+}
+
+func (b *Backend) WaitHealthy(ctx context.Context, id string) (uint32, error) {
+	for {
+		container, err := b.client.LoadContainer(b.ctx(ctx), id)
+		if err != nil {
+			return 0, err
+		}
+		info, err := container.Info(b.ctx(ctx))
+		if err != nil {
+			return 0, err
+		}
+		metadata := decodeRuntimeMetadata(info.Labels)
+		if metadata.Healthcheck == nil || len(metadata.Healthcheck.Test) == 0 || strings.EqualFold(metadata.Healthcheck.Test[0], "NONE") {
+			return 0, errors.New("no healthcheck configured for the container")
+		}
+		if metadata.Health != nil && metadata.Health.Status == "healthy" {
+			return 0, nil
+		}
+		if task, taskErr := container.Task(b.ctx(ctx), nil); taskErr != nil {
+			if metadata.LastExitCode != nil {
+				return *metadata.LastExitCode, nil
+			}
+		} else if status, statusErr := task.Status(b.ctx(ctx)); statusErr == nil && status.Status == containerd.Stopped {
+			return status.ExitStatus, nil
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (b *Backend) Wait(ctx context.Context, id string) (uint32, time.Time, error) {
@@ -1511,6 +2109,7 @@ func (b *Backend) Wait(ctx context.Context, id string) (uint32, time.Time, error
 	exit := <-status
 	code, exitedAt, err := exit.Result()
 	b.finishLogCapture(id)
+	b.stopHealthMonitor(id)
 	if err == nil {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		persistErr := b.persistExitState(persistCtx, record, code)
@@ -2361,6 +2960,12 @@ func (w streamWriter) Write(p []byte) (int, error) {
 }
 
 func (b *Backend) Exec(ctx context.Context, request api.ContainerExecRequest, stream StreamFunc) (int32, error) {
+	return b.ExecInput(ctx, request, nil, stream)
+}
+
+func (b *Backend) ExecInput(
+	ctx context.Context, request api.ContainerExecRequest, input <-chan []byte, stream StreamFunc,
+) (int32, error) {
 	if request.ID == "" || request.ExecID == "" || len(request.Args) == 0 {
 		return 0, errors.New("id, execId, and args are required")
 	}
@@ -2423,8 +3028,34 @@ func (b *Backend) Exec(ctx context.Context, request api.ContainerExecRequest, st
 	if request.Terminal {
 		stderr = bytes.NewBuffer(nil)
 	}
-	process, err := task.Exec(ctx, request.ExecID, processSpec, cio.NewCreator(cio.WithStreams(nil, stdout, stderr)))
+	var stdin io.Reader
+	var stdinWriter *io.PipeWriter
+	if input != nil && request.AttachStdin {
+		reader, writer := io.Pipe()
+		stdin, stdinWriter = reader, writer
+		go func() {
+			defer writer.Close()
+			for {
+				select {
+				case <-ctx.Done():
+					_ = writer.CloseWithError(ctx.Err())
+					return
+				case data, ok := <-input:
+					if !ok {
+						return
+					}
+					if _, err := writer.Write(data); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+	process, err := task.Exec(ctx, request.ExecID, processSpec, cio.NewCreator(cio.WithStreams(stdin, stdout, stderr)))
 	if err != nil {
+		if stdinWriter != nil {
+			_ = stdinWriter.Close()
+		}
 		return 0, err
 	}
 	b.execMu.Lock()
@@ -2464,6 +3095,47 @@ func (b *Backend) Exec(ctx context.Context, request api.ContainerExecRequest, st
 		return 0, err
 	}
 	return int32(code), nil
+}
+
+func (b *Backend) AttachInput(
+	ctx context.Context, request api.ContainerLogsRequest, input <-chan []byte, stream StreamFunc,
+) (uint32, error) {
+	if input != nil {
+		go b.copyStdin(ctx, request.ID, input)
+	}
+	return b.Attach(ctx, request, stream)
+}
+
+func (b *Backend) copyStdin(ctx context.Context, id string, input <-chan []byte) {
+	record, ok := b.loadRecord(id)
+	if !ok {
+		container, err := b.client.LoadContainer(b.ctx(ctx), id)
+		if err != nil {
+			return
+		}
+		record, err = b.record(b.ctx(ctx), id, container)
+		if err != nil {
+			return
+		}
+	}
+	writer := record.getStdinWriter()
+	if writer == nil {
+		return
+	}
+	defer writer.Close()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-input:
+			if !ok {
+				return
+			}
+			if _, err := writer.Write(data); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (b *Backend) ResizeExec(ctx context.Context, request api.ExecResizeRequest) error {

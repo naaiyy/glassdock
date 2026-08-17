@@ -138,6 +138,43 @@ func TestNetworkManagerReportsSortedContainerEndpoints(t *testing.T) {
 	}
 }
 
+func TestNetworkManagerPreservesIPAMRangeAuxiliaryAndIPv6State(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{
+		Name:       "frontend",
+		EnableIPv6: true,
+		IPAM: &api.NetworkIPAM{Driver: "default", Config: []api.NetworkIPAMConfig{{
+			Subnet: "10.120.0.0/16", IPRange: "10.120.10.0/24", Gateway: "10.120.0.1",
+			AuxiliaryAddresses: map[string]string{"router": "10.120.0.2"},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resource.EnableIPv6 || len(resource.IPAM.Config) != 1 {
+		t.Fatalf("network capabilities = %#v", resource)
+	}
+	config := resource.IPAM.Config[0]
+	if config.IPRange != "10.120.10.0/24" || config.AuxiliaryAddresses["router"] != "10.120.0.2" {
+		t.Fatalf("IPAM config = %#v", config)
+	}
+	if _, err := manager.Create("container-one"); err != nil {
+		t.Fatal(err)
+	}
+	resource, err = manager.ConnectNetwork(api.NetworkConnectRequest{
+		NetworkID: resource.ID, ContainerID: "container-one",
+		IPv4Address: "10.120.10.25", IPv6Address: "fd00::25",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := resource.Containers["container-one"]
+	if endpoint.IPv4Address != "10.120.10.25" || endpoint.IPv6Address != "fd00::25" {
+		t.Fatalf("endpoint = %#v", endpoint)
+	}
+}
+
 func TestNetworkManagerInstallsTCPKernelForwardingRules(t *testing.T) {
 	runner := &recordingNetworkRunner{}
 	manager := newTestNetworkManager(runner)
@@ -401,8 +438,8 @@ func TestNetworkManagerCreatesAndMutatesGuestNetworkObjects(t *testing.T) {
 	if !ok || endpoint.Name != "web" || endpoint.IPv4Address != "10.89.0.2/16" {
 		t.Fatalf("frontend endpoint = %#v", endpoint)
 	}
-	if err := manager.Connect(created.ID, "container-one", "web", "", "", true); err == nil || !strings.Contains(err.Error(), "hot attach") {
-		t.Fatalf("running connect error = %v", err)
+	if err := manager.Connect(created.ID, "container-one", "web", "", "", true); err == nil || !strings.Contains(err.Error(), "already connected") {
+		t.Fatalf("duplicate running connect error = %v", err)
 	}
 	if err := manager.Disconnect(created.ID, "container-one", false); err != nil {
 		t.Fatal(err)

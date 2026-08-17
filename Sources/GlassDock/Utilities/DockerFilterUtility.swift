@@ -6,43 +6,49 @@ struct DockerNetworkFilterUtility {
     // parses network filters from a query string, optionally defaulting to dangling only
     // dangling networks are networks with no containers are attached to them
     static func parseNetworkFilters(filtersParam: String?, defaultDangling: Bool, logger: Logger) throws -> [String: [String]] {
-        var filters: [String: Any] = [:]
-        var parsedFilters: [String: [String]] = [:]
-        if let filtersParam = filtersParam, let data = filtersParam.data(using: .utf8) {
-            if let decoded = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-                filters = decoded
-
-                // Validate keys — the full set moby accepts for network list
-                // (docker network ls -f): dangling, driver, id, label, name,
-                // scope, type. Must stay in sync with the knownKeys handled by
-                // ClientNetworkService.applyFilters.
-                let allowedKeys: Set<String> = ["dangling", "driver", "id", "label", "name", "scope", "type"]
-                let filterKeys = Set(filters.keys)
-                if !filterKeys.isSubset(of: allowedKeys) {
-                    logger.warning("Invalid filter key(s) found: \(filterKeys.subtracting(allowedKeys))")
-                    throw Abort(.badRequest, reason: "Invalid filter key(s) found: \(filterKeys.subtracting(allowedKeys))")
-                }
-
-                for (key, value) in filters {
-                    if let dict = value as? [String: Any] {
-                        let keys = dict.compactMap { (key, value) in
-                            (value as? Bool == true) ? key : nil
-                        }
-                        if !keys.isEmpty {
-                            parsedFilters[key] = keys
-                        }
-                    } else if let arr = value as? [String] {
-                        parsedFilters[key] = arr
-                    }
-                }
-                logger.debug("Decoded filters: \(parsedFilters)")
-            } else {
-                logger.warning("Failed to decode filters")
-            }
-        } else if defaultDangling {
-            parsedFilters["dangling"] = ["true"]
+        guard let filtersParam else {
+            guard defaultDangling else { return [:] }
             logger.debug("No filters provided, defaulting to prune only dangling networks.")
+            return ["dangling": ["true"]]
         }
+        guard let data = filtersParam.data(using: .utf8) else {
+            throw Abort(.badRequest, reason: "Invalid network filters")
+        }
+        guard let filters = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+        else {
+            throw Abort(.badRequest, reason: "Invalid network filters")
+        }
+
+        // Validate keys — the full set Moby accepts for network list and prune
+        // (docker network ls -f): dangling, driver, id, label, name, scope,
+        // and type.
+        let allowedKeys: Set<String> = ["dangling", "driver", "id", "label", "name", "scope", "type"]
+        let filterKeys = Set(filters.keys)
+        if !filterKeys.isSubset(of: allowedKeys) {
+            logger.warning("Invalid filter key(s) found: \(filterKeys.subtracting(allowedKeys))")
+            throw Abort(.badRequest, reason: "Invalid filter key(s) found: \(filterKeys.subtracting(allowedKeys))")
+        }
+
+        var parsedFilters: [String: [String]] = [:]
+        for (key, value) in filters {
+            if let dict = value as? [String: Any] {
+                guard dict.values.allSatisfy({ $0 is Bool }) else {
+                    throw Abort(.badRequest, reason: "Invalid network filter value for \(key)")
+                }
+                let values = dict.compactMap { $0.value as? Bool == true ? $0.key : nil }
+                parsedFilters[key] = values
+            } else if let values = value as? [Any] {
+                guard values.allSatisfy({ $0 is String }) else {
+                    throw Abort(.badRequest, reason: "Invalid network filter value for \(key)")
+                }
+                parsedFilters[key] = values.compactMap { $0 as? String }
+            } else if let value = value as? String {
+                parsedFilters[key] = [value]
+            } else {
+                throw Abort(.badRequest, reason: "Invalid network filter value for \(key)")
+            }
+        }
+        logger.debug("Decoded filters: \(parsedFilters)")
         return parsedFilters
     }
 }

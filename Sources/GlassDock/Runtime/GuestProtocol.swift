@@ -10,6 +10,7 @@ enum GuestFrameKind: String, Codable, Sendable {
 }
 
 enum GuestStream: String, Codable, Sendable {
+    case stdin
     case stdout
     case stderr
 }

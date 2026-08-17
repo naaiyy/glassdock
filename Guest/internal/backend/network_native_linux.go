@@ -69,12 +69,14 @@ func (nativeNetworkNamespaceOperations) Attach(
 	if err := handle.LinkSetName(ethernet, interfaceName); err != nil {
 		return fmt.Errorf("name attached namespace veth: %w", err)
 	}
-	parsedAddress, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", address, prefix))
-	if err != nil {
-		return fmt.Errorf("parse attached namespace address: %w", err)
-	}
-	if err := handle.AddrAdd(ethernet, parsedAddress); err != nil {
-		return fmt.Errorf("assign attached namespace address: %w", err)
+	if address != "" {
+		parsedAddress, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", address, prefix))
+		if err != nil {
+			return fmt.Errorf("parse attached namespace address: %w", err)
+		}
+		if err := handle.AddrAdd(ethernet, parsedAddress); err != nil {
+			return fmt.Errorf("assign attached namespace address: %w", err)
+		}
 	}
 	if err := handle.LinkSetUp(ethernet); err != nil {
 		return fmt.Errorf("bring attached namespace veth up: %w", err)

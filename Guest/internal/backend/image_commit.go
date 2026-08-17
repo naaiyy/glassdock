@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,11 +66,15 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 	if err := json.Unmarshal(configData, &imageConfig); err != nil {
 		return api.ImageResponse{}, fmt.Errorf("decode source image configuration: %w", err)
 	}
+	extras, err := readDockerConfigExtras(configData)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("decode Docker image configuration: %w", err)
+	}
 	onBuild, err := dockerOnBuild(configData)
 	if err != nil {
 		return api.ImageResponse{}, fmt.Errorf("decode source ONBUILD configuration: %w", err)
 	}
-	if err := applyCommitChangesWithOnBuild(&imageConfig, request.Changes, &onBuild); err != nil {
+	if err := applyCommitChangesWithExtras(&imageConfig, request.Changes, &onBuild, &extras); err != nil {
 		return api.ImageResponse{}, err
 	}
 
@@ -157,6 +162,10 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 	newConfigData, err = encodeDockerOnBuild(newConfigData, onBuild)
 	if err != nil {
 		return api.ImageResponse{}, fmt.Errorf("encode committed ONBUILD configuration: %w", err)
+	}
+	newConfigData, err = encodeDockerConfigExtras(newConfigData, extras)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("encode committed Docker image configuration: %w", err)
 	}
 	newConfigDescriptor := imagespec.Descriptor{
 		MediaType: configDescriptor.MediaType,
@@ -283,6 +292,66 @@ func applyCommitChanges(image *imagespec.Image, raw string) error {
 }
 
 func applyCommitChangesWithOnBuild(image *imagespec.Image, raw string, onBuild *[]string) error {
+	return applyCommitChangesWithExtras(image, raw, onBuild, nil)
+}
+
+type dockerConfigExtras struct {
+	Healthcheck *api.HealthConfig
+	Shell       []string
+}
+
+func readDockerConfigExtras(data []byte) (dockerConfigExtras, error) {
+	var document struct {
+		Config struct {
+			Healthcheck *api.HealthConfig `json:"Healthcheck"`
+			Shell       []string          `json:"Shell"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		return dockerConfigExtras{}, err
+	}
+	return dockerConfigExtras{
+		Healthcheck: document.Config.Healthcheck,
+		Shell:       append([]string(nil), document.Config.Shell...),
+	}, nil
+}
+
+func encodeDockerConfigExtras(data []byte, extras dockerConfigExtras) ([]byte, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, err
+	}
+	config := map[string]json.RawMessage{}
+	if raw := document["config"]; raw != nil {
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return nil, err
+		}
+	}
+	if extras.Healthcheck != nil {
+		raw, err := json.Marshal(extras.Healthcheck)
+		if err != nil {
+			return nil, err
+		}
+		config["Healthcheck"] = raw
+	}
+	if len(extras.Shell) > 0 {
+		raw, err := json.Marshal(extras.Shell)
+		if err != nil {
+			return nil, err
+		}
+		config["Shell"] = raw
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	document["config"] = raw
+	return json.Marshal(document)
+}
+
+func applyCommitChangesWithExtras(
+	image *imagespec.Image, raw string, onBuild *[]string, extras *dockerConfigExtras,
+) error {
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -345,6 +414,24 @@ func applyCommitChangesWithOnBuild(image *imagespec.Image, raw string, onBuild *
 				return errors.New("STOPSIGNAL change requires a value")
 			}
 			image.Config.StopSignal = argument
+		case "HEALTHCHECK":
+			if extras == nil {
+				return errors.New("HEALTHCHECK changes require a Docker image configuration")
+			}
+			healthcheck, err := parseDockerHealthcheck(argument)
+			if err != nil {
+				return err
+			}
+			extras.Healthcheck = healthcheck
+		case "SHELL":
+			if extras == nil {
+				return errors.New("SHELL changes require a Docker image configuration")
+			}
+			var shell []string
+			if err := json.Unmarshal([]byte(argument), &shell); err != nil || len(shell) == 0 {
+				return errors.New("SHELL requires a non-empty JSON array")
+			}
+			extras.Shell = shell
 		case "ONBUILD":
 			if argument == "" {
 				return errors.New("ONBUILD change requires an instruction")
@@ -381,6 +468,82 @@ func dockerOnBuild(data []byte) ([]string, error) {
 		}
 	}
 	return nil, nil
+}
+
+func parseDockerHealthcheck(argument string) (*api.HealthConfig, error) {
+	rest := strings.TrimSpace(argument)
+	if rest == "" {
+		return nil, errors.New("HEALTHCHECK requires NONE or CMD")
+	}
+	if strings.EqualFold(rest, "NONE") {
+		return &api.HealthConfig{Test: []string{"NONE"}}, nil
+	}
+	config := &api.HealthConfig{}
+	for strings.HasPrefix(rest, "--") {
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			break
+		}
+		option := fields[0]
+		separator := strings.IndexByte(option, '=')
+		if separator <= 2 || separator == len(option)-1 {
+			return nil, fmt.Errorf("invalid HEALTHCHECK option %q", option)
+		}
+		key := strings.TrimPrefix(option[:separator], "--")
+		value := option[separator+1:]
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, option))
+		switch key {
+		case "interval":
+			nanos, err := time.ParseDuration(value)
+			if err != nil || nanos < 0 {
+				return nil, fmt.Errorf("invalid HEALTHCHECK interval %q", value)
+			}
+			config.Interval = int64(nanos)
+		case "timeout":
+			nanos, err := time.ParseDuration(value)
+			if err != nil || nanos < 0 {
+				return nil, fmt.Errorf("invalid HEALTHCHECK timeout %q", value)
+			}
+			config.Timeout = int64(nanos)
+		case "start-period":
+			nanos, err := time.ParseDuration(value)
+			if err != nil || nanos < 0 {
+				return nil, fmt.Errorf("invalid HEALTHCHECK start period %q", value)
+			}
+			config.StartPeriod = int64(nanos)
+		case "start-interval":
+			nanos, err := time.ParseDuration(value)
+			if err != nil || nanos < 0 {
+				return nil, fmt.Errorf("invalid HEALTHCHECK start interval %q", value)
+			}
+			config.StartInterval = int64(nanos)
+		case "retries":
+			retries, err := strconv.Atoi(value)
+			if err != nil || retries < 0 {
+				return nil, fmt.Errorf("invalid HEALTHCHECK retries %q", value)
+			}
+			config.Retries = retries
+		default:
+			return nil, fmt.Errorf("unsupported HEALTHCHECK option %q", key)
+		}
+	}
+	if len(rest) < 3 || !strings.EqualFold(rest[:3], "CMD") || (len(rest) > 3 && rest[3] != ' ' && rest[3] != '\t') {
+		return nil, errors.New("HEALTHCHECK requires CMD")
+	}
+	command := strings.TrimSpace(rest[3:])
+	if command == "" {
+		return nil, errors.New("HEALTHCHECK CMD requires a command")
+	}
+	if strings.HasPrefix(command, "[") {
+		var values []string
+		if err := json.Unmarshal([]byte(command), &values); err != nil || len(values) == 0 {
+			return nil, errors.New("HEALTHCHECK CMD exec form is invalid")
+		}
+		config.Test = append([]string{"CMD"}, values...)
+	} else {
+		config.Test = []string{"CMD-SHELL", command}
+	}
+	return config, nil
 }
 
 func encodeDockerOnBuild(data []byte, values []string) ([]byte, error) {

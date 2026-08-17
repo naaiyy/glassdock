@@ -25,7 +25,7 @@ struct SwarmControlPlaneRoutesTests {
             ) { response async throws in
                 #expect(response.status == .created)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
-                #expect((value?["Id"] as? String)?.isEmpty == false)
+                #expect((value?["ID"] as? String)?.isEmpty == false)
             }
             try await app.testing().test(.GET, "/v1.51/configs") { response async throws in
                 #expect(response.status == .ok)
@@ -41,11 +41,12 @@ struct SwarmControlPlaneRoutesTests {
             }
             try await app.testing().test(
                 .POST,
-                "/v1.51/configs/\(configID)/update",
+                "/v1.51/configs/\(configID)/update?version=1",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Name":"app-config-v2","Labels":{"tier":"api"},"Data":"bmV3"}"#)
             ) { response async in
                 #expect(response.status == .ok)
+                #expect(response.body.readableBytes == 0)
             }
             try await app.testing().test(.DELETE, "/v1.51/configs/\(configID)") { response async in
                 #expect(response.status == .noContent)
@@ -93,14 +94,14 @@ struct SwarmControlPlaneRoutesTests {
             }
             try await app.testing().test(
                 .POST,
-                "/v1.51/swarm/update",
+                "/v1.51/swarm/update?version=1",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Name":"local-swarm"}"#)
             ) { response async in
-                #expect(response.status == .noContent)
+                #expect(response.status == .ok)
             }
             try await app.testing().test(.POST, "/v1.51/swarm/leave?force=1") { response async in
-                #expect(response.status == .noContent)
+                #expect(response.status == .ok)
             }
         }
     }
@@ -175,7 +176,7 @@ struct SwarmControlPlaneRoutesTests {
             let nodeID = try #require(await controlPlane.listNodes(filters: nil).first?.id)
             try await app.testing().test(
                 .POST,
-                "/v1.51/nodes/\(nodeID)/update",
+                "/v1.51/nodes/\(nodeID)/update?version=1",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Name":"local-node","Availability":"pause"}"#)
             ) { response async in
@@ -195,7 +196,7 @@ struct SwarmControlPlaneRoutesTests {
             ) { response async throws in
                 #expect(response.status == .created)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
-                #expect((value?["Id"] as? String)?.isEmpty == false)
+                #expect((value?["ID"] as? String)?.isEmpty == false)
             }
             let serviceID = try #require(await controlPlane.listServices(filters: nil).first?.id)
             let initialTaskID = try #require(await controlPlane.listTasks(filters: nil).first?.id)
@@ -230,7 +231,7 @@ struct SwarmControlPlaneRoutesTests {
             }
             try await app.testing().test(
                 .POST,
-                "/v1.51/services/\(serviceID)/update",
+                "/v1.51/services/\(serviceID)/update?version=1",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(string: #"{"Name":"web-v2","TaskTemplate":{"ContainerSpec":{"Image":"busybox"}}}"#)
             ) { response async in
@@ -287,6 +288,21 @@ private actor ControlPlaneRuntimeMock: DockerControlPlaneRuntime {
 
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws {
         deletedIDs.append(id)
+    }
+
+    func inspectContainer(id: String) async throws -> DockerRuntimeContainer {
+        DockerRuntimeContainer(
+            id: id,
+            name: id,
+            image: "example.test/service:latest",
+            command: [],
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            state: .running,
+            exitCode: nil,
+            labels: [:],
+            tty: false,
+            ports: []
+        )
     }
 
     func logs(id: String, stdout: Bool, stderr: Bool) async throws -> DockerRuntimeProcessOutput {

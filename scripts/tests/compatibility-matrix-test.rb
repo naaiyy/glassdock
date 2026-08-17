@@ -101,19 +101,13 @@ assert(
   ).include?("not declared"),
   "undeclared statuses must fail the contract probe"
 )
-assert(
-  validate_contract_response(
-    {"method" => "POST", "path" => "/plugins/create", "support" => "partial", "responseStatuses" => [204, 500]},
-    501,
-    '{"message":"not implemented"}',
-    "application/json"
-  ).nil?,
-  "partial rows may explicitly expose a 501 capability boundary"
-)
-
 generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
 operations = generated_matrix.fetch("operations")
 assert(operations.size == 107, "the generated matrix must contain 107 operations")
+assert(
+  operations.all? { |row| row.fetch("support") == "implemented" },
+  "every Moby v1.51 operation must be marked implemented"
+)
 assert(
   operations.all? { |row| !contract_path(row.fetch("path")).empty? && !contract_body(row).nil? },
   "every matrix operation must have an executable contract request"
@@ -134,6 +128,8 @@ assert(
   contract_path("/images/{name}/tag").include?("repo=glassdock-compat-tag"),
   "image tag contracts must include the repository query"
 )
+assert(contract_path("/plugins/privileges").include?("remote="), "plugin privilege contracts must include remote")
+assert(contract_path("/volumes/{name}").include?("version=1"), "volume update contracts must include version")
 fixture_paths = %w[
   /containers/{id}/exec /exec/{id}/start /networks/{id}/connect
   /networks/{id}/disconnect /services/{id}/update /volumes/{name}

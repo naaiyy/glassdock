@@ -71,7 +71,8 @@ type ImageDeleteRequest struct {
 	Force     bool   `json:"force,omitempty"`
 }
 type ImagePruneRequest struct {
-	All bool `json:"all,omitempty"`
+	All     bool                `json:"all,omitempty"`
+	Filters map[string][]string `json:"filters,omitempty"`
 }
 type ImageTagRequest struct {
 	Source string `json:"source"`
@@ -97,15 +98,17 @@ type ImageCommitRequest struct {
 	Changes    string `json:"changes,omitempty"`
 }
 type ImageImportRequest struct {
-	Data []byte `json:"data"`
+	Data      []byte `json:"data,omitempty"`
+	Reference string `json:"reference,omitempty"`
 }
 type ImageImportResponse struct {
 	Images []ImageResponse `json:"images"`
 }
 type ImageBuildRequest struct {
-	Context    []byte   `json:"context"`
-	Dockerfile string   `json:"dockerfile,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
+	Context    []byte            `json:"context"`
+	Dockerfile string            `json:"dockerfile,omitempty"`
+	Tags       []string          `json:"tags,omitempty"`
+	BuildArgs  map[string]string `json:"buildArgs,omitempty"`
 }
 type ImageBuildResponse struct {
 	Image ImageResponse `json:"image"`
@@ -117,8 +120,28 @@ type Image struct {
 	CreatedAt    time.Time         `json:"createdAt"`
 	Size         int64             `json:"size"`
 	Labels       map[string]string `json:"labels,omitempty"`
+	Author       string            `json:"author,omitempty"`
+	Architecture string            `json:"architecture,omitempty"`
+	OS           string            `json:"os,omitempty"`
+	OSVersion    string            `json:"osVersion,omitempty"`
+	Variant      string            `json:"variant,omitempty"`
+	Config       ImageConfig       `json:"config,omitempty"`
 	RootFSLayers []string          `json:"rootfsLayers,omitempty"`
 	History      []ImageHistory    `json:"history,omitempty"`
+}
+type ImageConfig struct {
+	User         string              `json:"user,omitempty"`
+	ExposedPorts map[string]struct{} `json:"exposedPorts,omitempty"`
+	Env          []string            `json:"env,omitempty"`
+	Entrypoint   []string            `json:"entrypoint,omitempty"`
+	Cmd          []string            `json:"cmd,omitempty"`
+	Volumes      map[string]struct{} `json:"volumes,omitempty"`
+	WorkingDir   string              `json:"workingDir,omitempty"`
+	Labels       map[string]string   `json:"labels,omitempty"`
+	StopSignal   string              `json:"stopSignal,omitempty"`
+	Healthcheck  *HealthConfig       `json:"healthcheck,omitempty"`
+	OnBuild      []string            `json:"onBuild,omitempty"`
+	Shell        []string            `json:"shell,omitempty"`
 }
 type ImageHistory struct {
 	Created   time.Time `json:"created"`
@@ -180,7 +203,17 @@ type ContainerCreateRequest struct {
 	Network        Network           `json:"network,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
 	AutoRemove     bool              `json:"autoRemove,omitempty"`
+	AttachStdin    bool              `json:"attachStdin,omitempty"`
+	OpenStdin      bool              `json:"openStdin,omitempty"`
+	StdinOnce      bool              `json:"stdinOnce,omitempty"`
 	StopTimeout    *int              `json:"stopTimeout,omitempty"`
+	Healthcheck    *HealthConfig     `json:"healthcheck,omitempty"`
+	RestartPolicy  RestartPolicy     `json:"restartPolicy,omitempty"`
+	Resources      Resources         `json:"resources,omitempty"`
+	StopSignal     string            `json:"stopSignal,omitempty"`
+	DNS            []string          `json:"dns,omitempty"`
+	DNSSearch      []string          `json:"dnsSearch,omitempty"`
+	ExtraHosts     []string          `json:"extraHosts,omitempty"`
 	Snapshotter    string            `json:"snapshotter,omitempty"`
 	Runtime        string            `json:"runtime,omitempty"`
 	RuntimeBinary  string            `json:"runtimeBinary,omitempty"`
@@ -202,31 +235,55 @@ type DockerPortBinding struct {
 type ContainerMetadata struct {
 	Name           string              `json:"name,omitempty"`
 	Args           []string            `json:"args,omitempty"`
+	Entrypoint     []string            `json:"entrypoint,omitempty"`
+	Cmd            []string            `json:"cmd,omitempty"`
+	Env            []string            `json:"env,omitempty"`
+	Cwd            string              `json:"cwd,omitempty"`
+	User           string              `json:"user,omitempty"`
+	Hostname       string              `json:"hostname,omitempty"`
 	Labels         map[string]string   `json:"labels,omitempty"`
 	Terminal       bool                `json:"terminal,omitempty"`
+	AttachStdin    bool                `json:"attachStdin,omitempty"`
+	OpenStdin      bool                `json:"openStdin,omitempty"`
+	StdinOnce      bool                `json:"stdinOnce,omitempty"`
 	AutoRemove     bool                `json:"autoRemove,omitempty"`
+	Mounts         []Mount             `json:"mounts,omitempty"`
+	ReadonlyRootfs bool                `json:"readonlyRootfs,omitempty"`
+	DNS            []string            `json:"dns,omitempty"`
+	DNSSearch      []string            `json:"dnsSearch,omitempty"`
+	ExtraHosts     []string            `json:"extraHosts,omitempty"`
 	PortBindings   []DockerPortBinding `json:"portBindings,omitempty"`
 	PublishedPorts []PublishedPort     `json:"publishedPorts,omitempty"`
 	LifecycleState string              `json:"lifecycleState,omitempty"`
 	LastExitCode   *uint32             `json:"lastExitCode,omitempty"`
+	Healthcheck    *HealthConfig       `json:"healthcheck,omitempty"`
+	Health         *Health             `json:"health,omitempty"`
+	RestartPolicy  RestartPolicy       `json:"restartPolicy,omitempty"`
+	RestartCount   int                 `json:"restartCount,omitempty"`
+	Resources      Resources           `json:"resources,omitempty"`
+	NetworkMode    string              `json:"networkMode,omitempty"`
+	StopSignal     string              `json:"stopSignal,omitempty"`
 }
 type ContainerMetadataUpdateRequest struct {
 	ID           string              `json:"id"`
 	Name         string              `json:"name,omitempty"`
 	PortBindings []DockerPortBinding `json:"portBindings,omitempty"`
+	RestartCount *int                `json:"restartCount,omitempty"`
 }
 
 type ContainerUpdateRequest struct {
-	ID                string  `json:"id"`
-	CPUShares         *uint64 `json:"cpuShares,omitempty"`
-	Memory            *int64  `json:"memory,omitempty"`
-	MemorySwap        *int64  `json:"memorySwap,omitempty"`
-	MemoryReservation *int64  `json:"memoryReservation,omitempty"`
-	CPUPeriod         *uint64 `json:"cpuPeriod,omitempty"`
-	CPUQuota          *int64  `json:"cpuQuota,omitempty"`
-	CPUSetCPUs        *string `json:"cpusetCpus,omitempty"`
-	CPUSetMems        *string `json:"cpusetMems,omitempty"`
-	PidsLimit         *int64  `json:"pidsLimit,omitempty"`
+	ID                string         `json:"id"`
+	NanoCPUs          *int64         `json:"nanoCPUs,omitempty"`
+	CPUShares         *uint64        `json:"cpuShares,omitempty"`
+	Memory            *int64         `json:"memory,omitempty"`
+	MemorySwap        *int64         `json:"memorySwap,omitempty"`
+	MemoryReservation *int64         `json:"memoryReservation,omitempty"`
+	CPUPeriod         *uint64        `json:"cpuPeriod,omitempty"`
+	CPUQuota          *int64         `json:"cpuQuota,omitempty"`
+	CPUSetCPUs        *string        `json:"cpusetCpus,omitempty"`
+	CPUSetMems        *string        `json:"cpusetMems,omitempty"`
+	PidsLimit         *int64         `json:"pidsLimit,omitempty"`
+	RestartPolicy     *RestartPolicy `json:"restartPolicy,omitempty"`
 }
 
 type ContainerUpdateResponse struct {
@@ -241,6 +298,46 @@ type Mount struct {
 	Type     string   `json:"type"`
 	Readonly bool     `json:"readonly,omitempty"`
 	Options  []string `json:"options,omitempty"`
+}
+
+type HealthConfig struct {
+	Test          []string `json:"test,omitempty"`
+	Interval      int64    `json:"interval,omitempty"`
+	Timeout       int64    `json:"timeout,omitempty"`
+	Retries       int      `json:"retries,omitempty"`
+	StartPeriod   int64    `json:"startPeriod,omitempty"`
+	StartInterval int64    `json:"startInterval,omitempty"`
+}
+
+type HealthcheckResult struct {
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
+	ExitCode int       `json:"exitCode"`
+	Output   string    `json:"output,omitempty"`
+}
+
+type Health struct {
+	Status        string              `json:"status"`
+	FailingStreak int                 `json:"failingStreak"`
+	Log           []HealthcheckResult `json:"log,omitempty"`
+}
+
+type RestartPolicy struct {
+	Name              string `json:"name,omitempty"`
+	MaximumRetryCount int    `json:"maximumRetryCount,omitempty"`
+}
+
+type Resources struct {
+	Memory            int64  `json:"memory,omitempty"`
+	MemorySwap        int64  `json:"memorySwap,omitempty"`
+	MemoryReservation int64  `json:"memoryReservation,omitempty"`
+	NanoCPUs          int64  `json:"nanoCPUs,omitempty"`
+	CPUShares         int64  `json:"cpuShares,omitempty"`
+	CPUPeriod         int64  `json:"cpuPeriod,omitempty"`
+	CPUQuota          int64  `json:"cpuQuota,omitempty"`
+	CPUSetCPUs        string `json:"cpusetCpus,omitempty"`
+	CPUSetMems        string `json:"cpusetMems,omitempty"`
+	PidsLimit         int64  `json:"pidsLimit,omitempty"`
 }
 
 // Network selects the network namespace. Mode is host, private, or path.
@@ -321,6 +418,7 @@ type NetworkEndpoint struct {
 	Name        string   `json:"name"`
 	EndpointID  string   `json:"endpointId"`
 	IPv4Address string   `json:"ipv4Address"`
+	IPv6Address string   `json:"ipv6Address,omitempty"`
 	Gateway     string   `json:"gateway"`
 	Aliases     []string `json:"aliases,omitempty"`
 }
@@ -367,6 +465,7 @@ type ContainerDeleteRequest struct {
 }
 type ContainerLogsRequest struct {
 	ID         string `json:"id"`
+	Logs       bool   `json:"logs,omitempty"`
 	Stdout     bool   `json:"stdout,omitempty"`
 	Stderr     bool   `json:"stderr,omitempty"`
 	Timestamps bool   `json:"timestamps,omitempty"`
@@ -470,13 +569,14 @@ type PidsStats struct {
 	Current uint64 `json:"current,omitempty"`
 }
 type ContainerExecRequest struct {
-	ID       string   `json:"id"`
-	ExecID   string   `json:"execId"`
-	Args     []string `json:"args"`
-	Env      []string `json:"env,omitempty"`
-	Cwd      string   `json:"cwd,omitempty"`
-	User     string   `json:"user,omitempty"`
-	Terminal bool     `json:"terminal,omitempty"`
+	ID          string   `json:"id"`
+	ExecID      string   `json:"execId"`
+	Args        []string `json:"args"`
+	Env         []string `json:"env,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	User        string   `json:"user,omitempty"`
+	Terminal    bool     `json:"terminal,omitempty"`
+	AttachStdin bool     `json:"attachStdin,omitempty"`
 }
 type ExecResizeRequest struct {
 	ID     string `json:"id"`
@@ -494,6 +594,7 @@ type Container struct {
 	SizeRootFs     int64             `json:"sizeRootFs,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
 	Metadata       ContainerMetadata `json:"metadata,omitempty"`
+	Health         *Health           `json:"health,omitempty"`
 }
 type ContainerListResponse struct {
 	Containers []Container `json:"containers"`
@@ -505,4 +606,9 @@ type ContainerExitEvent struct {
 	ID       string    `json:"id"`
 	ExitCode uint32    `json:"exitCode"`
 	ExitedAt time.Time `json:"exitedAt"`
+}
+
+type ContainerWaitRequest struct {
+	ID        string `json:"id"`
+	Condition string `json:"condition,omitempty"`
 }

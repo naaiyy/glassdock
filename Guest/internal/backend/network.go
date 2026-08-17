@@ -60,6 +60,7 @@ type networkEndpoint struct {
 	interfaceName string
 	endpointID    string
 	address       string
+	ipv6Address   string
 	aliases       []string
 }
 
@@ -67,6 +68,7 @@ type NetworkEndpoint struct {
 	ContainerID string
 	EndpointID  string
 	Address     string
+	IPv6Address string
 }
 
 type managedNetwork struct {
@@ -86,6 +88,8 @@ type managedNetwork struct {
 	attachable bool
 	ingress    bool
 	ipamDriver string
+	ipRange    *net.IPNet
+	auxiliary  map[string]string
 	containers map[string]*networkEndpoint
 }
 
@@ -177,18 +181,23 @@ func (m *NetworkManager) CreateNetwork(request api.NetworkCreateRequest) (api.Ne
 		return api.NetworkResource{}, err
 	}
 	requestedSubnet, requestedGateway := request.Subnet, request.Gateway
+	requestedIPRange := ""
+	requestedAuxiliary := map[string]string{}
 	ipamDriver := "default"
 	if request.IPAM != nil {
 		if request.IPAM.Driver != "" {
 			ipamDriver = request.IPAM.Driver
 		}
 		if len(request.IPAM.Config) > 0 {
-			if request.IPAM.Config[0].Subnet != "" {
-				requestedSubnet = request.IPAM.Config[0].Subnet
+			config := request.IPAM.Config[0]
+			if config.Subnet != "" {
+				requestedSubnet = config.Subnet
 			}
-			if request.IPAM.Config[0].Gateway != "" {
-				requestedGateway = request.IPAM.Config[0].Gateway
+			if config.Gateway != "" {
+				requestedGateway = config.Gateway
 			}
+			requestedIPRange = config.IPRange
+			requestedAuxiliary = cloneStringMap(config.AuxiliaryAddresses)
 		}
 	}
 	subnet, gateway, err := m.allocateSubnetLocked(requestedSubnet, requestedGateway)
@@ -197,7 +206,22 @@ func (m *NetworkManager) CreateNetwork(request api.NetworkCreateRequest) (api.Ne
 	}
 	id := networkID(request.Name, subnet.String())
 	bridge := networkBridgeName(id)
-	if err := m.createBridge(bridge, subnet, gateway); err != nil {
+	var ipRange *net.IPNet
+	if requestedIPRange != "" {
+		_, parsed, parseErr := net.ParseCIDR(requestedIPRange)
+		if parseErr != nil || parsed.IP.To4() == nil || !subnet.Contains(parsed.IP) || !subnet.Contains(lastIP(parsed)) {
+			return api.NetworkResource{}, fmt.Errorf("invalid IP range %q for subnet %s", requestedIPRange, subnet)
+		}
+		ipRange = parsed
+	}
+	for name, address := range requestedAuxiliary {
+		parsed := net.ParseIP(address).To4()
+		if parsed == nil || !subnet.Contains(parsed) || parsed.String() == gateway {
+			return api.NetworkResource{}, fmt.Errorf("invalid auxiliary address %q for subnet %s", address, subnet)
+		}
+		requestedAuxiliary[name] = parsed.String()
+	}
+	if err := m.createBridge(bridge, subnet, gateway, request.Internal); err != nil {
 		return api.NetworkResource{}, err
 	}
 	driver := valueOrNetwork(request.Driver, "bridge")
@@ -222,6 +246,7 @@ func (m *NetworkManager) CreateNetwork(request api.NetworkCreateRequest) (api.Ne
 		driver: driver, scope: scope, createdAt: time.Now().UTC(), labels: cloneStringMap(request.Labels),
 		options: cloneStringMap(request.Options), internal: request.Internal, enableIPv4: enableIPv4,
 		enableIPv6: request.EnableIPv6, attachable: attachable, ingress: ingress, ipamDriver: ipamDriver,
+		ipRange: ipRange, auxiliary: requestedAuxiliary,
 		containers: make(map[string]*networkEndpoint),
 	}
 	m.networks[id] = network
@@ -276,9 +301,10 @@ func (m *NetworkManager) Summaries(containerNames map[string]string) []api.Netwo
 func (m *NetworkManager) Connect(
 	networkID, containerID, containerName, ipv4Address, ipv6Address string, running bool,
 ) error {
-	if running {
-		return errors.New("network hot attach is not supported for running container")
-	}
+	// A container namespace stays alive for the full container lifetime. The
+	// native attachment implementation can therefore add and remove veth pairs
+	// while the init task is running, matching Docker's hot-connect behavior.
+	_ = running
 	_, err := m.ConnectNetwork(api.NetworkConnectRequest{
 		NetworkID: networkID, ContainerID: containerID, Aliases: []string{containerName},
 		IPv4Address: ipv4Address, IPv6Address: ipv6Address,
@@ -308,7 +334,10 @@ func (m *NetworkManager) Endpoints() []NetworkEndpoint {
 		if endpoint == nil {
 			continue
 		}
-		result = append(result, NetworkEndpoint{ContainerID: id, EndpointID: endpoint.endpointID, Address: endpoint.address})
+		result = append(result, NetworkEndpoint{
+			ContainerID: id, EndpointID: endpoint.endpointID, Address: endpoint.address,
+			IPv6Address: endpoint.ipv6Address,
+		})
 	}
 	return result
 }
@@ -390,9 +419,24 @@ func (m *NetworkManager) ConnectNetwork(request api.NetworkConnectRequest) (api.
 	if _, exists := network.containers[request.ContainerID]; exists {
 		return api.NetworkResource{}, fmt.Errorf("container %s is already connected to network %s", request.ContainerID, network.name)
 	}
-	address, err := m.allocateAddressLocked(network, request.IPv4Address)
-	if err != nil {
-		return api.NetworkResource{}, err
+	if request.IPv6Address != "" {
+		if !network.enableIPv6 {
+			return api.NetworkResource{}, fmt.Errorf("network %s does not have IPv6 enabled", network.name)
+		}
+		parsed := net.ParseIP(request.IPv6Address)
+		if parsed == nil || parsed.To4() != nil {
+			return api.NetworkResource{}, fmt.Errorf("invalid IPv6 address %q", request.IPv6Address)
+		}
+	}
+	address := ""
+	var err error
+	if network.enableIPv4 {
+		address, err = m.allocateAddressLocked(network, request.IPv4Address)
+		if err != nil {
+			return api.NetworkResource{}, err
+		}
+	} else if request.IPv4Address != "" {
+		return api.NetworkResource{}, fmt.Errorf("network %s does not have IPv4 enabled", network.name)
 	}
 	interfaceName := fmt.Sprintf("eth%d", len(container.endpoints))
 	endpointID := endpointName(network.id, request.ContainerID)
@@ -405,7 +449,7 @@ func (m *NetworkManager) ConnectNetwork(request api.NetworkConnectRequest) (api.
 	aliases := normalizeAliases(request.Aliases, container)
 	endpoint := &networkEndpoint{
 		networkID: network.id, interfaceName: interfaceName, endpointID: endpointID,
-		address: address, aliases: aliases,
+		address: address, ipv6Address: normalizeIPv6Address(network, request.IPv6Address), aliases: aliases,
 	}
 	container.endpoints[network.id] = endpoint
 	network.containers[request.ContainerID] = endpoint
@@ -533,7 +577,8 @@ func (m *NetworkManager) ensureDefaultNetwork() (*managedNetwork, error) {
 		id: defaultNetworkID, name: "bridge", bridge: bridgeName, subnet: subnet,
 		gateway: "10.88.0.1", driver: "bridge", createdAt: time.Unix(0, 0).UTC(),
 		scope: "local", labels: map[string]string{}, options: map[string]string{}, enableIPv4: true,
-		attachable: false, ipamDriver: "default", containers: make(map[string]*networkEndpoint),
+		enableIPv6: false, attachable: false, ipamDriver: "default", auxiliary: map[string]string{},
+		containers: make(map[string]*networkEndpoint),
 	}
 	m.networks[network.id] = network
 	return network, nil
@@ -565,7 +610,8 @@ func (m *NetworkManager) networkResourceLocked(network *managedNetwork) api.Netw
 		}
 		containers[id] = api.NetworkEndpoint{
 			Name: name, EndpointID: endpoint.endpointID, IPv4Address: endpoint.address,
-			Gateway: network.gateway, Aliases: append([]string(nil), endpoint.aliases...),
+			IPv6Address: endpoint.ipv6Address, Gateway: network.gateway,
+			Aliases: append([]string(nil), endpoint.aliases...),
 		}
 	}
 	return api.NetworkResource{
@@ -574,7 +620,10 @@ func (m *NetworkManager) networkResourceLocked(network *managedNetwork) api.Netw
 		Internal: network.internal, Attachable: network.attachable, Ingress: network.ingress,
 		IPAM: api.NetworkIPAM{
 			Driver: valueOrNetwork(network.ipamDriver, "default"),
-			Config: []api.NetworkIPAMConfig{{Subnet: network.subnet.String(), Gateway: network.gateway}},
+			Config: []api.NetworkIPAMConfig{{
+				Subnet: network.subnet.String(), IPRange: ipRangeString(network.ipRange),
+				Gateway: network.gateway, AuxiliaryAddresses: cloneStringMap(network.auxiliary),
+			}},
 		},
 		Subnet: network.subnet.String(), Gateway: network.gateway,
 		Options: cloneStringMap(network.options), Labels: cloneStringMap(network.labels), Containers: containers,
@@ -629,9 +678,13 @@ func (m *NetworkManager) subnetOverlapsLocked(candidate *net.IPNet) bool {
 }
 
 func (m *NetworkManager) allocateAddressLocked(network *managedNetwork, requested string) (string, error) {
+	pool := network.subnet
+	if network.ipRange != nil {
+		pool = network.ipRange
+	}
 	if requested != "" {
 		address := net.ParseIP(requested).To4()
-		if address == nil || !network.subnet.Contains(address) || address.String() == network.gateway {
+		if address == nil || !pool.Contains(address) || address.String() == network.gateway {
 			return "", fmt.Errorf("IPv4 address %q is outside network %s", requested, network.name)
 		}
 		for _, endpoint := range network.containers {
@@ -641,9 +694,12 @@ func (m *NetworkManager) allocateAddressLocked(network *managedNetwork, requeste
 		}
 		return address.String(), nil
 	}
-	base := binaryIP(network.subnet.IP.To4())
+	base := binaryIP(pool.IP.To4())
 	first := binaryIP(net.ParseIP(network.gateway).To4()) + 1
-	maskSize, bits := network.subnet.Mask.Size()
+	if !pool.Contains(net.ParseIP(network.gateway).To4()) {
+		first = base + 1
+	}
+	maskSize, bits := pool.Mask.Size()
 	limit := uint32(1) << uint32(bits-maskSize)
 	for offset := first - base; offset < limit-1; offset++ {
 		candidate := uint32ToIP(base + offset).String()
@@ -661,15 +717,19 @@ func (m *NetworkManager) allocateAddressLocked(network *managedNetwork, requeste
 	return "", fmt.Errorf("network %s address space is exhausted", network.name)
 }
 
-func (m *NetworkManager) createBridge(bridge string, subnet *net.IPNet, gateway string) error {
+func (m *NetworkManager) createBridge(bridge string, subnet *net.IPNet, gateway string, internal bool) error {
 	prefix, _ := subnet.Mask.Size()
 	commands := [][]string{
 		{"ip", "link", "add", bridge, "type", "bridge"},
 		{"ip", "addr", "add", fmt.Sprintf("%s/%d", gateway, prefix), "dev", bridge},
 		{"ip", "link", "set", bridge, "up"},
-		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "!", "-o", bridge, "-j", "MASQUERADE"},
-		{"iptables", "-A", "FORWARD", "-i", bridge, "-j", "ACCEPT"},
-		{"iptables", "-A", "FORWARD", "-o", bridge, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+	}
+	if !internal {
+		commands = append(commands,
+			[]string{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", subnet.String(), "!", "-o", bridge, "-j", "MASQUERADE"},
+			[]string{"iptables", "-A", "FORWARD", "-i", bridge, "-j", "ACCEPT"},
+			[]string{"iptables", "-A", "FORWARD", "-o", bridge, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+		)
 	}
 	for _, command := range commands {
 		if err := m.runner.Run(command[0], command[1:]...); err != nil {
@@ -776,6 +836,33 @@ func valueOrNetwork(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func ipRangeString(value *net.IPNet) string {
+	if value == nil {
+		return ""
+	}
+	return value.String()
+}
+
+func lastIP(network *net.IPNet) net.IP {
+	last := append(net.IP(nil), network.IP.To4()...)
+	mask := network.Mask
+	for index := range last {
+		last[index] |= ^mask[len(mask)-len(last)+index]
+	}
+	return last
+}
+
+func normalizeIPv6Address(network *managedNetwork, requested string) string {
+	if requested == "" || !network.enableIPv6 {
+		return ""
+	}
+	parsed := net.ParseIP(requested)
+	if parsed == nil || parsed.To4() != nil {
+		return ""
+	}
+	return parsed.String()
 }
 
 func validateNetworkName(name string) error {
@@ -956,7 +1043,9 @@ func (m *NetworkManager) initialize() error {
 		m.networks[defaultNetworkID] = &managedNetwork{
 			id: defaultNetworkID, name: "bridge", bridge: bridgeName, subnet: subnet,
 			gateway: "10.88.0.1", driver: "bridge", createdAt: time.Unix(0, 0).UTC(),
-			labels: map[string]string{}, containers: make(map[string]*networkEndpoint),
+			labels: map[string]string{}, options: map[string]string{}, enableIPv4: true,
+			enableIPv6: false, attachable: false, ipamDriver: "default",
+			auxiliary: map[string]string{}, containers: make(map[string]*networkEndpoint),
 		}
 	}
 	return nil

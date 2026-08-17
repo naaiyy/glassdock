@@ -14,11 +14,11 @@ func (b *Backend) ImportImages(ctx context.Context, request api.ImageImportReque
 	if len(request.Data) == 0 {
 		return api.ImageImportResponse{}, errors.New("image archive is empty")
 	}
-	imported, err := b.client.Import(
-		b.ctx(ctx),
-		bytes.NewReader(request.Data),
-		containerd.WithAllPlatforms(true),
-	)
+	options := []containerd.ImportOpt{containerd.WithAllPlatforms(true)}
+	if request.Reference != "" {
+		options = append(options, containerd.WithIndexName(request.Reference))
+	}
+	imported, err := b.client.Import(b.ctx(ctx), bytes.NewReader(request.Data), options...)
 	if err != nil {
 		return api.ImageImportResponse{}, err
 	}

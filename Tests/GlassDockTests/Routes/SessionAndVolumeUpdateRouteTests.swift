@@ -49,7 +49,7 @@ struct SessionAndVolumeUpdateRouteTests {
             )
             try await app.testing().test(
                 .PUT,
-                "/v1.51/volumes/data",
+                "/v1.51/volumes/data?version=1",
                 headers: ["Content-Type": "application/json"],
                 body: ByteBuffer(
                     string: #"{"Labels":{"tier":"new"},"DriverOpts":{"sync":"full"}}"#

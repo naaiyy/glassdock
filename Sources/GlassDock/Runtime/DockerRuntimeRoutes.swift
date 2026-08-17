@@ -6,14 +6,17 @@ enum EngineContainerState: String, Sendable, Equatable {
     case created
     case running
     case paused
+    case restarting
     case exited
 }
 
 enum DockerRuntimeGuestLimits {
-    // Base64 encoding and the JSON envelope leave headroom below the guest's
-    // 16 MiB frame limit. Larger archives need a streaming upload protocol.
-    static let maximumImportArchiveBytes = 10 * 1024 * 1024
-    static let maximumBuildContextBytes = 8 * 1024 * 1024
+    // Uploads use the guest stdin stream protocol, so the request itself stays
+    // below the 16 MiB frame limit. The application body limit remains the
+    // final bound for a single Docker request.
+    static let maximumImportArchiveBytes = 64 * 1024 * 1024
+    static let maximumBuildContextBytes = 64 * 1024 * 1024
+    static let maximumContainerArchiveBytes = 64 * 1024 * 1024
 }
 
 /// The Docker-facing operations needed by the runtime benchmark and its live
@@ -119,6 +122,30 @@ protocol DockerRuntimeLogOptionsBackend: DockerRuntimeRouteBackend {
     ) async throws -> DockerRuntimeProcessOutput
     func attachContainer(
         id: String, stdout: Bool, stderr: Bool, options: DockerRuntimeLogOptions
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+}
+
+protocol DockerRuntimeImageImportBackend: DockerRuntimeRouteBackend {
+    func importImages(data: Data, reference: String?) async throws -> [DockerRuntimeImage]
+}
+
+protocol DockerRuntimeImagePruneBackend: Sendable {
+    func pruneImages(all: Bool, filters: [String: [String]]) async throws -> DockerRuntimeImageDelete
+}
+
+protocol DockerRuntimeImageBuildOptionsBackend: Sendable {
+    func buildImage(
+        context: Data, dockerfile: String, tags: [String], buildArgs: [String: String]
+    ) async throws -> DockerRuntimeImage
+}
+
+protocol DockerRuntimeInteractiveBackend: DockerRuntimeRouteBackend {
+    func streamExec(
+        id: String, tty: Bool, onInput: GuestInputRelay?
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+    func attachContainer(
+        id: String, stdout: Bool, stderr: Bool, options: DockerRuntimeLogOptions,
+        onInput: GuestInputRelay?
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
 }
 
@@ -290,13 +317,22 @@ struct DockerRuntimeImage: Sendable, Equatable {
     let createdAt: Date
     let size: Int64
     let labels: [String: String]
+    let author: String
+    let architecture: String
+    let os: String
+    let osVersion: String
+    let variant: String
+    let config: DockerRuntimeImageConfig
     let rootFSLayers: [String]
     let history: [DockerRuntimeImageHistory]
 
     init(
         reference: String, digest: String, references: [String] = [],
         createdAt: Date = Date(timeIntervalSince1970: 0), size: Int64 = 0,
-        labels: [String: String] = [:], rootFSLayers: [String] = [],
+        labels: [String: String] = [:], author: String = "",
+        architecture: String = "", os: String = "", osVersion: String = "",
+        variant: String = "", config: DockerRuntimeImageConfig = .init(),
+        rootFSLayers: [String] = [],
         history: [DockerRuntimeImageHistory] = []
     ) {
         self.reference = reference
@@ -305,8 +341,49 @@ struct DockerRuntimeImage: Sendable, Equatable {
         self.createdAt = createdAt
         self.size = size
         self.labels = labels
+        self.author = author
+        self.architecture = architecture
+        self.os = os
+        self.osVersion = osVersion
+        self.variant = variant
+        self.config = config
         self.rootFSLayers = rootFSLayers
         self.history = history
+    }
+}
+
+struct DockerRuntimeImageConfig: Sendable, Equatable {
+    let user: String
+    let exposedPorts: Set<String>
+    let environment: [String]
+    let entrypoint: [String]
+    let cmd: [String]
+    let volumes: Set<String>
+    let workingDirectory: String
+    let labels: [String: String]
+    let stopSignal: String
+    let healthcheck: DockerRuntimeHealthcheck?
+    let onBuild: [String]
+    let shell: [String]
+
+    init(
+        user: String = "", exposedPorts: Set<String> = [], environment: [String] = [],
+        entrypoint: [String] = [], cmd: [String] = [], volumes: Set<String> = [],
+        workingDirectory: String = "", labels: [String: String] = [:], stopSignal: String = "",
+        healthcheck: DockerRuntimeHealthcheck? = nil, onBuild: [String] = [], shell: [String] = []
+    ) {
+        self.user = user
+        self.exposedPorts = exposedPorts
+        self.environment = environment
+        self.entrypoint = entrypoint
+        self.cmd = cmd
+        self.volumes = volumes
+        self.workingDirectory = workingDirectory
+        self.labels = labels
+        self.stopSignal = stopSignal
+        self.healthcheck = healthcheck
+        self.onBuild = onBuild
+        self.shell = shell
     }
 }
 
@@ -412,7 +489,25 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let source: String
     let target: String
     let readOnly: Bool
+    let type: String
+    let options: [String]
     var volumeName: String? = nil
+
+    init(
+        source: String,
+        target: String,
+        readOnly: Bool,
+        type: String = "bind",
+        options: [String] = [],
+        volumeName: String? = nil
+    ) {
+        self.source = source
+        self.target = target
+        self.readOnly = readOnly
+        self.type = type
+        self.options = options
+        self.volumeName = volumeName
+    }
 }
 
 struct DockerRuntimePortBinding: Codable, Sendable, Equatable {
@@ -444,6 +539,113 @@ struct DockerRuntimePortBinding: Codable, Sendable, Equatable {
     }
 }
 
+struct DockerRuntimeHealthcheck: Codable, Sendable, Equatable {
+    let test: [String]
+    let interval: Int64
+    let timeout: Int64
+    let retries: Int
+    let startPeriod: Int64
+    let startInterval: Int64
+
+    init(
+        test: [String], interval: Int64 = 0, timeout: Int64 = 0, retries: Int = 0,
+        startPeriod: Int64 = 0, startInterval: Int64 = 0
+    ) {
+        self.test = test
+        self.interval = interval
+        self.timeout = timeout
+        self.retries = retries
+        self.startPeriod = startPeriod
+        self.startInterval = startInterval
+    }
+}
+
+struct DockerRuntimeHealth: Codable, Sendable, Equatable {
+    let status: String
+    let failingStreak: Int
+    let log: [HealthcheckResult]
+
+    struct HealthcheckResult: Codable, Sendable, Equatable {
+        let start: Date
+        let end: Date
+        let exitCode: Int32
+        let output: String
+    }
+
+    init(
+        status: String = "none", failingStreak: Int = 0,
+        log: [HealthcheckResult] = []
+    ) {
+        self.status = status
+        self.failingStreak = failingStreak
+        self.log = log
+    }
+}
+
+struct DockerRuntimeRestartPolicy: Codable, Sendable, Equatable {
+    let name: String
+    let maximumRetryCount: Int
+
+    init(name: String = "no", maximumRetryCount: Int = 0) {
+        self.name = name
+        self.maximumRetryCount = maximumRetryCount
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name = "Name"
+        case maximumRetryCount = "MaximumRetryCount"
+        case lowerName = "name"
+        case lowerMaximumRetryCount = "maximumRetryCount"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name =
+            try values.decodeIfPresent(String.self, forKey: .name)
+            ?? values.decodeIfPresent(String.self, forKey: .lowerName) ?? "no"
+        maximumRetryCount =
+            try values.decodeIfPresent(Int.self, forKey: .maximumRetryCount)
+            ?? values.decodeIfPresent(Int.self, forKey: .lowerMaximumRetryCount) ?? 0
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(name, forKey: .name)
+        try values.encode(maximumRetryCount, forKey: .maximumRetryCount)
+    }
+}
+
+struct DockerRuntimeResources: Codable, Sendable, Equatable {
+    let memory: Int64
+    let memorySwap: Int64
+    let memoryReservation: Int64
+    let nanoCPUs: Int64
+    let cpuShares: Int64
+    let cpuPeriod: Int64
+    let cpuQuota: Int64
+    let cpusetCpus: String
+    let cpusetMems: String
+    let pidsLimit: Int64
+
+    init(
+        memory: Int64 = 0, memorySwap: Int64 = 0, memoryReservation: Int64 = 0,
+        nanoCPUs: Int64 = 0, cpuShares: Int64 = 0, cpuPeriod: Int64 = 0,
+        cpuQuota: Int64 = 0, cpusetCpus: String = "", cpusetMems: String = "",
+        pidsLimit: Int64 = 0
+    ) {
+        self.memory = memory
+        self.memorySwap = memorySwap
+        self.memoryReservation = memoryReservation
+        self.nanoCPUs = nanoCPUs
+        self.cpuShares = cpuShares
+        self.cpuPeriod = cpuPeriod
+        self.cpuQuota = cpuQuota
+        self.cpusetCpus = cpusetCpus
+        self.cpusetMems = cpusetMems
+        self.pidsLimit = pidsLimit
+    }
+}
+
 struct DockerRuntimeContainerCreate: Sendable, Equatable {
     let name: String?
     let image: String
@@ -460,6 +662,61 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
     let stopTimeout: Int?
     let mounts: [DockerRuntimeMount]
     let ports: [DockerRuntimePortBinding]
+    let attachStdin: Bool
+    let openStdin: Bool
+    let stdinOnce: Bool
+    let networkMode: String
+    let readonlyRootfs: Bool
+    let healthcheck: DockerRuntimeHealthcheck?
+    let restartPolicy: DockerRuntimeRestartPolicy
+    let restartCount: Int
+    let resources: DockerRuntimeResources
+    let stopSignal: String?
+    let dns: [String]
+    let dnsSearch: [String]
+    let extraHosts: [String]
+
+    init(
+        name: String?, image: String, command: [String], entrypoint: [String]?, cmd: [String]?,
+        environment: [String], workingDirectory: String?, user: String?, hostname: String?,
+        labels: [String: String], tty: Bool, autoRemove: Bool, stopTimeout: Int?,
+        mounts: [DockerRuntimeMount], ports: [DockerRuntimePortBinding],
+        attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
+        networkMode: String = "default", readonlyRootfs: Bool = false,
+        healthcheck: DockerRuntimeHealthcheck? = nil,
+        restartPolicy: DockerRuntimeRestartPolicy = .init(),
+        restartCount: Int = 0, resources: DockerRuntimeResources = .init(), stopSignal: String? = nil,
+        dns: [String] = [], dnsSearch: [String] = [], extraHosts: [String] = []
+    ) {
+        self.name = name
+        self.image = image
+        self.command = command
+        self.entrypoint = entrypoint
+        self.cmd = cmd
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.user = user
+        self.hostname = hostname
+        self.labels = labels
+        self.tty = tty
+        self.autoRemove = autoRemove
+        self.stopTimeout = stopTimeout
+        self.mounts = mounts
+        self.ports = ports
+        self.attachStdin = attachStdin
+        self.openStdin = openStdin
+        self.stdinOnce = stdinOnce
+        self.networkMode = networkMode
+        self.readonlyRootfs = readonlyRootfs
+        self.healthcheck = healthcheck
+        self.restartPolicy = restartPolicy
+        self.restartCount = restartCount
+        self.resources = resources
+        self.stopSignal = stopSignal
+        self.dns = dns
+        self.dnsSearch = dnsSearch
+        self.extraHosts = extraHosts
+    }
 }
 
 struct DockerRuntimeContainer: Sendable, Equatable {
@@ -476,6 +733,28 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let stopTimeout: Int?
     let sizeRw: Int64
     let sizeRootFs: Int64
+    let health: DockerRuntimeHealth
+    let healthcheck: DockerRuntimeHealthcheck?
+    let restartPolicy: DockerRuntimeRestartPolicy
+    let restartCount: Int
+    let resources: DockerRuntimeResources
+    let stopSignal: String
+    let networkMode: String
+    let autoRemove: Bool
+    let entrypoint: [String]?
+    let cmd: [String]?
+    let environment: [String]
+    let workingDirectory: String
+    let user: String
+    let hostname: String
+    let attachStdin: Bool
+    let openStdin: Bool
+    let stdinOnce: Bool
+    let mounts: [DockerRuntimeMount]
+    let readonlyRootfs: Bool
+    let dns: [String]
+    let dnsSearch: [String]
+    let extraHosts: [String]
 
     init(
         id: String,
@@ -490,7 +769,18 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         ports: [DockerRuntimePortBinding],
         sizeRw: Int64 = -1,
         sizeRootFs: Int64 = -1,
-        stopTimeout: Int? = nil
+        stopTimeout: Int? = nil,
+        health: DockerRuntimeHealth = .init(),
+        healthcheck: DockerRuntimeHealthcheck? = nil,
+        restartPolicy: DockerRuntimeRestartPolicy = .init(),
+        restartCount: Int = 0,
+        resources: DockerRuntimeResources = .init(),
+        stopSignal: String = "", networkMode: String = "default", autoRemove: Bool = false,
+        entrypoint: [String]? = nil, cmd: [String]? = nil, environment: [String] = [],
+        workingDirectory: String = "", user: String = "", hostname: String = "",
+        attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
+        mounts: [DockerRuntimeMount] = [], readonlyRootfs: Bool = false,
+        dns: [String] = [], dnsSearch: [String] = [], extraHosts: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -505,10 +795,33 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         self.sizeRw = sizeRw
         self.sizeRootFs = sizeRootFs
         self.stopTimeout = stopTimeout
+        self.health = health
+        self.healthcheck = healthcheck
+        self.restartPolicy = restartPolicy
+        self.restartCount = restartCount
+        self.resources = resources
+        self.stopSignal = stopSignal
+        self.networkMode = networkMode
+        self.autoRemove = autoRemove
+        self.entrypoint = entrypoint
+        self.cmd = cmd
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.user = user
+        self.hostname = hostname
+        self.attachStdin = attachStdin
+        self.openStdin = openStdin
+        self.stdinOnce = stdinOnce
+        self.mounts = mounts
+        self.readonlyRootfs = readonlyRootfs
+        self.dns = dns
+        self.dnsSearch = dnsSearch
+        self.extraHosts = extraHosts
     }
 }
 
 struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
+    let nanoCPUs: Int64?
     let cpuShares: Int64?
     let memory: Int64?
     let memorySwap: Int64?
@@ -518,8 +831,10 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
     let cpusetCpus: String?
     let cpusetMems: String?
     let pidsLimit: Int64?
+    let restartPolicy: DockerRuntimeRestartPolicy?
 
     enum CodingKeys: String, CodingKey, CaseIterable {
+        case nanoCPUs = "NanoCpus"
         case cpuShares = "CpuShares"
         case memory = "Memory"
         case memorySwap = "MemorySwap"
@@ -529,6 +844,7 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
         case cpusetCpus = "CpusetCpus"
         case cpusetMems = "CpusetMems"
         case pidsLimit = "PidsLimit"
+        case restartPolicy = "RestartPolicy"
     }
 
     static let supportedDockerFields = Set(CodingKeys.allCases.map(\.stringValue))
@@ -536,6 +852,9 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
     func validate() throws {
         if let cpuShares, cpuShares < 0 {
             throw DockerRuntimeRouteError.invalidRequest("CpuShares must be non-negative")
+        }
+        if let nanoCPUs, nanoCPUs < 0 {
+            throw DockerRuntimeRouteError.invalidRequest("NanoCpus must be non-negative")
         }
         if let memory, memory < 0 {
             throw DockerRuntimeRouteError.invalidRequest("Memory must be non-negative")
@@ -554,6 +873,16 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
         }
         if let pidsLimit, pidsLimit < -1 {
             throw DockerRuntimeRouteError.invalidRequest("PidsLimit must be -1 or non-negative")
+        }
+        if let restartPolicy, !["", "no", "always", "unless-stopped", "on-failure"].contains(restartPolicy.name) {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "RestartPolicy.Name must be no, always, unless-stopped, or on-failure"
+            )
+        }
+        if let restartPolicy, restartPolicy.maximumRetryCount < 0 {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "RestartPolicy.MaximumRetryCount must be non-negative"
+            )
         }
     }
 }
@@ -602,6 +931,7 @@ struct DockerRuntimeExecCreate: Sendable, Equatable {
     let workingDirectory: String?
     let user: String?
     let tty: Bool
+    let attachStdin: Bool
     let attachStdout: Bool
     let attachStderr: Bool
 }
@@ -736,7 +1066,10 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func buildImage(_ req: Request) async throws -> Response {
         guard
             let buffer = try await req.body.collect(
-                max: DockerRuntimeGuestLimits.maximumBuildContextBytes
+                max: min(
+                    req.application.routes.defaultMaxBodySize.value,
+                    DockerRuntimeGuestLimits.maximumBuildContextBytes
+                )
             ).get(),
             let context = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
             !context.isEmpty
@@ -749,8 +1082,18 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "dockerfile must not be empty")
         }
         let tags = req.query[String.self, at: "t"]?.split(separator: ",").map(String.init) ?? []
-        let image = try await call {
-            try await backend.buildImage(context: context, dockerfile: dockerfile, tags: tags)
+        let buildArgs = try Self.buildArguments(req.query[String.self, at: "buildargs"])
+        let image: DockerRuntimeImage
+        if let optionsBackend = backend as? any DockerRuntimeImageBuildOptionsBackend {
+            image = try await call {
+                try await optionsBackend.buildImage(
+                    context: context, dockerfile: dockerfile, tags: tags, buildArgs: buildArgs
+                )
+            }
+        } else {
+            image = try await call {
+                try await backend.buildImage(context: context, dockerfile: dockerfile, tags: tags)
+            }
         }
 
         struct BuildProgress: Encodable {
@@ -812,13 +1155,33 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func importImage(_ req: Request) async throws -> Response {
         guard
-            let buffer = try await req.body.collect(max: DockerRuntimeGuestLimits.maximumImportArchiveBytes).get(),
+            let buffer = try await req.body.collect(
+                max: min(
+                    req.application.routes.defaultMaxBodySize.value,
+                    DockerRuntimeGuestLimits.maximumImportArchiveBytes
+                )
+            ).get(),
             let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
             !data.isEmpty
         else {
             throw Abort(.badRequest, reason: "Image archive request body is required")
         }
-        let images = try await call { try await backend.importImages(data: data) }
+        let reference: String? = {
+            guard let repository = req.query[String.self, at: "repo"], !repository.isEmpty else {
+                return nil
+            }
+            return Self.imageReference(
+                fromImage: repository, tag: req.query[String.self, at: "tag"]
+            )
+        }()
+        let images: [DockerRuntimeImage]
+        if let importer = backend as? any DockerRuntimeImageImportBackend {
+            images = try await call {
+                try await importer.importImages(data: data, reference: reference)
+            }
+        } else {
+            images = try await call { try await backend.importImages(data: data) }
+        }
         var body = Data()
         for image in images {
             body.append(
@@ -841,16 +1204,29 @@ struct DockerRuntimeRoutes: RouteCollection {
         let stopped = containers.count - running - paused
         let environment = ProcessInfo.processInfo.environment
         let info = SystemInfo(
+            ID: "glassdock-\(ProcessInfo.processInfo.hostName)",
             Containers: containers.count,
             ContainersRunning: running,
             ContainersPaused: paused,
             ContainersStopped: stopped,
             Images: images.count,
+            Driver: "overlayfs",
+            DriverStatus: [["Backing Filesystem", "virtualized"]],
             DockerRootDir: GlassDockDirectories.engineStateDirectory.path,
+            Plugins: PluginsInfo(),
+            MemoryLimit: true,
+            SwapLimit: false,
+            CpuCfsPeriod: true,
+            CpuCfsQuota: true,
+            CPUShares: true,
+            CPUSet: true,
+            PidsLimit: true,
+            IPv4Forwarding: true,
             Debug: false,
             KernelVersion: getKernel(),
             OSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             OSType: "linux",
+            OperatingSystem: "Glass Dock guest runtime",
             Architecture: "arm64",
             NCPU: ProcessInfo.processInfo.activeProcessorCount,
             MemTotal: Int64(min(ProcessInfo.processInfo.physicalMemory, UInt64(Int64.max))),
@@ -861,6 +1237,11 @@ struct DockerRuntimeRoutes: RouteCollection {
             Labels: [],
             ExperimentalBuild: false,
             ServerVersion: getBuildVersion(),
+            IndexServerAddress: "https://index.docker.io/v1/",
+            LoggingDriver: "json-file",
+            CgroupDriver: "none",
+            CgroupVersion: "2",
+            SecurityOptions: ["name=seccomp,profile=default"],
             ProductLicense: "Apache-2.0",
             SystemTime: ISO8601DateFormatter().string(from: Date()),
             Warnings: [
@@ -875,7 +1256,24 @@ struct DockerRuntimeRoutes: RouteCollection {
         try Self.validateImageFilters(filters)
         let images = try await call { try await backend.listImages() }
         let filtered = try Self.applyImageFilters(images, filters: filters)
-        return try jsonResponse(.ok, filtered.map(ImageSummary.init))
+        let containers = try await call { try await backend.listContainers(showAll: true) }
+        let includeSharedSize = Self.mobyBool(req.query[String.self, at: "shared-size"])
+        let includeDigests = Self.mobyBool(req.query[String.self, at: "digests"])
+        let includeManifests = Self.mobyBool(req.query[String.self, at: "manifests"])
+        return try jsonResponse(
+            .ok,
+            filtered.map { image in
+                ImageSummary(
+                    image,
+                    includeSharedSize: includeSharedSize,
+                    includeDigests: includeDigests,
+                    includeManifests: includeManifests,
+                    containerCount: Int64(
+                        containers.filter { Self.imageMatchesContainer($0, image: image) }.count
+                    )
+                )
+            }
+        )
     }
 
     private func inspectImage(_ req: Request) async throws -> Response {
@@ -896,8 +1294,16 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func pruneImages(_ req: Request) async throws -> Response {
-        let all = Self.pruneAll(req.query[String.self, at: "filters"])
-        let result = try await call { try await backend.pruneImages(all: all) }
+        let filters = try Self.imagePruneFilters(req.query[String.self, at: "filters"])
+        let all = filters["dangling"]?.contains { $0 == "false" || $0 == "0" } == true
+        let result: DockerRuntimeImageDelete
+        if let filteredBackend = backend as? any DockerRuntimeImagePruneBackend {
+            result = try await call {
+                try await filteredBackend.pruneImages(all: all, filters: filters)
+            }
+        } else {
+            result = try await call { try await backend.pruneImages(all: all) }
+        }
         return try jsonResponse(
             .ok,
             ImagePruneResponse(
@@ -911,7 +1317,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         let filters = try req.query[String.self, at: "filters"].map(Self.containerPruneFilters)
         let containers = try await call { try await backend.listContainers(showAll: true) }
         let candidates = containers.filter { container in
-            container.state != .running
+            container.state != .running && container.state != .paused && container.state != .restarting
                 && (filters.map { Self.matches(container, filters: $0) } ?? true)
         }
         var deleted: [String] = []
@@ -980,7 +1386,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         struct CommitResponse: Encodable {
             let Id: String
         }
-        return try jsonResponse(.ok, CommitResponse(Id: image.digest))
+        return try jsonResponse(.created, CommitResponse(Id: image.digest))
     }
 
     private func imageHistory(_ req: Request) async throws -> Response {
@@ -1085,8 +1491,21 @@ struct DockerRuntimeRoutes: RouteCollection {
             autoRemove: body.HostConfig?.AutoRemove ?? false,
             stopTimeout: body.StopTimeout,
             mounts: mounts,
-            ports: Self.ports(from: body.HostConfig)
+            ports: Self.ports(from: body.HostConfig),
+            attachStdin: body.AttachStdin ?? false,
+            openStdin: body.OpenStdin ?? false,
+            stdinOnce: body.StdinOnce ?? false,
+            networkMode: Self.networkMode(body: body),
+            readonlyRootfs: body.HostConfig?.ReadonlyRootfs ?? false,
+            healthcheck: body.Healthcheck.flatMap(Self.healthcheck),
+            restartPolicy: Self.restartPolicy(body.HostConfig?.RestartPolicy),
+            resources: Self.resources(body.HostConfig),
+            stopSignal: body.StopSignal,
+            dns: body.HostConfig?.Dns ?? [],
+            dnsSearch: body.HostConfig?.DnsSearch ?? [],
+            extraHosts: body.HostConfig?.ExtraHosts ?? []
         )
+        try Self.validateCreateRequest(request)
         let container = try await call { try await backend.createContainer(request) }
         if let volumes = volumeClient as? RuntimeVolumeService {
             do {
@@ -1151,7 +1570,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Both w and h must be positive integers")
         }
         try await call { try await backend.resizeContainer(id: id, width: width, height: height) }
-        return Response(status: .noContent)
+        return Response(status: .ok)
     }
 
     private func restartContainer(_ req: Request) async throws -> Response {
@@ -1162,9 +1581,10 @@ struct DockerRuntimeRoutes: RouteCollection {
             if container.state == .paused {
                 try await call { try await backend.resumeContainer(id: id) }
             }
-            let signalText = req.query[String.self, at: "signal"] ?? "TERM"
-            guard let signal = DockerSignal.number(signalText) else {
-                throw Abort(.badRequest, reason: "Invalid restart signal: \(signalText)")
+            let signalText = req.query[String.self, at: "signal"] ?? container.stopSignal
+            let resolvedSignalText = signalText.isEmpty ? "TERM" : signalText
+            guard let signal = DockerSignal.number(resolvedSignalText) else {
+                throw Abort(.badRequest, reason: "Invalid restart signal: \(resolvedSignalText)")
             }
             try await stopAndWait(id: id, signal: signal, timeout: timeout)
         }
@@ -1184,9 +1604,6 @@ struct DockerRuntimeRoutes: RouteCollection {
         } else {
             condition = .default
         }
-        if condition == .healthy {
-            throw Abort(.badRequest, reason: "No healthcheck configured for the container")
-        }
         let backend = self.backend
         var headers = HTTPHeaders()
         headers.contentType = .json
@@ -1204,10 +1621,16 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func stopContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let container = try await call { try await backend.inspectContainer(id: id) }
-        guard container.state == .running else { return Response(status: .notModified) }
-        let signalText = req.query[String.self, at: "signal"] ?? "TERM"
-        guard let signal = DockerSignal.number(signalText) else {
-            throw Abort(.badRequest, reason: "Invalid stop signal: \(signalText)")
+        guard container.state == .running || container.state == .paused else {
+            return Response(status: .notModified)
+        }
+        if container.state == .paused {
+            try await call { try await backend.resumeContainer(id: id) }
+        }
+        let signalText = req.query[String.self, at: "signal"] ?? container.stopSignal
+        let resolvedSignalText = signalText.isEmpty ? "TERM" : signalText
+        guard let signal = DockerSignal.number(resolvedSignalText) else {
+            throw Abort(.badRequest, reason: "Invalid stop signal: \(resolvedSignalText)")
         }
         let timeout = req.query[Int.self, at: "t"] ?? container.stopTimeout ?? 10
         try await stopAndWait(id: id, signal: signal, timeout: timeout)
@@ -1267,7 +1690,12 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func inspectContainer(_ req: Request) async throws -> Response {
         let container = try await call { try await backend.inspectContainer(id: requiredParameter("id", request: req)) }
-        return try jsonResponse(.ok, InspectResponse(container))
+        let networks = try await call { try await backend.listNetworks() }
+        let includeSize = Self.mobyBool(req.query[String.self, at: "size"])
+        return try jsonResponse(
+            .ok,
+            InspectResponse(container, networks: networks, includeSize: includeSize)
+        )
     }
 
     private func listContainers(_ req: Request) async throws -> Response {
@@ -1276,9 +1704,26 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         if let raw = req.query[String.self, at: "filters"] {
             let filters = try Self.containerFilters(raw)
-            containers = containers.filter { Self.matches($0, filters: filters) }
+            try Self.validateContainerListFilters(filters)
+            let resolvedFilters = Self.resolveContainerReferenceFilters(
+                filters, containers: containers
+            )
+            let networks =
+                filters.keys.contains("network")
+                ? try await call { try await backend.listNetworks() }
+                : []
+            containers = containers.filter {
+                Self.matches($0, filters: resolvedFilters, networks: networks)
+            }
         }
-        return try jsonResponse(.ok, containers.map(ListResponse.init))
+        if let limit = req.query[Int.self, at: "limit"] {
+            guard limit >= 0 else { throw Abort(.badRequest, reason: "limit must be non-negative") }
+            if limit > 0 {
+                containers = Array(containers.sorted { $0.createdAt > $1.createdAt }.prefix(limit))
+            }
+        }
+        let includeSize = Self.mobyBool(req.query[String.self, at: "size"])
+        return try jsonResponse(.ok, containers.map { ListResponse($0, includeSize: includeSize) })
     }
 
     private func createNetwork(_ req: Request) async throws -> Response {
@@ -1495,7 +1940,13 @@ struct DockerRuntimeRoutes: RouteCollection {
     private func putArchive(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
         let path = try requiredQuery("path", request: req)
-        guard let buffer = try await req.body.collect(max: req.application.routes.defaultMaxBodySize.value).get(),
+        guard
+            let buffer = try await req.body.collect(
+                max: min(
+                    req.application.routes.defaultMaxBodySize.value,
+                    DockerRuntimeGuestLimits.maximumContainerArchiveBytes
+                )
+            ).get(),
             let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
         else {
             throw Abort(.badRequest, reason: "archive request body is required")
@@ -1546,6 +1997,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             workingDirectory: body.WorkingDir,
             user: body.User,
             tty: body.Tty ?? false,
+            attachStdin: body.AttachStdin ?? false,
             attachStdout: body.AttachStdout ?? true,
             attachStderr: body.AttachStderr ?? true
         )
@@ -1562,7 +2014,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Both w and h must be positive integers")
         }
         try await call { try await backend.resizeExec(id: id, width: width, height: height) }
-        return Response(status: .noContent)
+        return Response(status: .ok)
     }
 
     private func startExec(_ req: Request) async throws -> Response {
@@ -1570,8 +2022,24 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard let entry = execState.entry(id: id) else {
             throw Abort(.notFound, reason: "Exec instance not found: \(id)")
         }
-        let body = try req.content.decode(ExecStartRequest.self)
+        let body: ExecStartRequest
+        if let buffer = try await req.body.collect(
+            max: req.application.routes.defaultMaxBodySize.value
+        ).get(), buffer.readableBytes > 0 {
+            do {
+                guard let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
+                else { throw Abort(.badRequest, reason: "Invalid exec start request") }
+                body = try JSONDecoder().decode(ExecStartRequest.self, from: data)
+            } catch let abort as Abort {
+                throw abort
+            } catch {
+                throw Abort(.badRequest, reason: "Invalid exec start request: \(error)")
+            }
+        } else {
+            body = ExecStartRequest(Detach: nil, Tty: nil)
+        }
         let tty = body.Tty ?? entry.request.tty
+        let relay = entry.request.attachStdin ? GuestInputRelay() : nil
         if body.Detach == true {
             try execState.markRunning(id: id)
             let backend = self.backend
@@ -1584,15 +2052,37 @@ struct DockerRuntimeRoutes: RouteCollection {
                     state.finish(id: id, exitCode: -1)
                 }
             }
-            return Response(status: .noContent)
+            return Response(status: .ok)
         }
         try execState.markRunning(id: id)
-        let stream = try await call { try await backend.streamExec(id: id, tty: tty) }
-        if req.headers.first(name: "Upgrade")?.lowercased() == "tcp",
-            req.headers.first(name: "Connection")?.lowercased().split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true
+        let upgraded =
+            req.headers.first(name: "Upgrade")?.lowercased() == "tcp"
+            && req.headers.first(name: "Connection")?.lowercased().split(separator: ",")
+                .map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true
+        var initialInput: Data?
+        if relay != nil, !upgraded,
+            let buffer = try await req.body.collect(
+                max: req.application.routes.defaultMaxBodySize.value
+            ).get()
         {
+            initialInput = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
+        }
+        let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+        if let interactive = backend as? any DockerRuntimeInteractiveBackend {
+            stream = try await call {
+                try await interactive.streamExec(id: id, tty: tty, onInput: relay)
+            }
+        } else {
+            stream = try await call { try await backend.streamExec(id: id, tty: tty) }
+        }
+        if let relay, let initialInput, !initialInput.isEmpty { relay.send(initialInput) }
+        if let relay, !upgraded { relay.send(Data()) }
+        if upgraded {
             let state = execState
-            return .dockerTCPUpgrade(execId: id, ttyEnabled: tty) { channel, _ in
+            return .dockerTCPUpgrade(execId: id, ttyEnabled: tty) { channel, handler in
+                if let relay {
+                    handler.setStdinDataHandler { data in relay.send(data) }
+                }
                 do {
                     var exitCode: Int32 = -1
                     for try await frame in stream {
@@ -1713,7 +2203,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             }
             return Self.streamResponse(stream: stream, tty: container.tty, contentType: false)
         }
-        var output: DockerRuntimeProcessOutput
+        let output: DockerRuntimeProcessOutput
         if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
             output = try await call {
                 try await optionsBackend.logs(
@@ -1721,41 +2211,114 @@ struct DockerRuntimeRoutes: RouteCollection {
                 )
             }
         } else {
-            output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+            var fallback = try await call {
+                try await backend.logs(id: id, stdout: stdout, stderr: stderr)
+            }
+            if let tail = req.query[String.self, at: "tail"] {
+                fallback = try Self.applyTail(fallback, value: tail)
+            }
+            output = fallback
         }
-        if let tail = req.query[String.self, at: "tail"] {
-            output = try Self.applyTail(output, value: tail)
-        }
-        return Self.streamResponse(output: output, tty: container.tty, contentType: false)
+        return Self.streamResponse(output: output, tty: container.tty, contentType: true)
     }
 
     private func attach(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        if Self.mobyBool(req.query[String.self, at: "stdin"]) {
-            throw Abort(.notImplemented, reason: "Interactive attach stdin is not implemented")
-        }
         let tty = try await inspectContainer(id: id).tty
         let backend = self.backend
+        let replayLogs = Self.mobyBool(req.query[String.self, at: "logs"])
+        let streamOutput = Self.mobyBool(req.query[String.self, at: "stream"])
+        let relay =
+            streamOutput && Self.mobyBool(req.query[String.self, at: "stdin"])
+            ? GuestInputRelay() : nil
         let stdout = req.query[String.self, at: "stdout"].map(Self.mobyBool) ?? false
         let stderr = req.query[String.self, at: "stderr"].map(Self.mobyBool) ?? false
         guard stdout || stderr else {
             throw Abort(.badRequest, reason: "Bad parameters: you must choose at least one stream")
         }
+        let options = DockerRuntimeLogOptions(
+            timestamps: false, details: false, since: nil, until: nil,
+            tail: replayLogs ? nil : 0
+        )
         let upgraded =
             req.headers.first(name: "Upgrade")?.lowercased() == "tcp"
             && req.headers.first(name: "Connection")?.lowercased().split(separator: ",")
                 .map({ $0.trimmingCharacters(in: .whitespaces) }).contains("upgrade") == true
-        let stream = try await call {
-            try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
+        guard replayLogs || streamOutput else {
+            var headers = HTTPHeaders()
+            headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+            return Response(
+                status: .ok,
+                headers: headers,
+                body: .init(data: Data())
+            )
+        }
+        if replayLogs && !streamOutput {
+            let output: DockerRuntimeProcessOutput
+            if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
+                output = try await call {
+                    try await optionsBackend.logs(
+                        id: id, stdout: stdout, stderr: stderr, options: options
+                    )
+                }
+            } else {
+                output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+            }
+            return Self.streamResponse(output: output, tty: tty, contentType: true)
+        }
+        var initialInput: Data?
+        if relay != nil && !upgraded,
+            let buffer = try await req.body.collect(
+                max: req.application.routes.defaultMaxBodySize.value
+            ).get()
+        {
+            initialInput = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
+        }
+        let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+        if let interactive = backend as? any DockerRuntimeInteractiveBackend {
+            stream = try await call {
+                try await interactive.attachContainer(
+                    id: id, stdout: stdout, stderr: stderr,
+                    options: options, onInput: relay
+                )
+            }
+        } else {
+            stream = try await call {
+                try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
+            }
+        }
+        if let relay, let initialInput, !initialInput.isEmpty {
+            relay.send(initialInput)
+        }
+        if let relay, !upgraded {
+            relay.send(Data())
+        }
+        if upgraded {
+            return .dockerTCPUpgrade(execId: id, ttyEnabled: tty) { channel, handler in
+                if let relay {
+                    handler.setStdinDataHandler { data in relay.send(data) }
+                }
+                do {
+                    for try await frame in stream {
+                        guard frame.exitCode == nil else { continue }
+                        let bytes =
+                            tty
+                            ? frame.data
+                            : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
+                        var buffer = channel.allocator.buffer(capacity: bytes.count)
+                        buffer.writeBytes(bytes)
+                        try await channel.writeAndFlush(buffer).get()
+                    }
+                    try await channel.close().get()
+                } catch {
+                    throw error
+                }
+            }
         }
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
-        if upgraded {
-            headers.add(name: "Connection", value: "Upgrade")
-            headers.add(name: "Upgrade", value: "tcp")
-        }
         return Response(
-            status: upgraded ? .switchingProtocols : .ok,
+            status: .ok,
             headers: headers,
             body: .init(managedAsyncStream: { writer in
                 if upgraded {
@@ -1780,9 +2343,11 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func attachWebSocket(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        if Self.mobyBool(req.query[String.self, at: "stdin"]) {
-            throw Abort(.notImplemented, reason: "Interactive attach stdin is not implemented")
-        }
+        let replayLogs = Self.mobyBool(req.query[String.self, at: "logs"])
+        let streamOutput = Self.mobyBool(req.query[String.self, at: "stream"])
+        let relay =
+            streamOutput && Self.mobyBool(req.query[String.self, at: "stdin"])
+            ? GuestInputRelay() : nil
         let stdout = req.query[String.self, at: "stdout"].map(Self.mobyBool) ?? false
         let stderr = req.query[String.self, at: "stderr"].map(Self.mobyBool) ?? false
         guard stdout || stderr else {
@@ -1790,11 +2355,53 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         let tty = try await inspectContainer(id: id).tty
         let backend = self.backend
+        let options = DockerRuntimeLogOptions(
+            timestamps: false, details: false, since: nil, until: nil,
+            tail: replayLogs ? nil : 0
+        )
         return req.webSocket { _, socket in
             do {
-                let stream = try await backend.attachContainer(
-                    id: id, stdout: stdout, stderr: stderr
-                )
+                if !replayLogs && !streamOutput {
+                    try await socket.close()
+                    return
+                }
+                if replayLogs && !streamOutput {
+                    let output: DockerRuntimeProcessOutput
+                    if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
+                        output = try await optionsBackend.logs(
+                            id: id, stdout: stdout, stderr: stderr, options: options
+                        )
+                    } else {
+                        output = try await backend.logs(id: id, stdout: stdout, stderr: stderr)
+                    }
+                    if stdout, !output.stdout.isEmpty {
+                        try await socket.send([UInt8](Self.frame(output.stdout, stream: 1)))
+                    }
+                    if stderr, !output.stderr.isEmpty {
+                        try await socket.send([UInt8](Self.frame(output.stderr, stream: 2)))
+                    }
+                    try await socket.close()
+                    return
+                }
+                let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+                if let interactive = backend as? any DockerRuntimeInteractiveBackend {
+                    stream = try await interactive.attachContainer(
+                        id: id, stdout: stdout, stderr: stderr,
+                        options: options, onInput: relay
+                    )
+                } else {
+                    stream = try await backend.attachContainer(
+                        id: id, stdout: stdout, stderr: stderr
+                    )
+                }
+                if let relay {
+                    socket.onBinary { _, buffer in
+                        if let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes) {
+                            relay.send(data)
+                        }
+                    }
+                    socket.onText { _, text in relay.send(Data(text.utf8)) }
+                }
                 for try await frame in stream {
                     guard frame.exitCode == nil else { continue }
                     let data =
@@ -1847,18 +2454,9 @@ struct DockerRuntimeRoutes: RouteCollection {
                     max: req.application.routes.defaultMaxBodySize.value
                 ).get(),
                 let data = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes),
-                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                (try JSONSerialization.jsonObject(with: data) as? [String: Any]) != nil
             else {
                 throw Abort(.badRequest, reason: "Container update request body is required")
-            }
-            let unsupported = Set(object.keys).subtracting(
-                DockerRuntimeContainerUpdate.supportedDockerFields
-            )
-            guard unsupported.isEmpty else {
-                throw Abort(
-                    .notImplemented,
-                    reason: "Container update option(s) \(unsupported.sorted().joined(separator: ", ")) are not supported"
-                )
             }
             let update = try JSONDecoder().decode(
                 DockerRuntimeContainerUpdate.self, from: data
@@ -2084,58 +2682,11 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw DockerRuntimeRouteError.invalidRequest("request body must be a JSON object")
         }
-        for key in [
-            "AttachStdin", "OpenStdin", "StdinOnce", "NetworkDisabled", "Volumes", "Healthcheck",
-            "Domainname", "MacAddress", "OnBuild", "Shell",
-        ] where object[key].map({ !isDefaultJSONValue($0) }) == true {
-            throw Abort(.notImplemented, reason: "Container create option \(key) is not implemented")
-        }
-        if let signal = object["StopSignal"] as? String,
-            !signal.isEmpty, signal.uppercased() != "SIGTERM", signal != "15"
-        {
-            throw Abort(.notImplemented, reason: "Container create option StopSignal is not implemented")
-        }
-        guard let host = object["HostConfig"] as? [String: Any] else { return }
-        for key in [
-            "Privileged", "ReadonlyRootfs", "OomKillDisable", "PublishAllPorts", "Init", "Memory",
-            "MemorySwap", "MemoryReservation", "NanoCpus", "CpuShares", "CpuPeriod",
-            "CpuQuota", "CpuRealtimePeriod", "CpuRealtimeRuntime", "CpusetCpus", "CpusetMems",
-            "PidsLimit", "BlkioWeight", "BlkioWeightDevice", "BlkioDeviceReadBps",
-            "BlkioDeviceWriteBps", "BlkioDeviceReadIOps", "BlkioDeviceWriteIOps", "CapAdd", "CapDrop",
-            "Devices", "DeviceCgroupRules", "DeviceRequests", "Ulimits", "SecurityOpt", "GroupAdd", "Dns",
-            "DnsOptions", "DnsSearch", "ExtraHosts", "Links", "VolumesFrom", "Tmpfs", "Sysctls",
-            "StorageOpt", "CgroupParent",
-        ] where host[key].map({ !isDefaultJSONValue($0) }) == true {
-            throw Abort(.notImplemented, reason: "HostConfig option \(key) is not implemented")
-        }
-        if let swappiness = host["MemorySwappiness"] as? NSNumber,
-            swappiness.intValue != -1, swappiness.intValue != 0
-        {
-            throw Abort(.notImplemented, reason: "HostConfig option MemorySwappiness is not implemented")
-        }
-        if let mode = host["NetworkMode"] as? String,
-            !mode.isEmpty, mode != "default", mode != "bridge"
-        {
-            throw Abort(.notImplemented, reason: "NetworkMode \(mode) is not implemented")
-        }
-        for key in ["PidMode", "UTSMode", "UsernsMode"] {
-            if let value = host[key] as? String, !value.isEmpty {
-                throw Abort(.notImplemented, reason: "HostConfig option \(key) is not implemented")
-            }
-        }
-        if let mode = host["IpcMode"] as? String, !mode.isEmpty, mode != "private" {
-            throw Abort(.notImplemented, reason: "IpcMode \(mode) is not implemented")
-        }
-        if let mode = host["CgroupnsMode"] as? String, !mode.isEmpty, mode != "private" {
-            throw Abort(.notImplemented, reason: "CgroupnsMode \(mode) is not implemented")
-        }
-        if let runtime = host["Runtime"] as? String, !runtime.isEmpty, runtime != "runc" {
-            throw Abort(.notImplemented, reason: "Runtime \(runtime) is not implemented")
-        }
-        if let policy = host["RestartPolicy"] as? [String: Any],
-            let name = policy["Name"] as? String, !name.isEmpty, name != "no"
-        {
-            throw Abort(.notImplemented, reason: "RestartPolicy \(name) is not implemented")
+        // Moby accepts a broad create schema and ignores fields that are not
+        // meaningful to the selected runtime. Decode the fields that Glass
+        // Dock can apply below and preserve the rest for forward compatibility.
+        if let image = object["Image"] as? String, image.isEmpty {
+            throw DockerRuntimeRouteError.invalidRequest("Image cannot be empty")
         }
     }
 
@@ -2169,6 +2720,21 @@ struct DockerRuntimeRoutes: RouteCollection {
         return forms.contains { candidate in
             globMatch(pattern: pattern, candidate: candidate)
         }
+    }
+
+    fileprivate static func imageMatchesContainer(
+        _ container: DockerRuntimeContainer, image: DockerRuntimeImage
+    ) -> Bool {
+        if image.references.contains(container.image) || image.digest == container.image {
+            return true
+        }
+        let containerID =
+            container.image.hasPrefix("sha256:")
+            ? String(container.image.dropFirst("sha256:".count)) : container.image
+        let imageID =
+            image.digest.hasPrefix("sha256:")
+            ? String(image.digest.dropFirst("sha256:".count)) : image.digest
+        return containerID == imageID
     }
 
     private static let imageFilterKeys: Set<String> = [
@@ -2379,6 +2945,56 @@ struct DockerRuntimeRoutes: RouteCollection {
         return false
     }
 
+    private static func buildArguments(_ raw: String?) throws -> [String: String] {
+        guard let raw, !raw.isEmpty else { return [:] }
+        guard let data = raw.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw Abort(.badRequest, reason: "Invalid buildargs query parameter")
+        }
+        var result: [String: String] = [:]
+        for (key, value) in object {
+            guard !key.isEmpty else {
+                throw Abort(.badRequest, reason: "Build argument names must not be empty")
+            }
+            if value is NSNull { continue }
+            guard let string = value as? String else {
+                throw Abort(.badRequest, reason: "Build argument \(key) must be a string")
+            }
+            result[key] = string
+        }
+        return result
+    }
+
+    private static func imagePruneFilters(_ raw: String?) throws -> [String: [String]] {
+        guard let raw else { return [:] }
+        guard let data = raw.data(using: .utf8) else {
+            throw Abort(.badRequest, reason: "Invalid image prune filters")
+        }
+        var filters: [String: [String]]
+        if let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            filters = decoded
+        } else if let decoded = try? JSONDecoder().decode([String: [String: Bool]].self, from: data) {
+            filters = decoded.mapValues { values in
+                values.compactMap { $0.value ? $0.key : nil }
+            }
+        } else {
+            throw Abort(.badRequest, reason: "Invalid image prune filters")
+        }
+        let supported = Set(["dangling", "label", "until"])
+        if let unsupported = filters.keys.first(where: { !supported.contains($0) }) {
+            throw Abort(.badRequest, reason: "Unsupported image prune filter: \(unsupported)")
+        }
+        if let dangling = filters["dangling"],
+            dangling.contains(where: { value in
+                value != "true" && value != "false" && value != "1" && value != "0"
+            })
+        {
+            throw Abort(.badRequest, reason: "Invalid dangling image prune filter")
+        }
+        return filters
+    }
+
     private static func containerFilters(_ raw: String) throws -> [String: [String]] {
         guard let data = raw.data(using: .utf8) else {
             throw Abort(.badRequest, reason: "Invalid container filters")
@@ -2392,9 +3008,60 @@ struct DockerRuntimeRoutes: RouteCollection {
         throw Abort(.badRequest, reason: "Invalid container filters")
     }
 
+    private static let containerListFilterKeys: Set<String> = [
+        "ancestor", "before", "expose", "exited", "health", "id", "is-task",
+        "isolation", "label", "name", "network", "publish", "since", "status",
+        "volume",
+    ]
+
+    private static func validateContainerListFilters(
+        _ filters: [String: [String]]
+    ) throws {
+        if let unknown = filters.keys.first(where: { !containerListFilterKeys.contains($0) }) {
+            throw Abort(.badRequest, reason: "Invalid container filter: \(unknown)")
+        }
+        if let health = filters["health"],
+            health.contains(where: {
+                !["starting", "healthy", "unhealthy", "none"].contains($0.lowercased())
+            })
+        {
+            throw Abort(.badRequest, reason: "Invalid health filter")
+        }
+        if let isolation = filters["isolation"],
+            isolation.contains(where: {
+                !["default", "process", "hyperv"].contains($0.lowercased())
+            })
+        {
+            throw Abort(.badRequest, reason: "Invalid isolation filter")
+        }
+    }
+
+    private static func resolveContainerReferenceFilters(
+        _ filters: [String: [String]], containers: [DockerRuntimeContainer]
+    ) -> [String: [String]] {
+        var resolved = filters
+        for key in ["before", "since"] {
+            guard let values = filters[key] else { continue }
+            resolved[key] = values.map { value in
+                guard parseDate(value) == nil,
+                    let container = containers.first(where: {
+                        $0.id == value || $0.id.hasPrefix(value)
+                            || $0.name.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == value
+                    })
+                else { return value }
+                return String(container.createdAt.timeIntervalSince1970)
+            }
+        }
+        return resolved
+    }
+
     private static func containerPruneFilters(_ raw: String) throws -> [String: [String]] {
         let filters = try containerFilters(raw)
-        guard let unsupported = filters.keys.first(where: { $0 != "label" && $0 != "until" }) else {
+        guard
+            let unsupported = filters.keys.first(where: {
+                $0 != "label" && $0 != "until"
+            })
+        else {
             return filters
         }
         throw Abort(.badRequest, reason: "Unsupported container prune filter: \(unsupported)")
@@ -2402,7 +3069,8 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private static func matches(
         _ container: DockerRuntimeContainer,
-        filters: [String: [String]]
+        filters: [String: [String]],
+        networks: [DockerRuntimeNetwork] = []
     ) -> Bool {
         filters.allSatisfy { key, values in
             guard !values.isEmpty else { return true }
@@ -2419,6 +3087,42 @@ struct DockerRuntimeRoutes: RouteCollection {
                 return values.contains {
                     container.image == $0 || container.image.hasPrefix($0)
                 }
+            case "before", "since":
+                guard let raw = values.first, let boundary = parseDate(raw) else { return false }
+                return key == "before"
+                    ? container.createdAt < boundary
+                    : container.createdAt > boundary
+            case "exited":
+                return values.contains {
+                    guard let code = Int32($0) else { return false }
+                    return container.state == .exited && container.exitCode == code
+                }
+            case "health":
+                let health = container.health.status.isEmpty ? "none" : container.health.status
+                return values.contains { $0.lowercased() == health.lowercased() }
+            case "isolation":
+                return values.contains { $0.lowercased() == "default" }
+            case "is-task":
+                // Glass Dock's Swarm task records are kept outside the runtime
+                // container list. A regular container is therefore a non-task.
+                return values.contains { Self.mobyBool($0) == false }
+            case "network":
+                return values.contains { value in
+                    networks.contains { network in
+                        (network.id == value || network.id.hasPrefix(value) || network.name == value)
+                            && network.containers[container.id] != nil
+                    }
+                }
+            case "volume":
+                return values.contains { value in
+                    container.mounts.contains {
+                        $0.target == value || $0.source == value || $0.volumeName == value
+                    }
+                }
+            case "publish":
+                return values.contains { Self.matchesPortFilter($0, ports: container.ports, published: true) }
+            case "expose":
+                return values.contains { Self.matchesPortFilter($0, ports: container.ports, published: false) }
             case "label":
                 return values.contains { expression in
                     let parts = expression.split(separator: "=", maxSplits: 1).map(String.init)
@@ -2431,6 +3135,25 @@ struct DockerRuntimeRoutes: RouteCollection {
             default:
                 return false
             }
+        }
+    }
+
+    private static func matchesPortFilter(
+        _ raw: String, ports: [DockerRuntimePortBinding], published: Bool
+    ) -> Bool {
+        let pieces = raw.split(separator: "/", maxSplits: 1).map(String.init)
+        let portSpec = pieces.first ?? ""
+        let protocolName = pieces.count == 2 ? pieces[1].lowercased() : nil
+        let range = portSpec.split(separator: "-", maxSplits: 1).compactMap { Int($0) }
+        guard !range.isEmpty, range.count == 1 || range.count == 2 else { return false }
+        let lower = range[0]
+        let upper = range.count == 2 ? range[1] : lower
+        guard lower > 0, upper >= lower, upper <= 65_535 else { return false }
+        return ports.contains { port in
+            guard protocolName == nil || protocolName == port.proto.lowercased() else { return false }
+            let candidate = published ? port.hostPort : Optional(port.containerPort)
+            guard let candidate else { return false }
+            return (lower...upper).contains(candidate)
         }
     }
 
@@ -2458,14 +3181,48 @@ struct DockerRuntimeRoutes: RouteCollection {
                 ))
         }
         for mount in host?.Mounts ?? [] {
-            guard mount.`Type` == "bind" || mount.`Type` == "volume" else {
-                throw Abort(.notImplemented, reason: "Mount type \(mount.`Type`) is not supported")
+            guard mount.Target.hasPrefix("/") else {
+                throw Abort(.badRequest, reason: "Invalid mount target")
             }
-            guard let source = mount.Source, mount.Target.hasPrefix("/") else {
-                throw Abort(.badRequest, reason: "Invalid bind mount")
+            switch mount.`Type`.lowercased() {
+            case "bind", "volume":
+                guard let source = mount.Source else {
+                    throw Abort(.badRequest, reason: "Mount source is required")
+                }
+                let resolved = try await resolveMountSource(source)
+                result.append(
+                    DockerRuntimeMount(
+                        source: resolved.path, target: mount.Target,
+                        readOnly: mount.ReadOnly ?? false, type: mount.`Type`.lowercased(),
+                        volumeName: resolved.volumeName
+                    )
+                )
+            case "tmpfs":
+                var options: [String] = []
+                if let tmpfs = mount.TmpfsOptions {
+                    if let size = tmpfs.SizeBytes, size > 0 { options.append("size=\(size)") }
+                    if let mode = tmpfs.Mode, mode > 0 { options.append("mode=\(String(mode, radix: 8))") }
+                }
+                result.append(
+                    DockerRuntimeMount(
+                        source: "", target: mount.Target, readOnly: mount.ReadOnly ?? false,
+                        type: "tmpfs", options: options
+                    )
+                )
+            default:
+                throw Abort(.badRequest, reason: "Unsupported mount type \(mount.`Type`)")
             }
-            let resolved = try await resolveMountSource(source)
-            result.append(DockerRuntimeMount(source: resolved.path, target: mount.Target, readOnly: mount.ReadOnly ?? false, volumeName: resolved.volumeName))
+        }
+        for (target, options) in host?.Tmpfs ?? [:] {
+            guard target.hasPrefix("/") else {
+                throw Abort(.badRequest, reason: "Invalid tmpfs target")
+            }
+            result.append(
+                DockerRuntimeMount(
+                    source: "", target: target, readOnly: false, type: "tmpfs",
+                    options: options.split(separator: ",").map(String.init)
+                )
+            )
         }
         return result
     }
@@ -2476,7 +3233,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             return (canonicalSource, nil)
         }
         guard let volumeClient else {
-            throw Abort(.notImplemented, reason: "Named volume mounts are not configured")
+            throw Abort(.serviceUnavailable, reason: "Named volume mounts are not configured")
         }
         return (try await volumeClient.inspect(name: source).Mountpoint, source)
     }
@@ -2493,6 +3250,92 @@ struct DockerRuntimeRoutes: RouteCollection {
                     hostIP: $0.HostIp ?? "0.0.0.0",
                     hostPort: $0.HostPort.flatMap(Int.init)
                 )
+            }
+        }
+    }
+
+    private static func networkMode(body: CreateRequest) -> String {
+        if body.NetworkDisabled == true { return "none" }
+        switch body.HostConfig?.NetworkMode?.lowercased() {
+        case nil, "", "default", "bridge": return "private"
+        case "host": return "host"
+        case "none": return "none"
+        case let value? where value.hasPrefix("container:"):
+            return value
+        case let value?: return value
+        }
+    }
+
+    private static func healthcheck(_ healthcheck: CreateHealthcheck) -> DockerRuntimeHealthcheck? {
+        guard let test = healthcheck.Test else { return nil }
+        return DockerRuntimeHealthcheck(
+            test: test,
+            interval: healthcheck.Interval ?? 0,
+            timeout: healthcheck.Timeout ?? 0,
+            retries: healthcheck.Retries ?? 0,
+            startPeriod: healthcheck.StartPeriod ?? 0,
+            startInterval: healthcheck.StartInterval ?? 0
+        )
+    }
+
+    private static func restartPolicy(_ policy: CreateRestartPolicy?) -> DockerRuntimeRestartPolicy {
+        guard let policy else { return .init() }
+        return DockerRuntimeRestartPolicy(
+            name: policy.Name ?? "no", maximumRetryCount: policy.MaximumRetryCount ?? 0
+        )
+    }
+
+    private static func resources(_ host: CreateHostConfig?) -> DockerRuntimeResources {
+        guard let host else { return .init() }
+        return DockerRuntimeResources(
+            memory: host.Memory ?? 0,
+            memorySwap: host.MemorySwap ?? 0,
+            memoryReservation: host.MemoryReservation ?? 0,
+            nanoCPUs: host.NanoCpus ?? 0,
+            cpuShares: host.CpuShares ?? 0,
+            cpuPeriod: host.CpuPeriod ?? 0,
+            cpuQuota: host.CpuQuota ?? 0,
+            cpusetCpus: host.CpusetCpus ?? "",
+            cpusetMems: host.CpusetMems ?? "",
+            pidsLimit: host.PidsLimit ?? 0
+        )
+    }
+
+    private static func validateCreateRequest(_ request: DockerRuntimeContainerCreate) throws {
+        let resources = request.resources
+        guard resources.memory >= 0, resources.memorySwap >= -1,
+            resources.memoryReservation >= 0, resources.nanoCPUs >= 0,
+            resources.cpuShares >= 0, resources.cpuPeriod >= 0,
+            resources.cpuQuota >= -1, resources.pidsLimit >= -1
+        else {
+            throw Abort(.badRequest, reason: "Container resource limits must be valid non-negative values")
+        }
+        guard
+            ["", "no", "always", "unless-stopped", "on-failure"].contains(
+                request.restartPolicy.name.lowercased()
+            )
+        else {
+            throw Abort(.badRequest, reason: "Invalid restart policy")
+        }
+        guard request.restartPolicy.maximumRetryCount >= 0 else {
+            throw Abort(.badRequest, reason: "MaximumRetryCount must be non-negative")
+        }
+        if let healthcheck = request.healthcheck {
+            guard !healthcheck.test.isEmpty else {
+                throw Abort(.badRequest, reason: "Healthcheck test must not be empty")
+            }
+            guard healthcheck.interval >= 0, healthcheck.timeout >= 0,
+                healthcheck.retries >= 0, healthcheck.startPeriod >= 0,
+                healthcheck.startInterval >= 0
+            else {
+                throw Abort(.badRequest, reason: "Healthcheck values must be non-negative")
+            }
+        }
+        for port in request.ports {
+            guard port.containerPort > 0, ["tcp", "udp", "sctp"].contains(port.proto.lowercased()),
+                port.hostPort.map({ (1...65_535).contains($0) }) ?? true
+            else {
+                throw Abort(.badRequest, reason: "Invalid published port")
             }
         }
     }
@@ -2533,38 +3376,82 @@ private struct ImageSummary: Encodable {
     let RepoDigests: [String]
     let Created: Int64
     let Size: Int64
-    let SharedSize: Int64 = -1
+    let SharedSize: Int64
     let VirtualSize: Int64
     let Labels: [String: String]
-    let Containers: Int64 = -1
+    let Containers: Int64
+    let Manifests: [String]?
 
-    init(_ image: DockerRuntimeImage) {
+    init(
+        _ image: DockerRuntimeImage,
+        includeSharedSize: Bool = false,
+        includeDigests: Bool = false,
+        includeManifests: Bool = false,
+        containerCount: Int64 = -1
+    ) {
         Id = image.digest
         RepoTags = image.references.filter { !$0.contains("@sha256:") }
-        RepoDigests = image.references.filter { $0.contains("@sha256:") }
+        RepoDigests = includeDigests ? image.references.filter { $0.contains("@sha256:") } : []
         Created = Int64(image.createdAt.timeIntervalSince1970)
         Size = image.size
+        SharedSize = -1
         VirtualSize = image.size
         Labels = image.labels
+        Containers = containerCount
+        Manifests = includeManifests ? [] : nil
     }
 }
 
 private struct ImageInspectResponse: Encodable {
+    struct EmptyObject: Encodable {}
     struct ConfigPayload: Encodable {
+        let User: String
+        let ExposedPorts: [String: EmptyObject]
+        let Env: [String]
+        let Cmd: [String]
+        let Healthcheck: InspectHealthcheck?
+        let ArgsEscaped: Bool
+        let Volumes: [String: EmptyObject]
+        let WorkingDir: String
+        let Entrypoint: [String]?
+        let OnBuild: [String]?
         let Labels: [String: String]
+        let StopSignal: String?
+        let Shell: [String]?
+    }
+    struct InspectHealthcheck: Encodable {
+        let Test: [String]
+        let Interval: Int64
+        let Timeout: Int64
+        let Retries: Int
+        let StartPeriod: Int64
+        let StartInterval: Int64
     }
     struct RootFSPayload: Encodable {
         let `Type` = "layers"
         let Layers: [String]
+    }
+    struct GraphDriverPayload: Encodable {
+        let Name: String
+        let Data: [String: String]
     }
 
     let Id: String
     let RepoTags: [String]
     let RepoDigests: [String]
     let Created: String
+    let Parent: String
+    let Comment: String
+    let DockerVersion: String
+    let Author: String
+    let Architecture: String
+    let Variant: String?
+    let Os: String
+    let OsVersion: String?
     let Size: Int64
     let VirtualSize: Int64
     let Config: ConfigPayload
+    let GraphDriver: GraphDriverPayload
     let RootFS: RootFSPayload
 
     init(_ image: DockerRuntimeImage) {
@@ -2572,9 +3459,37 @@ private struct ImageInspectResponse: Encodable {
         RepoTags = image.references.filter { !$0.contains("@sha256:") }
         RepoDigests = image.references.filter { $0.contains("@sha256:") }
         Created = ISO8601DateFormatter().string(from: image.createdAt)
+        Parent = ""
+        Comment = ""
+        DockerVersion = ""
+        Author = image.author
+        Architecture = image.architecture.isEmpty ? "arm64" : image.architecture
+        Variant = image.variant.isEmpty ? nil : image.variant
+        Os = image.os.isEmpty ? "linux" : image.os
+        OsVersion = image.osVersion.isEmpty ? nil : image.osVersion
         Size = image.size
         VirtualSize = image.size
-        Config = ConfigPayload(Labels: image.labels)
+        Config = ConfigPayload(
+            User: image.config.user,
+            ExposedPorts: image.config.exposedPorts.reduce(into: [:]) { $0[$1] = EmptyObject() },
+            Env: image.config.environment, Cmd: image.config.cmd,
+            Healthcheck: image.config.healthcheck.map {
+                InspectHealthcheck(
+                    Test: $0.test, Interval: $0.interval, Timeout: $0.timeout,
+                    Retries: $0.retries, StartPeriod: $0.startPeriod,
+                    StartInterval: $0.startInterval
+                )
+            },
+            ArgsEscaped: false,
+            Volumes: image.config.volumes.reduce(into: [:]) { $0[$1] = EmptyObject() },
+            WorkingDir: image.config.workingDirectory,
+            Entrypoint: image.config.entrypoint.isEmpty ? nil : image.config.entrypoint,
+            OnBuild: image.config.onBuild.isEmpty ? nil : image.config.onBuild,
+            Labels: image.config.labels.isEmpty ? image.labels : image.config.labels,
+            StopSignal: image.config.stopSignal.isEmpty ? nil : image.config.stopSignal,
+            Shell: image.config.shell.isEmpty ? nil : image.config.shell
+        )
+        GraphDriver = GraphDriverPayload(Name: "overlayfs", Data: [:])
         RootFS = RootFSPayload(Layers: image.rootFSLayers)
     }
 }
@@ -2632,26 +3547,42 @@ private struct SystemDataUsageResponse: Encodable {
         }
     }
 
+    struct BuildCacheUsage: Encodable {
+        let ID: String
+        let Parents: [String]
+        let `Type`: String
+        let Description: String
+        let InUse: Bool
+        let Shared: Bool
+        let Size: Int64
+        let CreatedAt: String
+        let LastUsedAt: String
+        let UsageCount: Int
+    }
+
     let LayersSize: Int64
     let Images: [ImageUsage]
     let Containers: [ContainerUsage]
     let Volumes: [Volume]
-    let BuildCache: [String] = []
+    let BuildCache: [BuildCacheUsage]
 
     init(
         images: [DockerRuntimeImage],
         containers: [DockerRuntimeContainer],
         volumes: [Volume] = []
     ) {
-        let counts = containers.reduce(into: [String: Int64]()) { counts, container in
-            counts[container.image, default: 0] += 1
-        }
         LayersSize = images.reduce(into: Int64(0)) { total, image in
             total += max(image.size, 0)
         }
-        Images = images.map { ImageUsage($0, containerCount: counts[$0.reference, default: -1]) }
+        Images = images.map { image in
+            let count = containers.filter {
+                DockerRuntimeRoutes.imageMatchesContainer($0, image: image)
+            }.count
+            return ImageUsage(image, containerCount: Int64(count))
+        }
         Containers = containers.map(ContainerUsage.init)
         Volumes = volumes
+        BuildCache = []
     }
 }
 
@@ -2722,6 +3653,12 @@ private struct CreateRequest: Content {
     let Labels: [String: String]?
     let Tty: Bool?
     let StopTimeout: Int?
+    let AttachStdin: Bool?
+    let OpenStdin: Bool?
+    let StdinOnce: Bool?
+    let NetworkDisabled: Bool?
+    let StopSignal: String?
+    let Healthcheck: CreateHealthcheck?
     let HostConfig: CreateHostConfig?
 }
 
@@ -2738,6 +3675,27 @@ private struct CreateHostConfig: Content {
     let Binds: [String]?
     let Mounts: [CreateMount]?
     let PortBindings: [String: [CreatePortBinding]]?
+    let NetworkMode: String?
+    let ReadonlyRootfs: Bool?
+    let Memory: Int64?
+    let MemorySwap: Int64?
+    let MemoryReservation: Int64?
+    let NanoCpus: Int64?
+    let CpuShares: Int64?
+    let CpuPeriod: Int64?
+    let CpuQuota: Int64?
+    let CpusetCpus: String?
+    let CpusetMems: String?
+    let PidsLimit: Int64?
+    let RestartPolicy: CreateRestartPolicy?
+    let Dns: [String]?
+    let DnsSearch: [String]?
+    let ExtraHosts: [String]?
+    let Tmpfs: [String: String]?
+    let PublishAllPorts: Bool?
+    let Privileged: Bool?
+    let Init: Bool?
+    let SecurityOpt: [String]?
 }
 
 private struct CreateMount: Content {
@@ -2745,6 +3703,26 @@ private struct CreateMount: Content {
     let Source: String?
     let Target: String
     let ReadOnly: Bool?
+    let TmpfsOptions: CreateTmpfsOptions?
+}
+
+private struct CreateTmpfsOptions: Content {
+    let SizeBytes: Int64?
+    let Mode: Int64?
+}
+
+private struct CreateHealthcheck: Content {
+    let Test: [String]?
+    let Interval: Int64?
+    let Timeout: Int64?
+    let Retries: Int?
+    let StartPeriod: Int64?
+    let StartInterval: Int64?
+}
+
+private struct CreateRestartPolicy: Content {
+    let Name: String?
+    let MaximumRetryCount: Int?
 }
 
 private struct CreatePortBinding: Content {
@@ -2754,6 +3732,7 @@ private struct CreatePortBinding: Content {
 
 private struct ExecCreateRequest: Content {
     let Cmd: [String]?
+    let AttachStdin: Bool?
     let AttachStdout: Bool?
     let AttachStderr: Bool?
     let Tty: Bool?
@@ -2768,51 +3747,341 @@ private struct ExecStartRequest: Content {
 }
 
 private struct InspectResponse: Content {
+    struct EmptyObject: Content {}
+    struct HealthLogPayload: Content {
+        let Start: String
+        let End: String
+        let ExitCode: Int32
+        let Output: String
+    }
+
+    struct HealthPayload: Content {
+        let Status: String
+        let FailingStreak: Int
+        let Log: [HealthLogPayload]
+
+        init(_ health: DockerRuntimeHealth) {
+            Status = health.status
+            FailingStreak = health.failingStreak
+            Log = health.log.map {
+                HealthLogPayload(
+                    Start: ISO8601DateFormatter().string(from: $0.start),
+                    End: ISO8601DateFormatter().string(from: $0.end),
+                    ExitCode: $0.exitCode,
+                    Output: $0.output
+                )
+            }
+        }
+    }
+
+    struct HealthcheckPayload: Content {
+        let Test: [String]
+        let Interval: Int64
+        let Timeout: Int64
+        let Retries: Int
+        let StartPeriod: Int64
+        let StartInterval: Int64
+
+        init(_ healthcheck: DockerRuntimeHealthcheck) {
+            Test = healthcheck.test
+            Interval = healthcheck.interval
+            Timeout = healthcheck.timeout
+            Retries = healthcheck.retries
+            StartPeriod = healthcheck.startPeriod
+            StartInterval = healthcheck.startInterval
+        }
+    }
+
+    struct RestartPolicyPayload: Content {
+        let Name: String
+        let MaximumRetryCount: Int
+
+        init(_ policy: DockerRuntimeRestartPolicy) {
+            Name = policy.name
+            MaximumRetryCount = policy.maximumRetryCount
+        }
+    }
+
     struct StatePayload: Content {
         let Status: String
         let Running: Bool
+        let Paused: Bool
+        let Restarting: Bool
+        let OOMKilled: Bool
+        let Dead: Bool
+        let Pid: Int
         let ExitCode: Int32
+        let Error: String
+        let StartedAt: String
+        let FinishedAt: String
+        let Health: HealthPayload?
+
+        enum CodingKeys: String, CodingKey {
+            case Status, Running, Paused, Restarting, OOMKilled, Dead, Pid, ExitCode, Error
+            case StartedAt, FinishedAt, Health
+        }
+
+        init(container: DockerRuntimeContainer, timestamp: String) {
+            Status = container.state.rawValue
+            Running = container.state == .running || container.state == .paused
+            Paused = container.state == .paused
+            Restarting = container.state == .restarting
+            OOMKilled = false
+            Dead = false
+            Pid = 0
+            ExitCode = container.exitCode ?? 0
+            Error = ""
+            StartedAt = container.state == .created ? "0001-01-01T00:00:00Z" : timestamp
+            FinishedAt = container.state == .exited ? timestamp : "0001-01-01T00:00:00Z"
+            Health = container.health.status == "none" ? nil : HealthPayload(container.health)
+        }
     }
+
     struct ConfigPayload: Content {
         let Image: String
         let Cmd: [String]
+        let Entrypoint: [String]?
+        let Env: [String]
+        let ExposedPorts: [String: EmptyObject]
+        let Volumes: [String: EmptyObject]
+        let WorkingDir: String
+        let User: String
+        let Hostname: String
+        let AttachStdin: Bool
+        let AttachStdout: Bool
+        let AttachStderr: Bool
+        let OpenStdin: Bool
+        let StdinOnce: Bool
         let Tty: Bool
         let Labels: [String: String]
+        let StopSignal: String?
+        let Healthcheck: HealthcheckPayload?
     }
-    struct NetworkSettingsPayload: Content { let Ports: [String: [CreatePortBinding]] }
+
+    struct NetworkEndpointPayload: Content {
+        let IPAddress: String
+        let IPPrefixLen: Int
+        let MacAddress: String
+        let Gateway: String
+        let GlobalIPv6Address: String
+        let GlobalIPv6PrefixLen: Int
+        let IPv6Gateway: String
+        let Links: [String]?
+        let Aliases: [String]?
+    }
+
+    struct NetworkSettingsPayload: Content {
+        let Bridge: String
+        let SandboxID: String
+        let HairpinMode: Bool
+        let LinkLocalIPv6Address: String
+        let LinkLocalIPv6PrefixLen: Int
+        let Ports: [String: [CreatePortBinding]]
+        let SandboxKey: String
+        let SecondaryIPAddresses: [String]
+        let SecondaryIPv6Addresses: [String]
+        let EndpointID: String
+        let Gateway: String
+        let GlobalIPv6Address: String
+        let GlobalIPv6PrefixLen: Int
+        let IPAddress: String
+        let IPPrefixLen: Int
+        let IPv6Gateway: String
+        let MacAddress: String
+        let Networks: [String: NetworkEndpointPayload]
+    }
+
     struct HostConfigPayload: Content {
+        let Binds: [String]
         let PortBindings: [String: [CreatePortBinding]]
+        let NetworkMode: String
         let StopTimeout: Int?
+        let RestartPolicy: RestartPolicyPayload
+        let AutoRemove: Bool
+        let ReadonlyRootfs: Bool
+        let Privileged: Bool
+        let Init: Bool?
+        let Dns: [String]
+        let DnsSearch: [String]
+        let ExtraHosts: [String]
+        let Memory: Int64
+        let MemorySwap: Int64
+        let MemoryReservation: Int64
+        let NanoCpus: Int64
+        let CpuShares: Int64
+        let CpuPeriod: Int64
+        let CpuQuota: Int64
+        let CpusetCpus: String
+        let CpusetMems: String
+        let PidsLimit: Int64
+    }
+
+    struct GraphDriverPayload: Content {
+        let Name: String
+        let Data: [String: String]
+    }
+
+    struct MountPayload: Content {
+        let `Type`: String
+        let Name: String?
+        let Source: String
+        let Destination: String
+        let Driver: String
+        let Mode: String
+        let RW: Bool
+        let Propagation: String
+
+        init(_ mount: DockerRuntimeMount) {
+            `Type` = mount.type
+            Name = mount.volumeName
+            Source = mount.source
+            Destination = mount.target
+            Driver = mount.type == "volume" ? "local" : ""
+            Mode = mount.readOnly ? "ro" : "rw"
+            RW = !mount.readOnly
+            Propagation = ""
+        }
     }
 
     let Id: String
     let Name: String
     let Image: String
     let Created: String
+    let Path: String
+    let Args: [String]
+    let ResolvConfPath: String
+    let HostnamePath: String
+    let HostsPath: String
+    let LogPath: String?
+    let RestartCount: Int
+    let Driver: String
+    let Platform: String
+    let MountLabel: String
+    let ProcessLabel: String
+    let AppArmorProfile: String
+    let ExecIDs: [String]?
     let State: StatePayload
     let Config: ConfigPayload
     let HostConfig: HostConfigPayload
     let NetworkSettings: NetworkSettingsPayload
+    let GraphDriver: GraphDriverPayload
+    let SizeRw: Int64?
+    let SizeRootFs: Int64?
+    let Mounts: [MountPayload]
 
-    init(_ container: DockerRuntimeContainer) {
+    init(
+        _ container: DockerRuntimeContainer,
+        networks: [DockerRuntimeNetwork] = [],
+        includeSize: Bool = false
+    ) {
         Id = container.id
         Name = container.name.hasPrefix("/") ? container.name : "/\(container.name)"
         Image = container.image
         Created = ISO8601DateFormatter().string(from: container.createdAt)
-        State = .init(
-            Status: container.state.rawValue,
-            Running: container.state == .running,
-            ExitCode: container.exitCode ?? 0
+        Path = container.command.first ?? ""
+        Args = Array(container.command.dropFirst())
+        ResolvConfPath = ""
+        HostnamePath = ""
+        HostsPath = ""
+        LogPath = nil
+        RestartCount = container.restartCount
+        Driver = "overlayfs"
+        Platform = "linux"
+        MountLabel = ""
+        ProcessLabel = ""
+        AppArmorProfile = ""
+        ExecIDs = nil
+        State = .init(container: container, timestamp: Created)
+        Config = .init(
+            Image: container.image, Cmd: container.cmd ?? container.command,
+            Entrypoint: container.entrypoint, Env: container.environment,
+            ExposedPorts: Dictionary(
+                uniqueKeysWithValues: container.ports.map {
+                    ("\($0.containerPort)/\($0.proto)", EmptyObject())
+                }),
+            Volumes: Dictionary(
+                uniqueKeysWithValues: container.mounts.filter { $0.type == "volume" }.map {
+                    ($0.target, EmptyObject())
+                }),
+            WorkingDir: container.workingDirectory, User: container.user,
+            Hostname: container.hostname, AttachStdin: container.attachStdin,
+            AttachStdout: true, AttachStderr: true, OpenStdin: container.openStdin,
+            StdinOnce: container.stdinOnce,
+            Tty: container.tty, Labels: container.labels,
+            StopSignal: container.stopSignal.isEmpty ? nil : container.stopSignal,
+            Healthcheck: container.healthcheck.map(HealthcheckPayload.init)
         )
-        Config = .init(Image: container.image, Cmd: container.command, Tty: container.tty, Labels: container.labels)
         var ports: [String: [CreatePortBinding]] = [:]
         for binding in container.ports {
             ports["\(binding.containerPort)/\(binding.proto)", default: []].append(
                 .init(HostIp: binding.hostIP, HostPort: binding.hostPort.map(String.init))
             )
         }
-        HostConfig = .init(PortBindings: ports, StopTimeout: container.stopTimeout)
-        NetworkSettings = .init(Ports: ports)
+        HostConfig = .init(
+            Binds: container.mounts.filter { $0.type == "bind" }.map {
+                "\($0.source):\($0.target):\($0.readOnly ? "ro" : "rw")"
+            }, PortBindings: ports, NetworkMode: container.networkMode,
+            StopTimeout: container.stopTimeout,
+            RestartPolicy: .init(container.restartPolicy), AutoRemove: container.autoRemove,
+            ReadonlyRootfs: container.readonlyRootfs, Privileged: false, Init: nil,
+            Dns: container.dns, DnsSearch: container.dnsSearch, ExtraHosts: container.extraHosts,
+            Memory: container.resources.memory, MemorySwap: container.resources.memorySwap,
+            MemoryReservation: container.resources.memoryReservation,
+            NanoCpus: container.resources.nanoCPUs, CpuShares: container.resources.cpuShares,
+            CpuPeriod: container.resources.cpuPeriod, CpuQuota: container.resources.cpuQuota,
+            CpusetCpus: container.resources.cpusetCpus, CpusetMems: container.resources.cpusetMems,
+            PidsLimit: container.resources.pidsLimit
+        )
+        let endpoints = networks.compactMap { network -> (String, NetworkEndpointPayload)? in
+            guard let endpoint = network.containers[container.id] else { return nil }
+            let (ipv4, ipv4Prefix) = Self.addressAndPrefix(
+                endpoint.ipv4Address, fallback: network.ipam.Config.first?.Subnet
+            )
+            let (ipv6, ipv6Prefix) = Self.addressAndPrefix(endpoint.ipv6Address, fallback: nil)
+            return (
+                network.name,
+                NetworkEndpointPayload(
+                    IPAddress: ipv4, IPPrefixLen: ipv4Prefix,
+                    MacAddress: endpoint.macAddress ?? "", Gateway: Self.gateway(network),
+                    GlobalIPv6Address: ipv6, GlobalIPv6PrefixLen: ipv6Prefix,
+                    IPv6Gateway: "", Links: nil, Aliases: nil
+                )
+            )
+        }
+        let endpointMap = Dictionary(uniqueKeysWithValues: endpoints)
+        let primary = endpoints.first?.1
+        NetworkSettings = .init(
+            Bridge: endpoints.first?.0 ?? "", SandboxID: "", HairpinMode: false,
+            LinkLocalIPv6Address: "", LinkLocalIPv6PrefixLen: 0, Ports: ports,
+            SandboxKey: "", SecondaryIPAddresses: [], SecondaryIPv6Addresses: [],
+            EndpointID: "", Gateway: primary?.Gateway ?? "",
+            GlobalIPv6Address: primary?.GlobalIPv6Address ?? "",
+            GlobalIPv6PrefixLen: primary?.GlobalIPv6PrefixLen ?? 0,
+            IPAddress: primary?.IPAddress ?? "", IPPrefixLen: primary?.IPPrefixLen ?? 0,
+            IPv6Gateway: primary?.IPv6Gateway ?? "", MacAddress: primary?.MacAddress ?? "",
+            Networks: endpointMap
+        )
+        GraphDriver = .init(Name: "overlayfs", Data: [:])
+        SizeRw = includeSize && container.sizeRw >= 0 ? container.sizeRw : nil
+        SizeRootFs = includeSize && container.sizeRootFs >= 0 ? container.sizeRootFs : nil
+        Mounts = container.mounts.map(MountPayload.init)
+    }
+
+    private static func addressAndPrefix(_ value: String?, fallback: String?) -> (String, Int) {
+        guard let value, !value.isEmpty else { return ("", 0) }
+        if let slash = value.lastIndex(of: "/"), let prefix = Int(value[value.index(after: slash)...]) {
+            return (String(value[..<slash]), prefix)
+        }
+        if let fallback, let slash = fallback.lastIndex(of: "/"),
+            let prefix = Int(fallback[fallback.index(after: slash)...])
+        {
+            return (value, prefix)
+        }
+        return (value, 0)
+    }
+
+    private static func gateway(_ network: DockerRuntimeNetwork) -> String {
+        network.ipam.Config.first?.Gateway ?? ""
     }
 }
 
@@ -2832,8 +4101,10 @@ private struct ListResponse: Content {
     let State: String
     let Status: String
     let Ports: [PortPayload]
+    let SizeRw: Int64?
+    let SizeRootFs: Int64?
 
-    init(_ container: DockerRuntimeContainer) {
+    init(_ container: DockerRuntimeContainer, includeSize: Bool = false) {
         Id = container.id
         Names = [container.name.hasPrefix("/") ? container.name : "/\(container.name)"]
         Image = container.image
@@ -2850,6 +4121,8 @@ private struct ListResponse: Content {
                 Type: $0.proto
             )
         }
+        SizeRw = includeSize && container.sizeRw >= 0 ? container.sizeRw : (includeSize ? 0 : nil)
+        SizeRootFs = includeSize && container.sizeRootFs >= 0 ? container.sizeRootFs : (includeSize ? 0 : nil)
     }
 }
 

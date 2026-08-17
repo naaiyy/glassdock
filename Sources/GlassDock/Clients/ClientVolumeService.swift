@@ -12,6 +12,12 @@ protocol ClientVolumeProtocol: Sendable {
     func update(name: String, request: RESTVolumeUpdate) async throws -> Volume
 }
 
+/// Optional optimistic-concurrency support for volume backends that persist a
+/// Docker-style version alongside the volume metadata.
+protocol VersionedClientVolumeProtocol: Sendable {
+    func update(name: String, request: RESTVolumeUpdate, version: UInt64) async throws -> Volume
+}
+
 extension ClientVolumeProtocol {
     func update(name: String, request: RESTVolumeUpdate) async throws -> Volume {
         _ = request
