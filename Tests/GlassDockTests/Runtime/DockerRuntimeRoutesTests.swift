@@ -506,8 +506,8 @@ struct DockerRuntimeRoutesTests {
                 #expect(response.status == .switchingProtocols)
             }
             for (method, path) in [
-                (HTTPMethod.GET, "/v1.51/plugins"),
-                (HTTPMethod.POST, "/v1.51/session"),
+                (HTTPMethod.POST, "/v1.51/build"),
+                (HTTPMethod.POST, "/v1.51/build/prune"),
             ] {
                 try await app.testing().test(method, path) { response async in
                     #expect(response.status == .notImplemented)
