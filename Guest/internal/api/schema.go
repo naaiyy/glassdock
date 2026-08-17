@@ -18,6 +18,7 @@ const (
 	MethodImageExport             = "image.export"
 	MethodImageCommit             = "image.commit"
 	MethodImageImport             = "image.import"
+	MethodImageBuild              = "image.build"
 	MethodContainerList           = "container.list"
 	MethodContainerInspect        = "container.inspect"
 	MethodContainerLogs           = "container.logs"
@@ -97,6 +98,14 @@ type ImageImportRequest struct {
 }
 type ImageImportResponse struct {
 	Images []ImageResponse `json:"images"`
+}
+type ImageBuildRequest struct {
+	Context    []byte   `json:"context"`
+	Dockerfile string   `json:"dockerfile,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+}
+type ImageBuildResponse struct {
+	Image ImageResponse `json:"image"`
 }
 type Image struct {
 	ID           string            `json:"id"`
