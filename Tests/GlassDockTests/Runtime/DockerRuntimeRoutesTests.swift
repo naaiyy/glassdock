@@ -734,6 +734,17 @@ struct DockerRuntimeRoutesTests {
         #expect(resize?.1 == 40)
     }
 
+    @Test("stop with a negative timeout waits without forcing SIGKILL")
+    func stopWaitsIndefinitely() async throws {
+        let backend = DockerRuntimeBackendMock(running: true, waitDelayNanoseconds: 50_000_000)
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.POST, "/v1.51/containers/container-1/stop?t=-1") { response async in
+                #expect(response.status == .noContent)
+            }
+        }
+        #expect(await backend.lastKillSignals == [15])
+    }
+
     @Test("guest network objects can be created and connected while stopped")
     func networkObjectOperations() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -1040,6 +1051,7 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastArchiveData: Data?
     private(set) var lastRename: String?
     private(set) var lastResize: (UInt32, UInt32)?
+    private(set) var lastKillSignals: [UInt32] = []
     private(set) var lastUpdate: DockerRuntimeContainerUpdate?
     private(set) var lastNetworkCreate: DockerRuntimeNetwork?
     private(set) var lastNetworkConnect: (String, String)?
@@ -1053,12 +1065,15 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private let imageRows: [DockerRuntimeImage]
     private let containerSizeRw: Int64
     private let containerSizeRootFs: Int64
+    private let waitDelayNanoseconds: UInt64
 
     init(
         logOutput: String? = nil,
         images: [DockerRuntimeImage]? = nil,
         containerSizeRw: Int64 = -1,
-        containerSizeRootFs: Int64 = -1
+        containerSizeRootFs: Int64 = -1,
+        running: Bool = false,
+        waitDelayNanoseconds: UInt64 = 0
     ) {
         self.logOutput = logOutput
         self.imageRows =
@@ -1067,6 +1082,8 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
             ]
         self.containerSizeRw = containerSizeRw
         self.containerSizeRootFs = containerSizeRootFs
+        self.running = running
+        self.waitDelayNanoseconds = waitDelayNanoseconds
     }
 
     func pullImage(
@@ -1192,12 +1209,16 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     }
 
     func killContainer(id: String, signal: UInt32) async throws {
+        lastKillSignals.append(signal)
         running = false
         paused = false
     }
 
     func waitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32 {
         lastWaitCondition = condition
+        if waitDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: waitDelayNanoseconds)
+        }
         return 7
     }
 

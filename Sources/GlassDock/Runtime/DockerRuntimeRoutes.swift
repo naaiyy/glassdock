@@ -1151,7 +1151,7 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func restartContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        let timeout = max(0, req.query[Int.self, at: "t"] ?? 10)
+        let timeout = req.query[Int.self, at: "t"] ?? 10
         let container = try await call { try await backend.inspectContainer(id: id) }
         if container.state == .running || container.state == .paused {
             if container.state == .paused {
@@ -1161,23 +1161,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             guard let signal = DockerSignal.number(signalText) else {
                 throw Abort(.badRequest, reason: "Invalid restart signal: \(signalText)")
             }
-            try await call { try await backend.killContainer(id: id, signal: signal) }
-            let wait = Task { try await backend.waitContainer(id: id, condition: .notRunning) }
-            do {
-                _ = try await withThrowingTaskGroup(of: Int32.self) { group in
-                    group.addTask { try await wait.value }
-                    group.addTask {
-                        try await Task.sleep(for: .seconds(timeout))
-                        throw DockerStopTimeout()
-                    }
-                    defer { group.cancelAll() }
-                    guard let result = try await group.next() else { throw DockerStopTimeout() }
-                    return result
-                }
-            } catch is DockerStopTimeout {
-                try await call { try await backend.killContainer(id: id, signal: 9) }
-                _ = try await wait.value
-            }
+            try await stopAndWait(id: id, signal: signal, timeout: timeout)
         }
         try await call { try await backend.startContainer(id: id) }
         return Response(status: .noContent)
@@ -1220,9 +1204,18 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard let signal = DockerSignal.number(signalText) else {
             throw Abort(.badRequest, reason: "Invalid stop signal: \(signalText)")
         }
-        let timeout = max(0, req.query[Int.self, at: "t"] ?? 10)
+        let timeout = req.query[Int.self, at: "t"] ?? 10
+        try await stopAndWait(id: id, signal: signal, timeout: timeout)
+        return Response(status: .noContent)
+    }
+
+    private func stopAndWait(id: String, signal: UInt32, timeout: Int) async throws {
         try await call { try await backend.killContainer(id: id, signal: signal) }
         let wait = Task { try await backend.waitContainer(id: id, condition: .notRunning) }
+        if timeout < 0 {
+            _ = try await wait.value
+            return
+        }
         do {
             _ = try await withThrowingTaskGroup(of: Int32.self) { group in
                 group.addTask { try await wait.value }
@@ -1240,7 +1233,6 @@ struct DockerRuntimeRoutes: RouteCollection {
             try await call { try await backend.killContainer(id: id, signal: 9) }
             _ = try await wait.value
         }
-        return Response(status: .noContent)
     }
 
     private func killContainer(_ req: Request) async throws -> Response {
