@@ -148,6 +148,39 @@ def validate_contract_response(row, status, body, content_type)
   if !body.empty? && status >= 400 && !content_type.include?("json")
     return "#{method} #{path}: error response lacks a JSON content type (#{content_type.inspect})"
   end
+  return validate_success_schema(row, status, body, content_type)
+end
+
+def validate_success_schema(row, status, body, content_type)
+  return nil unless status.between?(200, 299) && !body.empty?
+  return nil if content_type.include?("raw-stream") || content_type.include?("tar") || content_type.include?("octet-stream")
+
+  value = json_body(body)
+  method = row.fetch("method")
+  path = row.fetch("path")
+  return "#{method} #{path}: successful response is not a JSON object or array" unless value.is_a?(Hash) || value.is_a?(Array)
+
+  required = case path
+             when "/version"
+               %w[ApiVersion Version]
+             when "/containers/create"
+               %w[Id Warnings]
+             when "/configs/create", "/secrets/create"
+               %w[Id]
+             when "/networks/create"
+               %w[Id Warning]
+             when "/volumes/create"
+               %w[Name Driver Mountpoint]
+             when "/images/create", "/images/{name}/tag", "/images/{name}/push"
+               []
+             else
+               nil
+             end
+  return nil if required.nil? || value.is_a?(Array)
+
+  missing = required.reject { |key| value.key?(key) }
+  return "#{method} #{path}: successful response is missing required field(s) #{missing.join(", ")}" unless missing.empty?
+
   nil
 end
 

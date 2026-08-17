@@ -47,6 +47,33 @@ assert(
   validate_contract_response({"method" => "GET", "path" => "/_ping"}, 200, "OK", "" ).nil?,
   "the Docker ping body should be accepted as plain text"
 )
+assert(
+  validate_contract_response(
+    {"method" => "POST", "path" => "/containers/create"},
+    201,
+    '{"Id":"container-id","Warnings":[]}',
+    "application/json"
+  ).nil?,
+  "container create responses must accept the Docker identity shape"
+)
+assert(
+  validate_contract_response(
+    {"method" => "POST", "path" => "/containers/create"},
+    201,
+    '{"Warnings":[]}',
+    "application/json"
+  ).include?("Id"),
+  "container create responses must require Id"
+)
+assert(
+  validate_contract_response(
+    {"method" => "GET", "path" => "/version"},
+    200,
+    '{"ApiVersion":"1.51","Version":"test"}',
+    "application/json"
+  ).nil?,
+  "version responses must accept the Docker version shape"
+)
 
 generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
 operations = generated_matrix.fetch("operations")
