@@ -95,16 +95,6 @@ func configure(
     try app.register(collection: EventsRoute())
 
     try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
-    try app.register(
-        collection: DockerControlPlaneRoutes(
-            controlPlane: DockerControlPlane(
-                stateURL: engineStateDirectory.appendingPathComponent(
-                    "control-plane.json", isDirectory: false
-                )
-            ),
-            runtime: runtime
-        )
-    )
     try app.register(collection: ImageSearchRoute())
     try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())
@@ -117,7 +107,7 @@ func configure(
     try app.register(collection: VolumeInspectRoute(client: volumeClient))
     try app.register(collection: VolumeListRoute(client: volumeClient))
     try app.register(collection: VolumePruneRoute(client: volumeClient))
-    try app.register(collection: VolumeUpdateRoute(client: volumeClient))
+    try app.register(collection: VolumeUpdateRoute())
 
     // --- miscellaneous ---
     try app.register(collection: VersionRoute())

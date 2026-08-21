@@ -4,7 +4,7 @@ import Vapor
 
 /// Persistent local volumes for the single guest runtime. Volume data stays in
 /// a host directory that the custom VMM shares through its virtio-fs device.
-actor RuntimeVolumeService: ClientVolumeProtocol, VersionedClientVolumeProtocol {
+actor RuntimeVolumeService: ClientVolumeProtocol {
     private struct Metadata: Codable {
         let name: String
         let driver: String
@@ -176,49 +176,6 @@ actor RuntimeVolumeService: ClientVolumeProtocol, VersionedClientVolumeProtocol 
             throw Abort(.notFound, reason: "No such volume: \(name)")
         }
         return try volume(from: readMetadata(at: metadataURL))
-    }
-
-    func update(name: String, request: RESTVolumeUpdate) throws -> Volume {
-        let metadataURL = volumeDirectory(name).appendingPathComponent(
-            "metadata.json", isDirectory: false
-        )
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            throw Abort(.notFound, reason: "No such volume: \(name)")
-        }
-        let metadata = try readMetadata(at: metadataURL)
-        return try update(name: name, request: request, version: metadata.version)
-    }
-
-    func update(name: String, request: RESTVolumeUpdate, version: UInt64) throws -> Volume {
-        try Self.validate(name)
-        let metadataURL = volumeDirectory(name).appendingPathComponent(
-            "metadata.json", isDirectory: false
-        )
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            throw Abort(.notFound, reason: "No such volume: \(name)")
-        }
-        var metadata = try readMetadata(at: metadataURL)
-        guard metadata.version == version else {
-            throw Abort(
-                .conflict,
-                reason: "Volume version mismatch: expected \(metadata.version), got \(version)"
-            )
-        }
-        if let labels = request.Labels {
-            guard !LabelNormalization.containsReservedKey(labels) else {
-                throw Abort(
-                    .badRequest,
-                    reason: "Label key '\(LabelNormalization.mappingKey)' is reserved for internal use"
-                )
-            }
-            metadata.labels = LabelNormalization.sanitize(labels)
-        }
-        if let options = request.DriverOpts {
-            metadata.options = options
-        }
-        metadata.version += 1
-        try write(metadata)
-        return try volume(from: metadata)
     }
 
     private func prepareRoot() throws {

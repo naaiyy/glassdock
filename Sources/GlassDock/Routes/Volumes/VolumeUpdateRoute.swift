@@ -1,28 +1,19 @@
 import Vapor
 
+/// Docker Engine API `PUT /volumes/{name}` only updates Swarm cluster
+/// volumes. Moby v28.5.2 rejects it with a 503 before any validation when
+/// the daemon is not part of a swarm (api/server/router/volume/
+/// volume_routes.go, putVolumesUpdate). Glass Dock has no swarm manager,
+/// so this route always returns that exact error.
 struct VolumeUpdateRoute: RouteCollection {
-    let client: any ClientVolumeProtocol
+    static let unavailableMessage =
+        "volume update only valid for cluster volumes, but swarm is unavailable"
 
     func boot(routes: RoutesBuilder) throws {
         try routes.registerVersionedRoute(.PUT, pattern: "/volumes/{name:.*}", use: handler)
     }
 
     func handler(_ req: Request) async throws -> Response {
-        guard let name = req.parameters.get("name"), !name.isEmpty else {
-            throw Abort(.badRequest, reason: "Missing volume name")
-        }
-        guard let rawVersion = req.query[String.self, at: "version"],
-            let version = UInt64(rawVersion)
-        else {
-            throw Abort(.badRequest, reason: "A valid version query parameter is required")
-        }
-        let request = try req.content.decode(RESTVolumeUpdate.self)
-        let volume: Volume
-        if let versionedClient = client as? any VersionedClientVolumeProtocol {
-            volume = try await versionedClient.update(name: name, request: request, version: version)
-        } else {
-            volume = try await client.update(name: name, request: request)
-        }
-        return try await volume.encodeResponse(for: req)
+        throw Abort(.serviceUnavailable, reason: Self.unavailableMessage)
     }
 }

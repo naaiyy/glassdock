@@ -29,38 +29,23 @@ struct SessionAndVolumeUpdateRouteTests {
         }
     }
 
-    @Test("local volume update persists labels and driver options")
+    @Test("volume update returns Moby's 503 cluster-volume error on a non-swarm daemon")
     func volumeUpdate() async throws {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("glassdock-volume-update-\(UUID().uuidString)")
-        let client = RuntimeVolumeService(root: root)
         try await withApp(configure: { _ in }) { app in
+            app.middleware.use(DockerErrorMiddleware(), at: .beginning)
             let router = app.regexRouter(with: app.logger)
             app.setRegexRouter(router)
-            try app.register(collection: VolumeUpdateRoute(client: client))
+            try app.register(collection: VolumeUpdateRoute())
 
-            _ = try await client.create(
-                request: RESTVolumeCreate(
-                    Name: "data",
-                    Driver: "local",
-                    Options: ["sync": "fsync"],
-                    Labels: ["tier": "old"]
+            try await app.testing().test(.PUT, "/v1.51/volumes/data?version=1") { response async throws in
+                #expect(response.status == .serviceUnavailable)
+                let value =
+                    try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(
+                    (value?["message"] as? String)
+                        == VolumeUpdateRoute.unavailableMessage
                 )
-            )
-            try await app.testing().test(
-                .PUT,
-                "/v1.51/volumes/data?version=1",
-                headers: ["Content-Type": "application/json"],
-                body: ByteBuffer(
-                    string: #"{"Labels":{"tier":"new"},"DriverOpts":{"sync":"full"}}"#
-                )
-            ) { response async throws in
-                #expect(response.status == .ok)
-                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
-                #expect((value?["Labels"] as? [String: String])?["tier"] == "new")
-                #expect((value?["Options"] as? [String: String])?["sync"] == "full")
             }
         }
-        try? FileManager.default.removeItem(at: root)
     }
 }
