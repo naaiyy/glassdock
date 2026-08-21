@@ -19,6 +19,7 @@ REGISTERED_ROUTE_ROOTS = [
   File.join(ROOT, "Sources", "GlassDock", "Routes", "Volumes"),
 ].freeze
 METHODS = %w[get post put delete head options patch].freeze
+SUPPORT_STATES = %w[full partial error-only].freeze
 
 class MatrixError < StandardError; end
 
@@ -69,29 +70,6 @@ def response_schema(operation, status)
   schema["$ref"] || schema["type"]
 end
 
-def unsupported_reason(path)
-  case path
-  when "/build", "/build/prune", "/commit"
-    "BuildKit and image commit are not owned by the persistent guest runtime."
-  when %r{\A/(swarm|nodes|services|tasks|secrets|configs)(/|\z)}
-    "Docker Swarm is not supported by the single-host Apple container runtime."
-  when %r{\A/plugins(/|\z)}
-    "Docker plugins require a host plugin manager that Glass Dock does not provide."
-  when %r{\A/networks(/|\z)}
-    "Network objects are owned by the guest runtime and do not yet have a Docker API adapter."
-  when "/system/df"
-    "Reports guest-backed images, containers, and persistent volumes; build-cache accounting and container filesystem sizes remain unavailable."
-  when "/session"
-    "Interactive sessions require a guest terminal handoff that is not implemented."
-  when %r{/archive\z}, %r{/attach/ws\z}, %r{/export\z}, %r{/stats\z}, %r{/top\z}, %r{/changes\z}
-    "The persistent guest protocol does not expose this container operation yet."
-  when %r{/images/(get|search)\z}, %r{/history\z}, "/images/load"
-    "The persistent guest protocol does not expose this image operation yet."
-  else
-    "No persistent guest runtime implementation is registered for this Docker API operation."
-  end
-end
-
 def parse_options
   options = {
     output: DEFAULT_OUTPUT, spec: nil, check: false, check_routes: false,
@@ -116,8 +94,11 @@ def registered_routes(roots = REGISTERED_ROUTE_ROOTS)
     File.directory?(root) ? Dir[File.join(root, "**", "*.swift")] : [root]
   end
   files.flat_map do |path|
-    File.read(path).scan(/registerVersionedRoute\(\.([A-Z]+),\s*pattern:\s*"([^"]+)"/)
-      .map { |method, route| key(method, route) }
+    text = File.read(path)
+    (
+      text.scan(/registerVersionedRoute\(\.([A-Z]+),\s*pattern:\s*"([^"]+)"/) +
+      text.scan(/Endpoint\(method:\s*\.([A-Z]+),\s*pattern:\s*"([^"]+)"\)/)
+    ).map { |method, route| key(method, route) }
   end.to_set
 end
 
@@ -141,24 +122,42 @@ def build_matrix(spec, source, configured_routes, digest)
       next unless METHODS.include?(method.to_s.downcase)
       normalized_key = key(method, path)
       config = configured_routes[normalized_key]
+      unless config
+        raise MatrixError,
+          "#{normalized_key} is missing from the support manifest; classify it as full, partial, or error-only"
+      end
+      support = config.fetch("support")
+      unless SUPPORT_STATES.include?(support)
+        raise MatrixError, "#{normalized_key} has invalid support state #{support.inspect} (expected one of #{SUPPORT_STATES.join(", ")})"
+      end
       success = success_status(operation)
       raise MatrixError, "#{normalized_key} has no success response in the Moby spec" unless success
+      expected_status =
+        if config.key?("expectedStatus")
+          config.fetch("expectedStatus")
+        elsif support == "error-only"
+          raise MatrixError, "#{normalized_key} is error-only and must declare expectedStatus"
+        else
+          success.to_i
+        end
       rows << {
         "method" => method.upcase,
         "path" => normalize_path(path),
         "operationId" => operation.fetch("operationId", ""),
-        "support" => config&.fetch("support", "unsupported") || "unsupported",
-        "expectedStatus" => config&.fetch("expectedStatus", nil) || (config ? success.to_i : 501),
+        "support" => support,
+        "expectedStatus" => expected_status,
         "responseStatuses" => response_statuses(operation).map(&:to_i),
         "responseSchema" => response_schema(operation, success),
-        "owner" => config&.fetch("owner", "ExplicitUnsupportedDockerRoutes") || "ExplicitUnsupportedDockerRoutes",
-        "note" => config&.fetch("note", nil) || unsupported_reason(path)
+        "owner" => config.fetch("owner"),
+        "note" => config.fetch("note", "")
       }
     end
   end
+  stale = configured_routes.keys.to_set - rows.map { |row| key(row["method"], row["path"]) }.to_set
+  raise MatrixError, "support manifest lists unknown operations: #{stale.to_a.sort.join(", ")}" unless stale.empty?
   rows.sort_by! { |row| [row["path"], row["method"]] }
   {
-    "schema" => 1,
+    "schema" => 2,
     "source" => {
       "repository" => source.dig("repository"),
       "ref" => source.dig("ref"),
@@ -172,13 +171,23 @@ end
 
 def check_routes(matrix)
   text = File.read(ROUTE_SOURCE)
-  routes = text.scan(/Endpoint\(method:\s*\.([A-Z]+),\s*pattern:\s*"([^"]+)"\)/).map { |method, path| key(method, path) }.to_set
-  expected = matrix.fetch("operations").select { |row| row["support"] == "unsupported" }.map { |row| key(row["method"], row["path"]) }.to_set
+  routes = (
+    text.scan(/Endpoint\(method:\s*\.([A-Z]+),\s*pattern:\s*"([^"]+)"\)/) +
+    text.scan(/registerVersionedRoute\(\.([A-Z]+),\s*pattern:\s*"([^"]+)"/)
+  ).map { |method, path| key(method, path) }.to_set
+  expected = matrix.fetch("operations")
+    .select { |row| row["owner"] == "ExplicitUnsupportedDockerRoutes" && row["support"] == "error-only" }
+    .map { |row| key(row["method"], row["path"]) }.to_set
+  served_elsewhere =
+    matrix.fetch("operations")
+      .select { |row| row["owner"] == "ExplicitUnsupportedDockerRoutes" && row["support"] != "error-only" }
+      .map { |row| key(row["method"], row["path"]) }.to_set
+  routes -= served_elsewhere
   missing = expected - routes
   extra = routes - expected
   problems = []
-  problems << "missing explicit 501 routes: #{missing.to_a.sort.join(", ")}" unless missing.empty?
-  problems << "extra explicit 501 routes: #{extra.to_a.sort.join(", ")}" unless extra.empty?
+  problems << "missing explicit unsupported routes: #{missing.to_a.sort.join(", ")}" unless missing.empty?
+  problems << "extra explicit unsupported routes: #{extra.to_a.sort.join(", ")}" unless extra.empty?
   raise MatrixError, problems.join("\n") unless problems.empty?
 end
 

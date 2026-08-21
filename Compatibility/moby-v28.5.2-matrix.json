@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "source": {
     "repository": "moby/moby",
     "ref": "v28.5.2",
@@ -12,7 +12,7 @@
       "method": "GET",
       "path": "/_ping",
       "operationId": "SystemPing",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -26,7 +26,7 @@
       "method": "HEAD",
       "path": "/_ping",
       "operationId": "SystemPingHead",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -40,7 +40,7 @@
       "method": "POST",
       "path": "/auth",
       "operationId": "SystemAuth",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -56,7 +56,7 @@
       "method": "POST",
       "path": "/build",
       "operationId": "ImageBuild",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -65,13 +65,13 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Builds Dockerfiles in the persistent guest runtime with local and remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check configuration support."
+      "note": "Builds classic Dockerfiles in the persistent guest runtime with local/remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check support; BuildKit syntax, cache mounts, and heredocs are not supported."
     },
     {
       "method": "POST",
       "path": "/build/prune",
       "operationId": "BuildPrune",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -85,7 +85,7 @@
       "method": "POST",
       "path": "/commit",
       "operationId": "ImageCommit",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -94,29 +94,29 @@
       ],
       "responseSchema": "#/definitions/IDResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Commits a guest container filesystem diff as a new image layer and applies Docker configuration, health-check, shell, and ONBUILD changes."
+      "note": "Commits a guest container filesystem diff as a new image layer and applies configuration changes; diff computation differs from Docker's per-file change tracking."
     },
     {
       "method": "GET",
       "path": "/configs",
       "operationId": "ConfigList",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists persistent single-daemon config objects with Docker name, id, label, and id filters."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/configs/create",
       "operationId": "ConfigCreate",
-      "support": "implemented",
-      "expectedStatus": 201,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         201,
         409,
@@ -124,15 +124,15 @@
         503
       ],
       "responseSchema": "#/definitions/IDResponse",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Creates persistent config metadata and base64 data outside the guest scheduler."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "DELETE",
       "path": "/configs/{id}",
       "operationId": "ConfigDelete",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         204,
         404,
@@ -140,15 +140,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Deletes a persistent config by full or unique id prefix."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/configs/{id}",
       "operationId": "ConfigInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -156,15 +156,15 @@
         503
       ],
       "responseSchema": "#/definitions/Config",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects a persistent config with Docker object and spec fields."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/configs/{id}/update",
       "operationId": "ConfigUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -173,14 +173,14 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Updates config spec and increments its object version."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/containers/create",
       "operationId": "ContainerCreate",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -197,7 +197,7 @@
       "method": "GET",
       "path": "/containers/json",
       "operationId": "ContainerList",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -212,7 +212,7 @@
       "method": "POST",
       "path": "/containers/prune",
       "operationId": "ContainerPrune",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -226,7 +226,7 @@
       "method": "DELETE",
       "path": "/containers/{id}",
       "operationId": "ContainerDelete",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -243,7 +243,7 @@
       "method": "GET",
       "path": "/containers/{id}/archive",
       "operationId": "ContainerArchive",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -259,7 +259,7 @@
       "method": "HEAD",
       "path": "/containers/{id}/archive",
       "operationId": "ContainerArchiveInfo",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -275,7 +275,7 @@
       "method": "PUT",
       "path": "/containers/{id}/archive",
       "operationId": "PutContainerArchive",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -292,7 +292,7 @@
       "method": "POST",
       "path": "/containers/{id}/attach",
       "operationId": "ContainerAttach",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         101,
@@ -309,7 +309,7 @@
       "method": "GET",
       "path": "/containers/{id}/attach/ws",
       "operationId": "ContainerAttachWebsocket",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         101,
@@ -326,7 +326,7 @@
       "method": "GET",
       "path": "/containers/{id}/changes",
       "operationId": "ContainerChanges",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -341,7 +341,7 @@
       "method": "POST",
       "path": "/containers/{id}/exec",
       "operationId": "ContainerExec",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -351,13 +351,13 @@
       ],
       "responseSchema": "#/definitions/IDResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Exec creation and guest-backed command execution without interactive stdin."
+      "note": "Exec creation and guest-backed command execution."
     },
     {
       "method": "GET",
       "path": "/containers/{id}/export",
       "operationId": "ContainerExport",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -372,7 +372,7 @@
       "method": "GET",
       "path": "/containers/{id}/json",
       "operationId": "ContainerInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -387,7 +387,7 @@
       "method": "POST",
       "path": "/containers/{id}/kill",
       "operationId": "ContainerKill",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -403,7 +403,7 @@
       "method": "GET",
       "path": "/containers/{id}/logs",
       "operationId": "ContainerLogs",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -418,7 +418,7 @@
       "method": "POST",
       "path": "/containers/{id}/pause",
       "operationId": "ContainerPause",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -433,7 +433,7 @@
       "method": "POST",
       "path": "/containers/{id}/rename",
       "operationId": "ContainerRename",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -449,7 +449,7 @@
       "method": "POST",
       "path": "/containers/{id}/resize",
       "operationId": "ContainerResize",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -464,7 +464,7 @@
       "method": "POST",
       "path": "/containers/{id}/restart",
       "operationId": "ContainerRestart",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -479,7 +479,7 @@
       "method": "POST",
       "path": "/containers/{id}/start",
       "operationId": "ContainerStart",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -495,7 +495,7 @@
       "method": "GET",
       "path": "/containers/{id}/stats",
       "operationId": "ContainerStats",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -504,13 +504,13 @@
       ],
       "responseSchema": "#/definitions/ContainerStatsResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Reports guest process, memory, CPU, network, and PID samples with streaming and one-shot modes; cgroup details vary by guest runtime."
+      "note": "Streams and samples CPU, memory, network, and PID data derived from guest processes and /proc rather than cgroup accounting, so CPU deltas approximate Docker values."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/stop",
       "operationId": "ContainerStop",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -526,7 +526,7 @@
       "method": "GET",
       "path": "/containers/{id}/top",
       "operationId": "ContainerTop",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -535,13 +535,13 @@
       ],
       "responseSchema": "#/definitions/ContainerTopResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Reports guest task PIDs and command names from the container process namespace."
+      "note": "Reports guest task PIDs and command names from the container process namespace via containerd and /proc."
     },
     {
       "method": "POST",
       "path": "/containers/{id}/unpause",
       "operationId": "ContainerUnpause",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -556,7 +556,7 @@
       "method": "POST",
       "path": "/containers/{id}/update",
       "operationId": "ContainerUpdate",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -571,7 +571,7 @@
       "method": "POST",
       "path": "/containers/{id}/wait",
       "operationId": "ContainerWait",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -587,7 +587,7 @@
       "method": "GET",
       "path": "/distribution/{name}/json",
       "operationId": "DistributionInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -602,7 +602,7 @@
       "method": "GET",
       "path": "/events",
       "operationId": "SystemEvents",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -617,7 +617,7 @@
       "method": "GET",
       "path": "/exec/{id}/json",
       "operationId": "ExecInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -632,7 +632,7 @@
       "method": "POST",
       "path": "/exec/{id}/resize",
       "operationId": "ExecResize",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -648,7 +648,7 @@
       "method": "POST",
       "path": "/exec/{id}/start",
       "operationId": "ExecStart",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -663,7 +663,7 @@
       "method": "POST",
       "path": "/images/create",
       "operationId": "ImageCreate",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -672,13 +672,13 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Guest-backed image pull; fromSrc tar import is supported for archives up to the guest protocol limit."
+      "note": "Guest-backed image pull; fromSrc tar import works for archives up to the guest protocol limit instead of unlimited streaming."
     },
     {
       "method": "GET",
       "path": "/images/get",
       "operationId": "ImageGetAll",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -692,7 +692,7 @@
       "method": "GET",
       "path": "/images/json",
       "operationId": "ImageList",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -706,7 +706,7 @@
       "method": "POST",
       "path": "/images/load",
       "operationId": "ImageLoad",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -720,7 +720,7 @@
       "method": "POST",
       "path": "/images/prune",
       "operationId": "ImagePrune",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -734,7 +734,7 @@
       "method": "GET",
       "path": "/images/search",
       "operationId": "ImageSearch",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -742,13 +742,13 @@
       ],
       "responseSchema": "array",
       "owner": "ImageSearchRoute",
-      "note": "Docker Hub repository search with limit, official, automated, and star filters; custom registry search is not exposed."
+      "note": "Searches Docker Hub with limit, official, automated, and star filters; custom registry search endpoints are not queried."
     },
     {
       "method": "DELETE",
       "path": "/images/{name}",
       "operationId": "ImageDelete",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -764,7 +764,7 @@
       "method": "GET",
       "path": "/images/{name}/get",
       "operationId": "ImageGet",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -778,7 +778,7 @@
       "method": "GET",
       "path": "/images/{name}/history",
       "operationId": "ImageHistory",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -793,7 +793,7 @@
       "method": "GET",
       "path": "/images/{name}/json",
       "operationId": "ImageInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -808,7 +808,7 @@
       "method": "POST",
       "path": "/images/{name}/push",
       "operationId": "ImagePush",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -823,7 +823,7 @@
       "method": "POST",
       "path": "/images/{name}/tag",
       "operationId": "ImageTag",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -840,7 +840,7 @@
       "method": "GET",
       "path": "/info",
       "operationId": "SystemInfo",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -854,7 +854,7 @@
       "method": "GET",
       "path": "/networks",
       "operationId": "NetworkList",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -868,7 +868,7 @@
       "method": "POST",
       "path": "/networks/create",
       "operationId": "NetworkCreate",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -885,7 +885,7 @@
       "method": "POST",
       "path": "/networks/prune",
       "operationId": "NetworkPrune",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -899,7 +899,7 @@
       "method": "DELETE",
       "path": "/networks/{id}",
       "operationId": "NetworkDelete",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -915,7 +915,7 @@
       "method": "GET",
       "path": "/networks/{id}",
       "operationId": "NetworkInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -930,7 +930,7 @@
       "method": "POST",
       "path": "/networks/{id}/connect",
       "operationId": "NetworkConnect",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -947,7 +947,7 @@
       "method": "POST",
       "path": "/networks/{id}/disconnect",
       "operationId": "NetworkDisconnect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -963,23 +963,23 @@
       "method": "GET",
       "path": "/nodes",
       "operationId": "NodeList",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists the local manager node after Swarm initialization with id and name filters."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "DELETE",
       "path": "/nodes/{id}",
       "operationId": "NodeDelete",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -987,15 +987,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Removes the local single-node manager and clears its control-plane state."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/nodes/{id}",
       "operationId": "NodeInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1003,15 +1003,15 @@
         503
       ],
       "responseSchema": "#/definitions/Node",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects the local manager node with Docker node description and status fields."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/nodes/{id}/update",
       "operationId": "NodeUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1020,191 +1020,191 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Persists local node availability, role, name, and label metadata."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/plugins",
       "operationId": "PluginList",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists persistent plugin metadata, configuration, settings, filters, and enabled state."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Returns an empty array like a fresh Moby daemon with no plugins installed."
     },
     {
       "method": "POST",
       "path": "/plugins/create",
       "operationId": "PluginCreate",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         204,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Creates persistent plugin metadata from the Docker plugin request and returns Docker's empty success response."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "GET",
       "path": "/plugins/privileges",
       "operationId": "GetPluginPrivileges",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         500
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Returns the local plugin privilege policy without granting host network access."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 for the requested remote plugin."
     },
     {
       "method": "POST",
       "path": "/plugins/pull",
       "operationId": "PluginPull",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         204,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Records a pulled plugin reference and persistent plugin metadata with Docker status semantics."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 for the requested remote plugin."
     },
     {
       "method": "DELETE",
       "path": "/plugins/{name}",
       "operationId": "PluginDelete",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "#/definitions/Plugin",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Deletes a persistent plugin metadata record."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "POST",
       "path": "/plugins/{name}/disable",
       "operationId": "PluginDisable",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Persists the disabled state of a plugin and returns Docker's success response."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "POST",
       "path": "/plugins/{name}/enable",
       "operationId": "PluginEnable",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Persists the enabled state of a plugin and returns Docker's success response."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "GET",
       "path": "/plugins/{name}/json",
       "operationId": "PluginInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": "#/definitions/Plugin",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects persistent plugin metadata and configuration."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "POST",
       "path": "/plugins/{name}/push",
       "operationId": "PluginPush",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         200,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Validates the persistent plugin identity and returns Docker's push response semantics."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "POST",
       "path": "/plugins/{name}/set",
       "operationId": "PluginSet",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         204,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Persists plugin settings without granting host capabilities."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "POST",
       "path": "/plugins/{name}/upgrade",
       "operationId": "PluginUpgrade",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 404,
       "responseStatuses": [
         204,
         404,
         500
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Updates the persistent plugin reference and version with Docker upgrade semantics."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby's plugin %q not found 404 (plugin/errors.go errNotFound)."
     },
     {
       "method": "GET",
       "path": "/secrets",
       "operationId": "SecretList",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists persistent secret metadata without exposing secret data."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/secrets/create",
       "operationId": "SecretCreate",
-      "support": "implemented",
-      "expectedStatus": 201,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         201,
         409,
@@ -1212,15 +1212,15 @@
         503
       ],
       "responseSchema": "#/definitions/IDResponse",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Creates persistent secret data with Docker create response semantics."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "DELETE",
       "path": "/secrets/{id}",
       "operationId": "SecretDelete",
-      "support": "implemented",
-      "expectedStatus": 204,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         204,
         404,
@@ -1228,15 +1228,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Deletes a persistent secret by full or unique id prefix."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/secrets/{id}",
       "operationId": "SecretInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1244,15 +1244,15 @@
         503
       ],
       "responseSchema": "#/definitions/Secret",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects persistent secret metadata without returning its data."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/secrets/{id}/update",
       "operationId": "SecretUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1261,30 +1261,30 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Updates secret metadata and increments its object version."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/services",
       "operationId": "ServiceList",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists service specifications and versions in the local control plane."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/services/create",
       "operationId": "ServiceCreate",
-      "support": "implemented",
-      "expectedStatus": 201,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         201,
         400,
@@ -1294,15 +1294,15 @@
         503
       ],
       "responseSchema": "#/definitions/ServiceCreateResponse",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Creates a persistent service specification and reconciles the requested replica task containers in the local guest runtime."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "DELETE",
       "path": "/services/{id}",
       "operationId": "ServiceDelete",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1310,15 +1310,15 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Removes a local service and its pending task record."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/services/{id}",
       "operationId": "ServiceInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1326,15 +1326,15 @@
         503
       ],
       "responseSchema": "#/definitions/Service",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects a local service specification and version."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/services/{id}/logs",
       "operationId": "ServiceLogs",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1342,15 +1342,15 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Returns Docker raw-stream logs from every scheduled service task with the standard log filters."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/services/{id}/update",
       "operationId": "ServiceUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1359,14 +1359,14 @@
         503
       ],
       "responseSchema": "#/definitions/ServiceUpdateResponse",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Updates a persistent service specification and reconciles its replica task containers in the local guest runtime."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/session",
       "operationId": "Session",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 101,
       "responseStatuses": [
         101,
@@ -1375,14 +1375,14 @@
       ],
       "responseSchema": null,
       "owner": "SessionRoute",
-      "note": "Accepts Docker TCP or h2c session upgrade handshakes; the guest interactive stream is negotiated by the caller."
+      "note": "Accepts Docker TCP/h2c session upgrade handshakes; no interactive builder session is attached afterwards."
     },
     {
       "method": "GET",
       "path": "/swarm",
       "operationId": "SwarmInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1390,15 +1390,15 @@
         503
       ],
       "responseSchema": "#/definitions/Swarm",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Reports the persistent local single-node control-plane state and Docker manager metadata."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/swarm/init",
       "operationId": "SwarmInit",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1406,15 +1406,15 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Initializes a local single-node control plane with Docker join and unlock tokens."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503; initializing a real swarm manager is not supported."
     },
     {
       "method": "POST",
       "path": "/swarm/join",
       "operationId": "SwarmJoin",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1422,60 +1422,60 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Validates join tokens and records the local node identity for the single-host control plane."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503; joining a real swarm is not supported."
     },
     {
       "method": "POST",
       "path": "/swarm/leave",
       "operationId": "SwarmLeave",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Leaves the local control plane and clears its manager state."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoSwarm 503 (\"This node is not part of a swarm\")."
     },
     {
       "method": "POST",
       "path": "/swarm/unlock",
       "operationId": "SwarmUnlock",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Validates the local unlock key and returns Docker's empty success response."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/swarm/unlockkey",
       "operationId": "SwarmUnlockkey",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "object",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Returns the local control-plane unlock key after initialization."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "POST",
       "path": "/swarm/update",
       "operationId": "SwarmUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1483,14 +1483,14 @@
         503
       ],
       "responseSchema": null,
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Updates local Swarm spec metadata and increments the object version."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/system/df",
       "operationId": "SystemDataUsage",
-      "support": "implemented",
+      "support": "partial",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1498,29 +1498,29 @@
       ],
       "responseSchema": "object",
       "owner": "DockerRuntimeRoutes",
-      "note": "Reports guest-backed image, container, volume, and build-cache usage objects with Docker accounting fields."
+      "note": "Reports guest-backed image, container, and volume usage objects; build-cache accounting and container filesystem sizes are not reported yet."
     },
     {
       "method": "GET",
       "path": "/tasks",
       "operationId": "TaskList",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         500,
         503
       ],
       "responseSchema": "array",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Lists pending task records created from local service specifications."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/tasks/{id}",
       "operationId": "TaskInspect",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1528,15 +1528,15 @@
         503
       ],
       "responseSchema": "#/definitions/Task",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Inspects a local task record and its pending scheduler state."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/tasks/{id}/logs",
       "operationId": "TaskLogs",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         404,
@@ -1544,14 +1544,14 @@
         503
       ],
       "responseSchema": "string",
-      "owner": "DockerControlPlaneRoutes",
-      "note": "Returns Docker raw-stream logs from the guest container attached to the task; unscheduled tasks return a Docker service error."
+      "owner": "ExplicitUnsupportedDockerRoutes",
+      "note": "Moby errNoManager 503 for an uninitialized swarm."
     },
     {
       "method": "GET",
       "path": "/version",
       "operationId": "SystemVersion",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1565,7 +1565,7 @@
       "method": "GET",
       "path": "/volumes",
       "operationId": "VolumeList",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1579,7 +1579,7 @@
       "method": "POST",
       "path": "/volumes/create",
       "operationId": "VolumeCreate",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 201,
       "responseStatuses": [
         201,
@@ -1593,7 +1593,7 @@
       "method": "POST",
       "path": "/volumes/prune",
       "operationId": "VolumePrune",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1607,7 +1607,7 @@
       "method": "DELETE",
       "path": "/volumes/{name}",
       "operationId": "VolumeDelete",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 204,
       "responseStatuses": [
         204,
@@ -1623,7 +1623,7 @@
       "method": "GET",
       "path": "/volumes/{name}",
       "operationId": "VolumeInspect",
-      "support": "implemented",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -1638,8 +1638,8 @@
       "method": "PUT",
       "path": "/volumes/{name}",
       "operationId": "VolumeUpdate",
-      "support": "implemented",
-      "expectedStatus": 200,
+      "support": "error-only",
+      "expectedStatus": 503,
       "responseStatuses": [
         200,
         400,
@@ -1649,7 +1649,7 @@
       ],
       "responseSchema": null,
       "owner": "VolumeUpdateRoute",
-      "note": "Updates local volume labels and driver options in persistent metadata."
+      "note": "Moby rejects volume updates on daemons that are not swarm managers with this exact 503 before validation (api/server/router/volume/volume_routes.go)."
     }
   ]
 }

@@ -104,9 +104,16 @@ assert(
 generated_matrix = JSON.parse(File.read(DEFAULT_MATRIX))
 operations = generated_matrix.fetch("operations")
 assert(operations.size == 107, "the generated matrix must contain 107 operations")
+counts = operations.group_by { |row| row.fetch("support") }.transform_values(&:count)
+assert(counts.fetch("full", 0) + counts.fetch("partial", 0) + counts.fetch("error-only", 0) == 107,
+  "every operation must be classified as full, partial, or error-only")
+assert(!counts.key?("implemented"), "the dishonest 'implemented' state must not reappear")
+error_only_rows = operations.select { |row| row.fetch("support") == "error-only" }
+assert(error_only_rows.all? { |row| [404, 501, 503].include?(row.fetch("expectedStatus")) },
+  "every error-only row must declare a Docker-shaped error status")
 assert(
-  operations.all? { |row| row.fetch("support") == "implemented" },
-  "every Moby v1.51 operation must be marked implemented"
+  operations.count { |row| row.fetch("support") == "full" } >= 50,
+  "the majority of operations must be genuinely implemented"
 )
 assert(
   operations.all? { |row| !contract_path(row.fetch("path")).empty? && !contract_body(row).nil? },

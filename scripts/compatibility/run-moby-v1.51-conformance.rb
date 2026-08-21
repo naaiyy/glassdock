@@ -58,7 +58,7 @@ def request(socket:, method:, path:, timeout:, body: nil, body_content_type: nil
 end
 
 def body_is_valid?(method, message)
-  method == "HEAD" || message.downcase.include?("not implemented")
+  method == "HEAD" || !message.strip.empty?
 end
 
 def tar_context
@@ -270,9 +270,9 @@ def main(options = parse_options)
   abort "socket does not exist: #{options[:socket]}" unless File.socket?(options[:socket])
 
   matrix = JSON.parse(File.read(options[:matrix]))
-  unsupported = matrix.fetch("operations").select { |row| row.fetch("support") == "unsupported" }
+  error_only = matrix.fetch("operations").select { |row| row.fetch("support") == "error-only" }
   failures = []
-  unsupported.each do |row|
+  error_only.each do |row|
     status, body = request(
       socket: options[:socket], method: row.fetch("method"), path: row.fetch("path"), timeout: options[:timeout]
     )
@@ -282,9 +282,11 @@ def main(options = parse_options)
     rescue JSON::ParserError
       message = "invalid JSON error body"
     end
+    expected_status = row.fetch("expectedStatus", 503)
     body_is_valid = body_is_valid?(row.fetch("method"), message)
-    unless status == 501 && body_is_valid
-      failures << "#{row.fetch("method")} #{row.fetch("path")}: expected 501 Docker error, got #{status} #{message.inspect}"
+    unless status == expected_status && body_is_valid
+      failures <<
+        "#{row.fetch("method")} #{row.fetch("path")}: expected #{expected_status} Docker error, got #{status} #{message.inspect}"
     end
   end
 
@@ -330,7 +332,7 @@ def main(options = parse_options)
 
   if failures.empty?
     coverage = options[:all] ? " plus 107 operation contract probes and side-effect checks" : ""
-    puts "Moby v28.5.2 conformance passed: #{unsupported.size} explicit unsupported operations#{options[:smoke] ? " plus core smoke probes" : ""}#{coverage}."
+    puts "Moby v28.5.2 conformance passed: #{error_only.size} error-only operations#{options[:smoke] ? " plus core smoke probes" : ""}#{coverage}."
     return 0
   end
 
