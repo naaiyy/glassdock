@@ -165,6 +165,22 @@ private struct GuestHealthcheck: Decodable {
     let retries: Int
     let startPeriod: Int64
     let startInterval: Int64
+
+    /// The guest serializes health checks with `omitempty`; absent numeric
+    /// fields decode as zero instead of failing the decode.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        test = try container.decodeIfPresent([String].self, forKey: .test) ?? []
+        interval = try container.decodeIfPresent(Int64.self, forKey: .interval) ?? 0
+        timeout = try container.decodeIfPresent(Int64.self, forKey: .timeout) ?? 0
+        retries = try container.decodeIfPresent(Int.self, forKey: .retries) ?? 0
+        startPeriod = try container.decodeIfPresent(Int64.self, forKey: .startPeriod) ?? 0
+        startInterval = try container.decodeIfPresent(Int64.self, forKey: .startInterval) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case test, interval, timeout, retries, startPeriod, startInterval
+    }
 }
 
 private struct GuestHealth: Decodable {
@@ -300,6 +316,29 @@ private struct GuestNetworkPayload: Decodable {
         case id, name, createdAt, scope, driver, enableIPv4, enableIPv6
         case internalNetwork = "internal"
         case attachable, ingress, ipam, options, containers, labels
+    }
+
+    /// The guest sends nil maps as JSON null, so map fields must tolerate a
+    /// missing or null value.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        scope = try container.decode(String.self, forKey: .scope)
+        driver = try container.decode(String.self, forKey: .driver)
+        enableIPv4 = try container.decode(Bool.self, forKey: .enableIPv4)
+        enableIPv6 = try container.decode(Bool.self, forKey: .enableIPv6)
+        internalNetwork = try container.decode(Bool.self, forKey: .internalNetwork)
+        attachable = try container.decode(Bool.self, forKey: .attachable)
+        ingress = try container.decode(Bool.self, forKey: .ingress)
+        ipam = try container.decode(NetworkIPAMPayload.self, forKey: .ipam)
+        options = try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:]
+        containers =
+            try container.decodeIfPresent(
+                [String: GuestNetworkContainerPayload].self, forKey: .containers
+            ) ?? [:]
+        labels = try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
     }
 }
 

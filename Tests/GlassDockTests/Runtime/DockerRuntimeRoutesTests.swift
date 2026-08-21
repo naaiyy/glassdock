@@ -714,9 +714,7 @@ struct DockerRuntimeRoutesTests {
         try await withRuntimeRoutes(backend) { app in
             try await app.testing().test(
                 .POST,
-                "/v1.51/containers/container-1/rename",
-                headers: ["Content-Type": "application/json"],
-                body: ByteBuffer(string: #"{"Name":"renamed"}"#)
+                "/v1.51/containers/container-1/rename?name=renamed"
             ) { response async in
                 #expect(response.status == .noContent)
             }

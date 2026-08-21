@@ -553,6 +553,13 @@ func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.I
 			return request.Username, request.Secret, nil
 		}
 	}
+	// containerd requires a fully qualified reference ("object required"
+	// otherwise), so short names such as "alpine" must be normalized even
+	// when no credentials are involved.
+	qualified, err := registryreference.ParseDockerRef(request.Reference)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("parse image reference: %w", err)
+	}
 	pullOptions := []containerd.RemoteOpt{
 		containerd.WithResolver(docker.NewResolver(resolverOptions)),
 		containerd.WithPullSnapshotter(snapshotter),
@@ -561,7 +568,7 @@ func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.I
 	if request.Platform != "" {
 		pullOptions = append(pullOptions, containerd.WithPlatform(request.Platform))
 	}
-	image, err := b.client.Pull(b.ctx(ctx), request.Reference, pullOptions...)
+	image, err := b.client.Pull(b.ctx(ctx), qualified.String(), pullOptions...)
 	if err != nil {
 		return api.ImageResponse{}, err
 	}

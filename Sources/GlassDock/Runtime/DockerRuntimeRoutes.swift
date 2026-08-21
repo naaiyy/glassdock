@@ -644,6 +644,29 @@ struct DockerRuntimeResources: Codable, Sendable, Equatable {
         self.cpusetMems = cpusetMems
         self.pidsLimit = pidsLimit
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case memory, memorySwap, memoryReservation, nanoCPUs
+        case cpuShares, cpuPeriod, cpuQuota, cpusetCpus, cpusetMems, pidsLimit
+    }
+
+    /// The guest serializes resources with `omitempty`, so absent keys decode
+    /// as zero values instead of failing the whole state decode.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            memory: try container.decodeIfPresent(Int64.self, forKey: .memory) ?? 0,
+            memorySwap: try container.decodeIfPresent(Int64.self, forKey: .memorySwap) ?? 0,
+            memoryReservation: try container.decodeIfPresent(Int64.self, forKey: .memoryReservation) ?? 0,
+            nanoCPUs: try container.decodeIfPresent(Int64.self, forKey: .nanoCPUs) ?? 0,
+            cpuShares: try container.decodeIfPresent(Int64.self, forKey: .cpuShares) ?? 0,
+            cpuPeriod: try container.decodeIfPresent(Int64.self, forKey: .cpuPeriod) ?? 0,
+            cpuQuota: try container.decodeIfPresent(Int64.self, forKey: .cpuQuota) ?? 0,
+            cpusetCpus: try container.decodeIfPresent(String.self, forKey: .cpusetCpus) ?? "",
+            cpusetMems: try container.decodeIfPresent(String.self, forKey: .cpusetMems) ?? "",
+            pidsLimit: try container.decodeIfPresent(Int64.self, forKey: .pidsLimit) ?? 0
+        )
+    }
 }
 
 struct DockerRuntimeContainerCreate: Sendable, Equatable {
@@ -1445,6 +1468,11 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func imageExportResponse(references: [String]) async throws -> Response {
+        // Validate every reference before headers are sent so missing images are
+        // clean 404s instead of errors inside an already-committed stream body.
+        for reference in references {
+            _ = try await call { try await backend.inspectImage(reference: reference) }
+        }
         let stream = try await call { try await backend.exportImages(references: references) }
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
@@ -1552,11 +1580,15 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func renameContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        let body = try req.content.decode(RenameRequest.self)
-        let name = body.Name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // Moby's rename operation takes the new name as a required query
+        // parameter, not a request body.
+        guard let rawName = req.query[String.self, at: "name"], !rawName.isEmpty else {
+            throw Abort(.badRequest, reason: "Neither json name nor query param name was specified")
+        }
+        let name = rawName.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !name.isEmpty else { throw Abort(.badRequest, reason: "Container name cannot be empty") }
         guard DockerContainerMetadataStore.isValid(name) else {
-            throw Abort(.badRequest, reason: "Invalid container name: \(body.Name)")
+            throw Abort(.badRequest, reason: "Invalid container name: \(rawName)")
         }
         try await call { try await backend.renameContainer(id: id, name: name) }
         return Response(status: .noContent)
@@ -1605,6 +1637,9 @@ struct DockerRuntimeRoutes: RouteCollection {
             condition = .default
         }
         let backend = self.backend
+        // Resolve before headers are sent: a missing container must surface as a
+        // normal 404, not as an error inside an already-committed stream body.
+        _ = try await call { try await backend.inspectContainer(id: id) }
         var headers = HTTPHeaders()
         headers.contentType = .json
         return Response(
@@ -1875,6 +1910,8 @@ struct DockerRuntimeRoutes: RouteCollection {
         let stream = req.query[String.self, at: "stream"].map(Self.mobyBool) ?? true
         let oneShot = req.query[String.self, at: "one-shot"].map(Self.mobyBool) ?? false
         let backend = self.backend
+        // Resolve before headers are sent so a missing container is a clean 404.
+        _ = try await call { try await backend.inspectContainer(id: id) }
         var headers = HTTPHeaders()
         headers.contentType = .json
         return Response(
@@ -1895,6 +1932,8 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func exportContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
+        // Resolve before headers are sent so a missing container is a clean 404.
+        _ = try await call { try await backend.inspectContainer(id: id) }
         let stream = try await call { try await backend.exportContainer(id: id) }
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
@@ -3660,10 +3699,6 @@ private struct CreateRequest: Content {
     let StopSignal: String?
     let Healthcheck: CreateHealthcheck?
     let HostConfig: CreateHostConfig?
-}
-
-private struct RenameRequest: Content {
-    let Name: String
 }
 
 private struct SystemDataUsageQuery: Content {

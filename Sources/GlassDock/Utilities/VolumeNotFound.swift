@@ -1,5 +1,6 @@
 import ContainerResource
 import ContainerizationError
+import Vapor
 
 /// Single source of truth for detecting a "volume not found" condition.
 ///
@@ -12,6 +13,11 @@ import ContainerizationError
 /// turn a 500 into a 404, or be silently swallowed under `force`).
 enum VolumeNotFound {
     static func matches(_ error: any Error) -> Bool {
+        // The local RuntimeVolumeService signals a missing volume with a plain
+        // Vapor not-found abort (e.g. "No such volume: <name>").
+        if let abort = error as? AbortError, abort.status == .notFound {
+            return true
+        }
         // In-process paths throw the framework's typed error directly.
         if let volumeError = error as? VolumeError, case .volumeNotFound = volumeError {
             return true

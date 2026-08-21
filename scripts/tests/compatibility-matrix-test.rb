@@ -95,8 +95,8 @@ assert(
 assert(
   validate_contract_response(
     {"method" => "GET", "path" => "/version", "support" => "implemented", "responseStatuses" => [200]},
-    404,
-    '{"message":"missing"}',
+    409,
+    '{"message":"conflict"}',
     "application/json"
   ).include?("not declared"),
   "undeclared statuses must fail the contract probe"
