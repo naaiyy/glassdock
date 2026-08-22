@@ -74,6 +74,33 @@ func (s *Server) wait(ctx context.Context, id string) (uint32, time.Time, error)
 	}
 }
 
+func (s *Server) waitNextExit(ctx context.Context, id string) (uint32, time.Time, error) {
+	for {
+		s.waitsMu.Lock()
+		state := s.waits[id]
+		s.waitsMu.Unlock()
+		if state != nil {
+			return s.wait(ctx, id)
+		}
+		container, err := s.backend.Inspect(ctx, id)
+		if err != nil {
+			return 0, time.Time{}, err
+		}
+		if container.Status == "running" || container.Status == "paused" {
+			return s.backend.Wait(ctx, id)
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return 0, time.Time{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	go func() { <-ctx.Done(); _ = listener.Close() }()
 	for {
@@ -96,6 +123,8 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 	inFlight := make(chan struct{}, 256)
 	var requestMu sync.Mutex
 	requestCancels := make(map[uint64]context.CancelFunc)
+	var inputMu sync.Mutex
+	inputs := make(map[uint64]chan []byte)
 	for {
 		request, err := r.Read()
 		if err != nil {
@@ -113,6 +142,36 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 			}
 			continue
 		}
+		if request.Kind == protocol.KindStream {
+			if request.Stream != protocol.StreamStdin {
+				_ = writeError(w, request.ID, "bad_frame", errors.New("guest accepts only stdin streams from the host"))
+				continue
+			}
+			inputMu.Lock()
+			input := inputs[request.ID]
+			if input != nil && len(request.Data) == 0 {
+				delete(inputs, request.ID)
+			}
+			inputMu.Unlock()
+			if input == nil {
+				_ = writeError(w, request.ID, "not_found", errors.New("stream request not found"))
+				continue
+			}
+			if len(request.Data) == 0 {
+				close(input)
+				continue
+			}
+			select {
+			case input <- append([]byte(nil), request.Data...):
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
+		if request.Kind != protocol.KindRequest {
+			_ = writeError(w, request.ID, "bad_frame", errors.New("unexpected frame kind"))
+			continue
+		}
 		select {
 		case inFlight <- struct{}{}:
 		default:
@@ -123,6 +182,15 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 		requestMu.Lock()
 		requestCancels[request.ID] = requestCancel
 		requestMu.Unlock()
+		var input chan []byte
+		if request.Method == api.MethodContainerExec || request.Method == api.MethodContainerAttach ||
+			request.Method == api.MethodImageImport || request.Method == api.MethodImageBuild ||
+			request.Method == api.MethodContainerArchivePut {
+			input = make(chan []byte, 64)
+			inputMu.Lock()
+			inputs[request.ID] = input
+			inputMu.Unlock()
+		}
 		go func() {
 			defer func() { <-inFlight }()
 			defer requestCancel()
@@ -131,7 +199,15 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 				delete(requestCancels, request.ID)
 				requestMu.Unlock()
 			}()
-			s.handle(requestCtx, request, w)
+			s.handle(requestCtx, request, w, input)
+			if input != nil {
+				inputMu.Lock()
+				if inputs[request.ID] == input {
+					delete(inputs, request.ID)
+					close(input)
+				}
+				inputMu.Unlock()
+			}
 		}()
 	}
 }
@@ -144,6 +220,27 @@ func decode[T any](request protocol.Envelope) (T, error) {
 	err := json.Unmarshal(request.Payload, &value)
 	return value, err
 }
+
+func readInput(ctx context.Context, input <-chan []byte, initial []byte) ([]byte, error) {
+	data := append([]byte(nil), initial...)
+	if input == nil {
+		return data, nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case chunk, ok := <-input:
+			if !ok {
+				return data, nil
+			}
+			if len(chunk) == 0 {
+				return data, nil
+			}
+			data = append(data, chunk...)
+		}
+	}
+}
 func writePayload(w *protocol.Writer, id uint64, value any) error {
 	p, err := protocol.NewPayload(value)
 	if err != nil {
@@ -155,7 +252,7 @@ func writeError(w *protocol.Writer, id uint64, code string, err error) error {
 	return w.Write(protocol.Envelope{ID: id, Kind: protocol.KindResponse, Error: &protocol.Error{Code: code, Message: err.Error()}})
 }
 
-func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *protocol.Writer) {
+func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *protocol.Writer, input <-chan []byte) {
 	fail := func(code string, err error) { _ = writeError(w, request.ID, code, err) }
 	switch request.Method {
 	case api.MethodPing:
@@ -241,6 +338,160 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, image)
+	case api.MethodImagePush:
+		body, err := decode[api.ImagePushRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		image, err := s.backend.Push(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, image)
+	case api.MethodImageExport:
+		body, err := decode[api.ImageExportRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		err = s.backend.ExportImages(ctx, body, func(name string, data []byte) error {
+			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
+		})
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		payload, _ := protocol.NewPayload(api.Empty{})
+		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodImageCommit:
+		body, err := decode[api.ImageCommitRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		image, err := s.backend.CommitImage(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, image)
+	case api.MethodImageImport:
+		body, err := decode[api.ImageImportRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		body.Data, err = readInput(ctx, input, body.Data)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		images, err := s.backend.ImportImages(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, images)
+	case api.MethodImageBuild:
+		body, err := decode[api.ImageBuildRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		body.Context, err = readInput(ctx, input, body.Context)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		image, err := s.backend.Build(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, api.ImageBuildResponse{Image: image})
+	case api.MethodNetworkList:
+		items, err := s.backend.Networks(ctx)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkListResponse{Networks: items})
+	case api.MethodNetworkInspect:
+		body, err := decode[api.NetworkRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.Network(ctx, body.ID)
+		if err != nil {
+			fail("not_found", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
+	case api.MethodNetworkCreate:
+		body, err := decode[api.NetworkCreateRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.CreateNetwork(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkCreateResponse{Network: item})
+	case api.MethodNetworkDelete:
+		body, err := decode[api.NetworkRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.DeleteNetwork(ctx, body.ID); err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodNetworkPrune:
+		body, err := decode[api.NetworkPruneRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		result, err := s.backend.PruneNetworks(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, result)
+	case api.MethodNetworkConnect:
+		body, err := decode[api.NetworkConnectRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.ConnectNetwork(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
+	case api.MethodNetworkDisconnect:
+		body, err := decode[api.NetworkDisconnectRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		item, err := s.backend.DisconnectNetwork(ctx, body)
+		if err != nil {
+			fail("network", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.NetworkResponse{Network: item})
 	case api.MethodContainerList:
 		items, err := s.backend.List(ctx)
 		if err != nil {
@@ -272,6 +523,100 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = writePayload(w, request.ID, logs)
+	case api.MethodContainerTop:
+		body, err := decode[api.ContainerTopRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		top, err := s.backend.Top(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, top)
+	case api.MethodContainerStats:
+		body, err := decode[api.ContainerStatsRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		stats, err := s.backend.Stats(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, stats)
+	case api.MethodContainerExport:
+		body, err := decode[api.IDRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		err = s.backend.ExportContainer(ctx, body.ID, func(name string, data []byte) error {
+			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
+		})
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		payload, _ := protocol.NewPayload(api.Empty{})
+		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodContainerArchive:
+		body, err := decode[api.ContainerArchiveRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		err = s.backend.ArchiveContainer(ctx, body, func(name string, data []byte) error {
+			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
+		})
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		payload, _ := protocol.NewPayload(api.Empty{})
+		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload})
+	case api.MethodContainerArchiveInfo:
+		body, err := decode[api.ContainerArchiveRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		info, err := s.backend.ArchiveInfo(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, info)
+	case api.MethodContainerArchivePut:
+		body, err := decode[api.ContainerArchivePutRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		body.Data, err = readInput(ctx, input, body.Data)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.PutArchive(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerChanges:
+		body, err := decode[api.IDRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		changes, err := s.backend.Changes(ctx, body.ID)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.ContainerChangesResponse{Changes: changes})
 	case api.MethodContainerCreate:
 		body, err := decode[api.ContainerCreateRequest](request)
 		if err != nil {
@@ -299,12 +644,29 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		_ = writePayload(w, request.ID, api.ContainerResponse{Container: item})
 		s.monitor(context.Background(), body.ID, state, w)
 	case api.MethodContainerWait:
-		body, err := decode[api.IDRequest](request)
+		body, err := decode[api.ContainerWaitRequest](request)
 		if err != nil {
 			fail("invalid_argument", err)
 			return
 		}
-		code, exitedAt, err := s.wait(ctx, body.ID)
+		if body.Condition == "healthy" {
+			code, err := s.backend.WaitHealthy(ctx, body.ID)
+			if err != nil {
+				fail("containerd", err)
+				return
+			}
+			exitCode := int32(code)
+			payload, _ := protocol.NewPayload(api.ContainerExitEvent{ID: body.ID, ExitCode: code, ExitedAt: time.Now()})
+			_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, Payload: payload, ExitCode: &exitCode})
+			return
+		}
+		var code uint32
+		var exitedAt time.Time
+		if body.Condition == "next-exit" {
+			code, exitedAt, err = s.waitNextExit(ctx, body.ID)
+		} else {
+			code, exitedAt, err = s.wait(ctx, body.ID)
+		}
 		if err != nil {
 			fail("containerd", err)
 			return
@@ -323,6 +685,39 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerPause:
+		body, err := decode[api.IDRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.Pause(ctx, body.ID); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerResume:
+		body, err := decode[api.IDRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.Resume(ctx, body.ID); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerResize:
+		body, err := decode[api.ContainerResizeRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.Resize(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
 	case api.MethodContainerMetadataUpdate:
 		body, err := decode[api.ContainerMetadataUpdateRequest](request)
 		if err != nil {
@@ -335,6 +730,19 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodContainerUpdate:
+		body, err := decode[api.ContainerUpdateRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		warnings, err := s.backend.UpdateContainer(ctx, body)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		syscall.Sync()
+		_ = writePayload(w, request.ID, api.ContainerUpdateResponse{Warnings: warnings})
 	case api.MethodContainerDelete:
 		body, err := decode[api.ContainerDeleteRequest](request)
 		if err != nil {
@@ -353,7 +761,7 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			fail("invalid_argument", err)
 			return
 		}
-		code, err := s.backend.Exec(ctx, body, func(name string, data []byte) error {
+		code, err := s.backend.ExecInput(ctx, body, input, func(name string, data []byte) error {
 			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
 		})
 		if err != nil {
@@ -361,13 +769,24 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			return
 		}
 		_ = w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindEnd, ExitCode: &code})
+	case api.MethodExecResize:
+		body, err := decode[api.ExecResizeRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		if err := s.backend.ResizeExec(ctx, body); err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
 	case api.MethodContainerAttach:
 		body, err := decode[api.ContainerLogsRequest](request)
 		if err != nil {
 			fail("invalid_argument", err)
 			return
 		}
-		code, err := s.backend.Attach(ctx, body, func(name string, data []byte) error {
+		code, err := s.backend.AttachInput(ctx, body, input, func(name string, data []byte) error {
 			return w.Write(protocol.Envelope{ID: request.ID, Kind: protocol.KindStream, Stream: protocol.Stream(name), Data: data})
 		})
 		if err != nil {

@@ -26,6 +26,7 @@ const (
 type Stream string
 
 const (
+	StreamStdin  Stream = "stdin"
 	StreamStdout Stream = "stdout"
 	StreamStderr Stream = "stderr"
 )
@@ -80,7 +81,7 @@ func (e *Envelope) Validate() error {
 	default:
 		return fmt.Errorf("unknown kind %q", e.Kind)
 	}
-	if e.Stream != "" && e.Stream != StreamStdout && e.Stream != StreamStderr {
+	if e.Stream != "" && e.Stream != StreamStdin && e.Stream != StreamStdout && e.Stream != StreamStderr {
 		return fmt.Errorf("unknown stream %q", e.Stream)
 	}
 	if len(e.Payload) > 0 {

@@ -8,18 +8,19 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
     private struct Metadata: Codable {
         let name: String
         let driver: String
-        let options: [String: String]
-        let labels: [String: String]
+        var options: [String: String]
+        var labels: [String: String]
         let createdAt: Date
         var referencedContainers: Set<String> = []
+        var version: UInt64 = 1
 
         private enum CodingKeys: String, CodingKey {
-            case name, driver, options, labels, createdAt, referencedContainers
+            case name, driver, options, labels, createdAt, referencedContainers, version
         }
 
         init(
             name: String, driver: String, options: [String: String], labels: [String: String],
-            createdAt: Date, referencedContainers: Set<String>
+            createdAt: Date, referencedContainers: Set<String>, version: UInt64 = 1
         ) {
             self.name = name
             self.driver = driver
@@ -27,6 +28,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             self.labels = labels
             self.createdAt = createdAt
             self.referencedContainers = referencedContainers
+            self.version = version
         }
 
         init(from decoder: any Decoder) throws {
@@ -38,6 +40,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             createdAt = try values.decode(Date.self, forKey: .createdAt)
             referencedContainers =
                 try values.decodeIfPresent(Set<String>.self, forKey: .referencedContainers) ?? []
+            version = try values.decodeIfPresent(UInt64.self, forKey: .version) ?? 1
         }
     }
 
@@ -62,14 +65,26 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         let name = request.Name.isEmpty ? UUID().uuidString.lowercased() : request.Name
         try Self.validate(name)
         let driver = request.Driver.isEmpty ? "local" : request.Driver
-        guard driver == "local" else {
-            throw Abort(.notImplemented, reason: "Only the local volume driver is supported")
-        }
+        // Keep the Docker driver identity in metadata even when the daemon
+        // cannot load a third-party driver process. The persistent directory
+        // remains usable as a local mountpoint, which preserves create,
+        // inspect, update, and delete semantics for clients that only use the
+        // driver name as a policy label.
         try prepareRoot()
         let directory = volumeDirectory(name)
         let metadataURL = directory.appendingPathComponent("metadata.json", isDirectory: false)
         if FileManager.default.fileExists(atPath: metadataURL.path) {
-            return try volume(from: readMetadata(at: metadataURL))
+            let existing = try readMetadata(at: metadataURL)
+            let requestedLabels = LabelNormalization.sanitize(request.Labels ?? [:])
+            guard existing.driver == driver, existing.options == request.Options,
+                existing.labels == requestedLabels
+            else {
+                throw Abort(
+                    .conflict,
+                    reason: "Volume (name) already exists with different driver options or labels"
+                )
+            }
+            return try volume(from: existing)
         }
         try FileManager.default.createDirectory(
             at: directory.appendingPathComponent("data", isDirectory: true),
@@ -208,6 +223,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         if let sync = labels.removeValue(forKey: Filesystem.SyncMode.glassdockLabel) {
             options["sync"] = sync
         }
+        let usage = volumeUsage(at: data)
         return Volume(
             Name: metadata.name,
             Driver: metadata.driver,
@@ -218,8 +234,34 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             Scope: "local",
             ClusterVolume: nil,
             Options: options,
-            UsageData: VolumeUsageData()
+            UsageData: VolumeUsageData(
+                Size: usage,
+                RefCount: Int64(metadata.referencedContainers.count)
+            )
         )
+    }
+
+    private func volumeUsage(at directory: URL) -> Int64 {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                options: [.skipsPackageDescendants]
+            )
+        else { return 0 }
+
+        var total: Int64 = 0
+        for case let file as URL in enumerator {
+            guard
+                let values = try? file.resourceValues(
+                    forKeys: [.isRegularFileKey, .fileSizeKey]
+                ),
+                values.isRegularFile == true,
+                let size = values.fileSize
+            else { continue }
+            total = min(Int64.max - Int64(size), total) + Int64(size)
+        }
+        return total
     }
 
     private static func validate(_ name: String) throws {

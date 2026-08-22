@@ -96,6 +96,14 @@ struct GuestRuntimePersistenceTests {
         )
     }
 
+    @Test("missing guest containers use Docker's exact not-found phrasing")
+    func missingContainerMessage() {
+        #expect(
+            GuestRuntime.missingContainerMessage("does-not-exist")
+                == "No such container: does-not-exist"
+        )
+    }
+
     @Test("multiple waiters retain one auto-remove exit result")
     func multipleWaitersShareExitResult() {
         var index = GuestExitCodeIndex()

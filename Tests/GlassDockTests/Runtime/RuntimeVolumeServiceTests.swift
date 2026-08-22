@@ -26,6 +26,8 @@ struct RuntimeVolumeServiceTests {
         #expect(restored.Name == "database")
         #expect(restored.Labels == ["purpose": "test"])
         #expect(restored.Options == ["sync": "fsync"])
+        #expect(restored.UsageData?.Size == 7)
+        #expect(restored.UsageData?.RefCount == 0)
         #expect(
             try String(
                 contentsOf: URL(fileURLWithPath: restored.Mountpoint).appendingPathComponent("value"),
@@ -34,8 +36,8 @@ struct RuntimeVolumeServiceTests {
         )
     }
 
-    @Test("rejects traversal and non-local drivers")
-    func rejectsUnsafeConfiguration() async {
+    @Test("rejects traversal and preserves non-local driver identity")
+    func rejectsTraversalAndPreservesDriver() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -46,11 +48,11 @@ struct RuntimeVolumeServiceTests {
                 request: RESTVolumeCreate(Name: "../escape", Driver: "local", Options: [:], Labels: nil)
             )
         }
-        await #expect(throws: (any Error).self) {
-            _ = try await service.create(
-                request: RESTVolumeCreate(Name: "remote", Driver: "nfs", Options: [:], Labels: nil)
-            )
-        }
+        let remote = try await service.create(
+            request: RESTVolumeCreate(Name: "remote", Driver: "nfs", Options: ["type": "nfs"], Labels: nil)
+        )
+        #expect(remote.Driver == "nfs")
+        #expect(remote.Options == ["type": "nfs"])
     }
 
     @Test("does not delete a volume that a live container references")
@@ -63,6 +65,7 @@ struct RuntimeVolumeServiceTests {
             request: RESTVolumeCreate(Name: "database", Driver: "local", Options: [:], Labels: nil)
         )
         try await service.retain(names: ["database"], containerID: "container-1")
+        #expect(try await service.inspect(name: "database").UsageData?.RefCount == 1)
         await service.setReferenceValidator { $0 == "container-1" }
 
         await #expect(throws: (any Error).self) {

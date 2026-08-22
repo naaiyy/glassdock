@@ -117,6 +117,64 @@ func TestNetworkManagerReportsPreparedPublication(t *testing.T) {
 	}
 }
 
+func TestNetworkManagerReportsSortedContainerEndpoints(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	for _, id := range []string{"container-b", "container-a"} {
+		if _, err := manager.Create(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	endpoints := manager.Endpoints()
+	if len(endpoints) != 2 {
+		t.Fatalf("endpoint count = %d, want 2", len(endpoints))
+	}
+	if endpoints[0].ContainerID != "container-a" || endpoints[1].ContainerID != "container-b" {
+		t.Fatalf("endpoints are not sorted: %#v", endpoints)
+	}
+	if endpoints[0].Address != "10.88.0.3" || endpoints[1].Address != "10.88.0.2" || endpoints[0].EndpointID == "" {
+		t.Fatalf("endpoint metadata = %#v", endpoints[0])
+	}
+}
+
+func TestNetworkManagerPreservesIPAMRangeAuxiliaryAndIPv6State(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{
+		Name:       "frontend",
+		EnableIPv6: true,
+		IPAM: &api.NetworkIPAM{Driver: "default", Config: []api.NetworkIPAMConfig{{
+			Subnet: "10.120.0.0/16", IPRange: "10.120.10.0/24", Gateway: "10.120.0.1",
+			AuxiliaryAddresses: map[string]string{"router": "10.120.0.2"},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resource.EnableIPv6 || len(resource.IPAM.Config) != 1 {
+		t.Fatalf("network capabilities = %#v", resource)
+	}
+	config := resource.IPAM.Config[0]
+	if config.IPRange != "10.120.10.0/24" || config.AuxiliaryAddresses["router"] != "10.120.0.2" {
+		t.Fatalf("IPAM config = %#v", config)
+	}
+	if _, err := manager.Create("container-one"); err != nil {
+		t.Fatal(err)
+	}
+	resource, err = manager.ConnectNetwork(api.NetworkConnectRequest{
+		NetworkID: resource.ID, ContainerID: "container-one",
+		IPv4Address: "10.120.10.25", IPv6Address: "fd00::25",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := resource.Containers["container-one"]
+	if endpoint.IPv4Address != "10.120.10.25" || endpoint.IPv6Address != "fd00::25" {
+		t.Fatalf("endpoint = %#v", endpoint)
+	}
+}
+
 func TestNetworkManagerInstallsTCPKernelForwardingRules(t *testing.T) {
 	runner := &recordingNetworkRunner{}
 	manager := newTestNetworkManager(runner)
@@ -344,5 +402,130 @@ func TestNetworkManagerRejectsChangedRepublish(t *testing.T) {
 	}
 	if _, err := manager.Publish("web", []api.PublishedPort{{ContainerPort: 81, GuestPort: 42000}}); err == nil {
 		t.Fatal("changed publication was treated as idempotent")
+	}
+}
+
+func TestNetworkManagerCreatesAndMutatesGuestNetworkObjects(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	request := api.NetworkCreateRequest{
+		Name:   "frontend",
+		Driver: "bridge",
+		IPAM:   &api.NetworkIPAM{Config: []api.NetworkIPAMConfig{{Subnet: "10.89.0.0/16", Gateway: "10.89.0.1"}}},
+		Labels: map[string]string{"tier": "web"},
+	}
+	created, err := manager.CreateNetwork(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "frontend" || created.Driver != "bridge" || created.IPAM.Config[0].Subnet != "10.89.0.0/16" {
+		t.Fatalf("created network = %#v", created)
+	}
+	if _, err := manager.Create("container-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Connect(created.ID, "container-one", "web", "", "", false); err != nil {
+		t.Fatal(err)
+	}
+	summaries := manager.Summaries(map[string]string{"container-one": "web"})
+	var frontend api.NetworkSummary
+	for _, summary := range summaries {
+		if summary.ID == created.ID {
+			frontend = summary
+		}
+	}
+	endpoint, ok := frontend.Containers["container-one"]
+	if !ok || endpoint.Name != "web" || endpoint.IPv4Address != "10.89.0.2/16" {
+		t.Fatalf("frontend endpoint = %#v", endpoint)
+	}
+	if err := manager.Connect(created.ID, "container-one", "web", "", "", true); err == nil || !strings.Contains(err.Error(), "already connected") {
+		t.Fatalf("duplicate running connect error = %v", err)
+	}
+	if err := manager.Disconnect(created.ID, "container-one", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, summary := range manager.Summaries(nil) {
+		if summary.ID == created.ID && len(summary.Containers) != 0 {
+			t.Fatalf("disconnected network still has endpoints: %#v", summary.Containers)
+		}
+	}
+}
+
+func TestNetworkManagerCreatesLogicalNetworkAndAttachesContainer(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{
+		Name: "frontend", Labels: map[string]string{"tier": "edge"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.Name != "frontend" || resource.Driver != "bridge" || resource.Subnet == "" {
+		t.Fatalf("unexpected network resource: %#v", resource)
+	}
+	if _, err := manager.Create("web"); err != nil {
+		t.Fatal(err)
+	}
+	manager.SetContainerIdentity("web", "web", "web-host")
+	connected, err := manager.ConnectNetwork(api.NetworkConnectRequest{
+		NetworkID: resource.ID, ContainerID: "web", Aliases: []string{"api"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := connected.Containers["web"]
+	if endpoint.IPv4Address == "" || endpoint.Gateway == "" || !reflect.DeepEqual(endpoint.Aliases, []string{"web", "api"}) {
+		t.Fatalf("unexpected attached endpoint: %#v", endpoint)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, expected := range []string{
+		"ip link add gd" + resource.ID[:10] + " type bridge",
+		"netlink attach st",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("network commands do not contain %q:\n%s", expected, joined)
+		}
+	}
+	hosts, nameservers, err := manager.HostsFile("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(hosts, endpoint.IPv4Address+" web\n") ||
+		!strings.Contains(hosts, endpoint.IPv4Address+" api\n") ||
+		!strings.Contains(hosts, endpoint.IPv4Address+" web-host\n") {
+		t.Fatalf("managed hosts file omitted aliases:\n%s", hosts)
+	}
+	if len(nameservers) != 2 {
+		t.Fatalf("nameservers = %#v, want default and custom gateways", nameservers)
+	}
+}
+
+func TestNetworkManagerHotDisconnectAndPruneAreStateful(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	resource, err := manager.CreateNetwork(api.NetworkCreateRequest{Name: "temporary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create("web"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ConnectNetwork(api.NetworkConnectRequest{NetworkID: resource.ID, ContainerID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.DisconnectNetwork(api.NetworkDisconnectRequest{NetworkID: resource.ID, ContainerID: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if inspected, err := manager.InspectNetwork(resource.ID); err != nil {
+		t.Fatal(err)
+	} else if len(inspected.Containers) != 0 {
+		t.Fatalf("disconnected network still has endpoints: %#v", inspected.Containers)
+	}
+	pruned := manager.PruneNetworks(map[string][]string{"dangling": {"true"}})
+	if !reflect.DeepEqual(pruned.NetworksDeleted, []string{resource.ID}) {
+		t.Fatalf("pruned networks = %#v, want %q", pruned.NetworksDeleted, resource.ID)
+	}
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "netlink detach st") {
+		t.Fatalf("hot disconnect did not remove the namespace interface: %#v", runner.commands)
 	}
 }

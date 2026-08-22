@@ -51,7 +51,8 @@ actor GuestConnection {
     func request(
         method: String,
         payload: JSONValue? = nil,
-        onStream: @escaping @Sendable (GuestFrame) -> Void
+        onStream: @escaping @Sendable (GuestFrame) -> Void,
+        onRequestID: (@Sendable (UInt64) -> Void)? = nil
     ) async throws -> GuestFrame {
         if let terminalError { throw terminalError }
         try Task.checkCancellation()
@@ -73,6 +74,10 @@ actor GuestConnection {
                 Task {
                     do {
                         try await writer.write(encoded)
+                        // Stream frames must follow the request frame on the wire.  Notify
+                        // upload callers only after the request has been written so a
+                        // large archive cannot race the request itself.
+                        onRequestID?(id)
                     } catch {
                         failRequest(id: id, error: error)
                     }
@@ -81,6 +86,16 @@ actor GuestConnection {
         } onCancel: {
             Task { await self.cancelRequest(id: id) }
         }
+    }
+
+    func sendStream(id: UInt64, stream: GuestStream, data: Data) async throws {
+        guard terminalError == nil else { throw terminalError ?? GuestConnectionError.closed }
+        guard pending[id] != nil else { throw GuestConnectionError.closed }
+        let frame = GuestFrame(
+            id: id, kind: .stream, method: nil, payload: nil, stream: stream,
+            data: data, error: nil, exitCode: nil
+        )
+        try await writer.write(GuestFrameCodec.encode(frame))
     }
 
     func events() -> AsyncStream<GuestFrame> {

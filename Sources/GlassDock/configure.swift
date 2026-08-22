@@ -1,3 +1,4 @@
+import ContainerPersistence
 import ContainerResource
 import Vapor
 
@@ -94,7 +95,10 @@ func configure(
     try app.register(collection: EventsRoute())
 
     try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
+    try app.register(collection: ImageSearchRoute())
+    try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())
+    try app.register(collection: SessionRoute())
     try app.register(collection: ExplicitUnsupportedDockerRoutes())
 
     // /volumes
@@ -103,62 +107,7 @@ func configure(
     try app.register(collection: VolumeInspectRoute(client: volumeClient))
     try app.register(collection: VolumeListRoute(client: volumeClient))
     try app.register(collection: VolumePruneRoute(client: volumeClient))
-
-    // /swarm
-    try app.register(collection: SwarmInitRoute())
-    try app.register(collection: SwarmJoinRoute())
-    try app.register(collection: SwarmLeaveRoute())
-    try app.register(collection: SwarmRoute())
-    try app.register(collection: SwarmUnlockKeyRoute())
-    try app.register(collection: SwarmUnlockRoute())
-    try app.register(collection: SwarmUpdateRoute())
-
-    // Build routes are intentionally absent until the guest runtime owns
-    // BuildKit. The former builder service created another Apple VM.
-    // --- plugin routes ---
-    try app.register(collection: PluginsCreateRoute())
-    try app.register(collection: PluginsNameDisableRoute())
-    try app.register(collection: PluginsNameEnableRoute())
-    try app.register(collection: PluginsNameJsonRoute())
-    try app.register(collection: PluginsNamePushRoute())
-    try app.register(collection: PluginsNameRoute())
-    try app.register(collection: PluginsNameSetRoute())
-    try app.register(collection: PluginsNameUpgradeRoute())
-    try app.register(collection: PluginsPrivilegesRoute())
-    try app.register(collection: PluginsPullRoute())
-    try app.register(collection: PluginsRoute())
-
-    // --- swarm node routes ---
-    try app.register(collection: NodesIdRoute())
-    try app.register(collection: NodesIdUpdateRoute())
-    try app.register(collection: NodesRoute())
-
-    // --- swarm service routes ---
-    try app.register(collection: ServicesCreateRoute())
-    try app.register(collection: ServicesIdLogsRoute())
-    try app.register(collection: ServicesIdRoute())
-    try app.register(collection: ServicesIdUpdateRoute())
-    try app.register(collection: ServicesRoute())
-
-    // --- swarm task routes ---
-    try app.register(collection: TasksIdLogsRoute())
-    try app.register(collection: TasksIdRoute())
-    try app.register(collection: TasksRoute())
-
-    // --- Swarm secret routes ---
-    try app.register(collection: SecretsCreateRoute())
-    try app.register(collection: SecretsIdRoute())
-    try app.register(collection: SecretsIdUpdateRoute())
-    try app.register(collection: SecretsRoute())
-
-    // --- swarm config routes ---
-    try app.register(collection: ConfigsCreateRoute())
-    try app.register(collection: ConfigsIdRoute())
-    try app.register(collection: ConfigsIdUpdateRoute())
-    try app.register(collection: ConfigsRoute())
-
-    // --- session route ---
-    try app.register(collection: SessionRoute())
+    try app.register(collection: VolumeUpdateRoute())
 
     // --- miscellaneous ---
     try app.register(collection: VersionRoute())

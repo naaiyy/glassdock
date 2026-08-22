@@ -76,6 +76,20 @@ struct NetworkFilterOrSemanticsTests {
         }
     }
 
+    @Test("Route-level parser rejects malformed and non-string network filters")
+    func parserRejectsMalformedValues() {
+        #expect(throws: (any Error).self) {
+            try DockerNetworkFilterUtility.parseNetworkFilters(
+                filtersParam: #"{"name":[1]}"#, defaultDangling: false, logger: logger
+            )
+        }
+        #expect(throws: (any Error).self) {
+            try DockerNetworkFilterUtility.parseNetworkFilters(
+                filtersParam: "not-json", defaultDangling: false, logger: logger
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private static func network(name: String = "net", id: String = "net-id", driver: String = "nat") -> RESTNetworkSummary {

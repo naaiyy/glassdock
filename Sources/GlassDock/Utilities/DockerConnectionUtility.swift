@@ -317,6 +317,7 @@ public final class DockerTCPHandler: ChannelInboundHandler, @unchecked Sendable 
     // for writes > PIPE_BUF, (3) close always follows all pending writes.
     private let writeQueue = DispatchQueue(label: "DockerTCPHandler.stdin", qos: .userInteractive)
     private var stdinWriter: FileHandle?
+    private var stdinDataHandler: (@Sendable (Data) -> Void)?
     // Buffers stdin bytes arriving before setStdinWriter is called.
     // Capped at 1 MiB to prevent unbounded growth if setup is delayed.
     private var pendingData: [Data] = []
@@ -353,6 +354,11 @@ public final class DockerTCPHandler: ChannelInboundHandler, @unchecked Sendable 
     /// writeQueue otherwise. Called by channelRead and exposed for unit tests.
     func writeToStdin(_ data: Data) {
         lock.lock()
+        if let handler = stdinDataHandler {
+            lock.unlock()
+            handler(data)
+            return
+        }
         let writer = stdinWriter
         if writer == nil {
             if pendingDataSize + data.count <= Self.pendingDataMaxBytes {
@@ -381,8 +387,10 @@ public final class DockerTCPHandler: ChannelInboundHandler, @unchecked Sendable 
             lock.lock()
             didReceiveInputClosed = true
             let writer = stdinWriter
+            let handler = stdinDataHandler
             stdinWriter = nil
             lock.unlock()
+            handler?(Data())
             if let writer {
                 writeQueue.async { try? writer.close() }
             }
@@ -429,6 +437,20 @@ public final class DockerTCPHandler: ChannelInboundHandler, @unchecked Sendable 
             }
         }
         lock.unlock()
+    }
+
+    /// Routes stdin bytes to the guest protocol when no local file descriptor
+    /// is available for the upgraded stream.
+    public func setStdinDataHandler(_ handler: (@Sendable (Data) -> Void)?) {
+        lock.lock()
+        stdinDataHandler = handler
+        let buffered = pendingData
+        pendingData = []
+        pendingDataSize = 0
+        lock.unlock()
+        if let handler {
+            for data in buffered { handler(data) }
+        }
     }
 
     // MARK: - Test helpers

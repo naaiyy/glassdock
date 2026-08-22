@@ -1,0 +1,622 @@
+schema: 2
+source:
+  repository: moby/moby
+  ref: v28.5.2
+  url: https://raw.githubusercontent.com/moby/moby/v28.5.2/api/swagger.yaml
+  sha256: 2afceffc4138e3f4a030140c14f27d4118cec99024695f53d4884c79f3a10138
+  apiVersion: "1.51"
+
+# Support states:
+#   full       - behaves like a real Moby v28.5.2 daemon for supported inputs
+#   partial    - real implementation with a documented gap versus Moby
+#   error-only - registered route returning Moby's exact unavailable/not-found
+#                error for a daemon without Swarm and without plugins
+#
+# Every operation in the pinned spec MUST be listed here. The generator fails
+# on missing entries so the matrix cannot silently claim coverage.
+routes:
+
+  # --- System ---------------------------------------------------------------
+  - method: GET
+    path: /_ping
+    support: full
+    owner: HealthCheckPingRoute
+    note: Docker daemon liveness and API-version headers.
+  - method: HEAD
+    path: /_ping
+    support: full
+    owner: HealthCheckPingRoute
+    note: Header-only Docker daemon liveness check.
+  - method: GET
+    path: /version
+    support: full
+    owner: VersionRoute
+    note: Glass Dock build and Docker API compatibility versions.
+  - method: GET
+    path: /info
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reports live guest counts and host/runtime metadata with capability warnings.
+  - method: GET
+    path: /events
+    support: full
+    owner: EventsRoute
+    note: Persistent guest event stream with Docker event filtering.
+  - method: POST
+    path: /auth
+    support: full
+    owner: AuthRoute
+    note: Registry credential validation.
+  - method: GET
+    path: /system/df
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Reports guest-backed image, container, and volume usage objects; build-cache accounting and container filesystem sizes are not reported yet.
+  - method: POST
+    path: /session
+    support: partial
+    owner: SessionRoute
+    note: Accepts Docker TCP/h2c session upgrade handshakes; no interactive builder session is attached afterwards.
+
+  # --- Containers -------------------------------------------------------------
+  - method: GET
+    path: /containers/json
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Lists persistent guest containers with Docker pagination, size fields, and id, name, status, ancestor, time, network, port, volume, health, task, and label filters.
+  - method: POST
+    path: /containers/create
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Creates persistent guest containers and stores Docker command, environment, mount, network, health, restart, resource, and metadata settings.
+  - method: DELETE
+    path: /containers/{id}
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Container removal and named-volume reference release.
+  - method: GET
+    path: /containers/{id}/json
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Docker inspect response built from guest state and host metadata.
+  - method: POST
+    path: /containers/{id}/start
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Starts a persistent guest container and republishes ports.
+  - method: POST
+    path: /containers/{id}/stop
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Signal and timeout handling with a forced kill after timeout.
+  - method: POST
+    path: /containers/{id}/restart
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Stops and starts a guest container with Docker timeout and signal handling.
+  - method: POST
+    path: /containers/{id}/kill
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Sends a validated signal to the guest container.
+  - method: POST
+    path: /containers/{id}/wait
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Default, next-exit, not-running, and removed waits; healthy waits report the Docker error when no healthcheck exists.
+  - method: GET
+    path: /containers/{id}/logs
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Stores stdout and stderr with Docker framing, tail, timestamp, time-range, details, replay, follow, and interactive stream handling.
+  - method: POST
+    path: /containers/{id}/pause
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Pauses a running guest task through containerd.
+  - method: POST
+    path: /containers/{id}/unpause
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Resumes a paused guest task through containerd.
+  - method: POST
+    path: /containers/{id}/rename
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Persists the Docker-facing container name in guest metadata.
+  - method: POST
+    path: /containers/{id}/resize
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Resizes a running TTY container through containerd.
+  - method: POST
+    path: /containers/{id}/update
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Updates live guest CPU, memory, cpuset, PIDs, swap, reservation, quota, and restart-policy settings with Docker warnings.
+  - method: POST
+    path: /containers/prune
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Removes non-running containers with Docker label and until filters and reports guest snapshot accounting.
+  - method: GET
+    path: /containers/{id}/top
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reports guest task PIDs and command names from the container process namespace via containerd and /proc.
+  - method: GET
+    path: /containers/{id}/stats
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reports CPU, memory, and PIDs from the container's own cgroup via containerd task.Metrics — the same source Docker's engine uses — with streaming and one-shot modes.
+
+  - method: GET
+    path: /containers/{id}/export
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Streams a tar archive of the guest container root filesystem.
+  - method: GET
+    path: /containers/{id}/archive
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reads a path from the guest root filesystem as a tar stream and returns Docker path-stat metadata.
+  - method: HEAD
+    path: /containers/{id}/archive
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reports Docker path-stat metadata for a guest filesystem path.
+  - method: PUT
+    path: /containers/{id}/archive
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Applies a bounded tar request to a guest root filesystem directory.
+  - method: GET
+    path: /containers/{id}/changes
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Computes guest snapshot changes against the image parent snapshot.
+  - method: POST
+    path: /containers/{id}/attach
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Attaches to guest stdout and stderr with Docker raw-stream framing, replay selection, follow mode, and stdin relay.
+  - method: GET
+    path: /containers/{id}/attach/ws
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Provides WebSocket attach with Docker raw-stream framing, replay selection, follow mode, and stdin relay.
+
+  # --- Exec ---------------------------------------------------------------------
+  - method: POST
+    path: /containers/{id}/exec
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Exec creation and guest-backed command execution.
+  - method: POST
+    path: /exec/{id}/start
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Starts detached or streaming guest exec processes with Docker stdcopy framing, terminal mode, and stdin relay.
+  - method: POST
+    path: /exec/{id}/resize
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Resizes an active guest exec terminal through containerd; exited execs return an error.
+  - method: GET
+    path: /exec/{id}/json
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Host-side exec lifecycle inspection.
+
+  # --- Images -------------------------------------------------------------------
+  - method: POST
+    path: /images/create
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Guest-backed image pull plus fromSrc rootfs-tar import streamed through guest stdin frames without a size ceiling.
+
+  - method: GET
+    path: /images/json
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Image listing with reference, dangling, label, and date filters.
+  - method: GET
+    path: /images/{name}/json
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Inspects guest image identity, platform, config, history, Docker health-check, shell, and layer metadata.
+  - method: DELETE
+    path: /images/{name}
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Guest image deletion with force handling.
+  - method: POST
+    path: /images/prune
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Guest image pruning with dangling filter handling.
+  - method: POST
+    path: /images/{name}/tag
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Adds a guest image reference.
+  - method: POST
+    path: /images/{name}/push
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Pushes a guest image through containerd with optional registry credentials and platform selection.
+  - method: GET
+    path: /images/get
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Exports one or more guest images as an OCI/containerd tar archive.
+  - method: GET
+    path: /images/{name}/get
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Exports one guest image as an OCI/containerd tar archive.
+  - method: POST
+    path: /images/load
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Streams OCI or Docker archives into the guest through stdin frames; archive size is bounded by disk space, not memory.
+
+  - method: GET
+    path: /images/{name}/history
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Reports history from the guest image OCI configuration and layer metadata.
+  - method: GET
+    path: /images/search
+    support: full
+    owner: ImageSearchRoute
+    note: Docker Hub repository search with limit, official, automated, and star filters — matching the default index real Docker queries.
+
+  - method: POST
+    path: /build
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Builds classic Dockerfiles in the persistent guest runtime with local/remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check support; BuildKit syntax, cache mounts, and heredocs are not supported.
+  - method: POST
+    path: /build/prune
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Validates Docker build-cache filters and returns the Docker prune result for the guest-owned build cache model.
+  - method: POST
+    path: /commit
+    support: partial
+    owner: DockerRuntimeRoutes
+    note: Commits a guest container filesystem diff as a new image layer and applies configuration changes; diff computation differs from Docker's per-file change tracking.
+
+  # --- Networks -------------------------------------------------------------
+  - method: GET
+    path: /networks
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Lists guest-owned bridge and custom network objects with prepared container endpoints.
+  - method: GET
+    path: /networks/{id}
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Inspects guest-owned bridge and custom network objects by name or ID.
+  - method: POST
+    path: /networks/create
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Creates guest-owned bridge, internal, IPv4, IPv6, and IPAM network state with Docker network metadata and options.
+  - method: DELETE
+    path: /networks/{id}
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Deletes eligible custom networks and returns Docker's protected-network error for the guest runtime bridge.
+  - method: POST
+    path: /networks/prune
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Validates Docker network filters, deletes eligible custom networks, and protects the guest runtime's private bridge.
+  - method: POST
+    path: /networks/{id}/connect
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Connects running and stopped containers via native network-namespace attachment in the guest; verified live with hot attach.
+
+  - method: POST
+    path: /networks/{id}/disconnect
+    support: full
+    owner: DockerRuntimeRoutes
+    note: Disconnects guest network endpoints from stopped containers and protects the default bridge network.
+
+  # --- Volumes ------------------------------------------------------------
+  - method: GET
+    path: /volumes
+    support: full
+    owner: VolumeListRoute
+    note: Local volume listing.
+  - method: POST
+    path: /volumes/create
+    support: full
+    owner: VolumeCreateRoute
+    note: Local persistent volume creation.
+  - method: GET
+    path: /volumes/{name}
+    support: full
+    owner: VolumeInspectRoute
+    note: Local volume inspection.
+  - method: DELETE
+    path: /volumes/{name}
+    support: full
+    owner: VolumeDeleteRoute
+    note: Local volume deletion with in-use protection.
+  - method: POST
+    path: /volumes/prune
+    support: full
+    owner: VolumePruneRoute
+    note: Anonymous and all-volume pruning with label filters.
+  - method: PUT
+    path: /volumes/{name}
+    support: error-only
+    expectedStatus: 503
+    owner: VolumeUpdateRoute
+    note: Moby rejects volume updates on daemons that are not swarm managers with this exact 503 before validation (api/server/router/volume/volume_routes.go).
+
+  # --- Distribution ----------------------------------------------------------
+  - method: GET
+    path: /distribution/{name}/json
+    support: full
+    owner: DistributionJsonRoute
+    note: Registry manifest and platform inspection.
+
+  # --- Plugins -----------------------------------------------------------
+  # A fresh Docker daemon has zero plugins installed: listing returns [] and
+  # every other operation reports Moby's exact plugin-not-found 404.
+  - method: GET
+    path: /plugins
+    support: full
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Returns an empty array like a fresh Moby daemon with no plugins installed.
+  - method: POST
+    path: /plugins/create
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: GET
+    path: /plugins/privileges
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 for the requested remote plugin.
+  - method: POST
+    path: /plugins/pull
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 for the requested remote plugin.
+  - method: GET
+    path: /plugins/{name}/json
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: POST
+    path: /plugins/{name}/enable
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: POST
+    path: /plugins/{name}/disable
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: POST
+    path: /plugins/{name}/push
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: POST
+    path: /plugins/{name}/set
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: POST
+    path: /plugins/{name}/upgrade
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+  - method: DELETE
+    path: /plugins/{name}
+    support: error-only
+    expectedStatus: 404
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby's plugin %q not found 404 (plugin/errors.go errNotFound).
+
+  # --- Swarm control plane -------------------------------------------------
+  # Glass Dock has no swarm manager. These return Moby's exact errors for an
+  # uninitialized daemon (daemon/cluster/cluster.go errNoManager and
+  # daemon/cluster/errors.go errNoSwarm), which is what clients observe when
+  # pointing at a real worker node.
+  - method: GET
+    path: /swarm
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /swarm/init
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503; initializing a real swarm manager is not supported.
+  - method: POST
+    path: /swarm/join
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503; joining a real swarm is not supported.
+  - method: POST
+    path: /swarm/leave
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoSwarm 503 ("This node is not part of a swarm").
+  - method: POST
+    path: /swarm/update
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /swarm/unlock
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /swarm/unlockkey
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /nodes
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /nodes/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /nodes/{id}/update
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: DELETE
+    path: /nodes/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /services
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /services/create
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /services/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /services/{id}/update
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /services/{id}/logs
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: DELETE
+    path: /services/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /tasks
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /tasks/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /tasks/{id}/logs
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /secrets
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /secrets/create
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /secrets/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /secrets/{id}/update
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: DELETE
+    path: /secrets/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /configs
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /configs/create
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: GET
+    path: /configs/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: POST
+    path: /configs/{id}/update
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.
+  - method: DELETE
+    path: /configs/{id}
+    support: error-only
+    expectedStatus: 503
+    owner: ExplicitUnsupportedDockerRoutes
+    note: Moby errNoManager 503 for an uninitialized swarm.

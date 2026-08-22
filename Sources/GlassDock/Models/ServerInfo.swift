@@ -9,17 +9,32 @@ import Vapor
 //       - Init binary + commit
 //       - Default network address pool
 struct SystemInfo: Content {
+    var ID: String? = nil
     var Containers: Int
     var ContainersRunning: Int
     /// NOTE: Apple container doesn't support pausing containers
     var ContainersPaused: Int
     var ContainersStopped: Int
     var Images: Int
+    var Driver: String? = nil
+    var DriverStatus: [[String]]? = nil
     var DockerRootDir: String
+    var Plugins: PluginsInfo? = nil
+    var MemoryLimit: Bool? = nil
+    var SwapLimit: Bool? = nil
+    var KernelMemoryTCP: Bool? = nil
+    var CpuCfsPeriod: Bool? = nil
+    var CpuCfsQuota: Bool? = nil
+    var CPUShares: Bool? = nil
+    var CPUSet: Bool? = nil
+    var PidsLimit: Bool? = nil
+    var OomKillDisable: Bool? = nil
+    var IPv4Forwarding: Bool? = nil
     var Debug: Bool
     var KernelVersion: String
     var OSVersion: String?
     var OSType: String
+    var OperatingSystem: String? = nil
     var Architecture: String
     var NCPU: Int
     var MemTotal: Int64
@@ -31,12 +46,24 @@ struct SystemInfo: Content {
     var Labels: [String]?
     var ExperimentalBuild: Bool
     var ServerVersion: String
+    var IndexServerAddress: String? = nil
+    var LoggingDriver: String? = nil
+    var CgroupDriver: String? = nil
+    var CgroupVersion: String? = nil
+    var SecurityOptions: [String]? = nil
     // NOTE: In Apple container, each container uses a dedicated runtime
     // var Runtimes: [String: Runtime]
     // var DefaultRuntime: String
     var ProductLicense: String
     var SystemTime: String
     var Warnings: [String]
+}
+
+struct PluginsInfo: Content {
+    var Volume: [String] = []
+    var Network: [String] = []
+    var Authorization: [String] = []
+    var Log: [String] = []
 }
 
 // NOTE: In Apple container, each container uses a dedicated runtime

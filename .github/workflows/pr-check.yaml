@@ -114,6 +114,11 @@ jobs:
             exit 1
           fi
 
+      - name: Check Docker API route coverage
+        run: |
+          make api-compatibility-check
+          make api-compatibility-test
+
       - name: Execute test
         run: make test
 
