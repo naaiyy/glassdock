@@ -4284,11 +4284,6 @@ private struct ExecInspectResponse: Content {
     }
 }
 
-func debugLog(_ message: String) {
-    fputs("[\(Date())] \(message)\n", stderr)
-    fflush(stderr)
-}
-
 final class SawDataFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var sawAny = false

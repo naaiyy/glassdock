@@ -1758,7 +1758,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 }
             } catch {
                 continuation.finish(throwing: error)
-                await gate.fail(error)
+                gate.fail(error)
             }
         }
         control.set(request)
