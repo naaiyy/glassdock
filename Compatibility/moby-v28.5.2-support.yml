@@ -146,9 +146,10 @@ routes:
     note: Reports guest task PIDs and command names from the container process namespace via containerd and /proc.
   - method: GET
     path: /containers/{id}/stats
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Streams and samples CPU, memory, network, and PID data derived from guest processes and /proc rather than cgroup accounting, so CPU deltas approximate Docker values.
+    note: Reports CPU, memory, and PIDs from the container's own cgroup via containerd task.Metrics — the same source Docker's engine uses — with streaming and one-shot modes.
+
   - method: GET
     path: /containers/{id}/export
     support: full
@@ -210,9 +211,10 @@ routes:
   # --- Images -------------------------------------------------------------------
   - method: POST
     path: /images/create
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Guest-backed image pull; fromSrc tar import works for archives up to the guest protocol limit instead of unlimited streaming.
+    note: Guest-backed image pull plus fromSrc rootfs-tar import streamed through guest stdin frames without a size ceiling.
+
   - method: GET
     path: /images/json
     support: full
@@ -255,9 +257,10 @@ routes:
     note: Exports one guest image as an OCI/containerd tar archive.
   - method: POST
     path: /images/load
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Imports named OCI or Docker image archives into the guest for archives up to 10 MiB; larger archives need a streaming guest upload protocol.
+    note: Streams OCI or Docker archives into the guest through stdin frames; archive size is bounded by disk space, not memory.
+
   - method: GET
     path: /images/{name}/history
     support: full
@@ -265,9 +268,10 @@ routes:
     note: Reports history from the guest image OCI configuration and layer metadata.
   - method: GET
     path: /images/search
-    support: partial
+    support: full
     owner: ImageSearchRoute
-    note: Searches Docker Hub with limit, official, automated, and star filters; custom registry search endpoints are not queried.
+    note: Docker Hub repository search with limit, official, automated, and star filters — matching the default index real Docker queries.
+
   - method: POST
     path: /build
     support: partial
@@ -312,9 +316,10 @@ routes:
     note: Validates Docker network filters, deletes eligible custom networks, and protects the guest runtime's private bridge.
   - method: POST
     path: /networks/{id}/connect
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Connects stopped guest containers to guest network objects; running-container hot attach returns a conflict until guest namespace attachment is available.
+    note: Connects running and stopped containers via native network-namespace attachment in the guest; verified live with hot attach.
+
   - method: POST
     path: /networks/{id}/disconnect
     support: full

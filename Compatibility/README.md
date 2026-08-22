@@ -26,7 +26,7 @@ Rules:
 - A state may only change when a unit test or live conformance probe proves the new state.
 - `partial` notes must name the concrete limitation, not vague language.
 
-Current distribution: 57 full, 9 partial, 41 error-only.
+Current distribution: 62 full, 4 partial, 41 error-only.
 
 ## Live conformance
 

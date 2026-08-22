@@ -1175,12 +1175,13 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         return DockerRuntimeImage(reference: tags.first ?? "glassdock/build:latest", digest: "sha256:built")
     }
 
-    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
+    func exportImages(
+        references: [String]
+    ) async throws -> (firstChunk: Data, remaining: AsyncThrowingStream<Data, Error>) {
         lastExportReferences = references
-        return AsyncThrowingStream { continuation in
-            continuation.yield(Data("image-tar".utf8))
-            continuation.finish()
-        }
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        continuation.finish()
+        return (Data("image-tar".utf8), stream)
     }
 
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {

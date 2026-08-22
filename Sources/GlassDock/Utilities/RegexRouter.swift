@@ -14,12 +14,14 @@ extension RoutesBuilder {
     func registerVersionedRoute<T: AsyncResponseEncodable & Sendable>(
         _ method: HTTPMethod,
         pattern: String,
+        body: HTTPBodyStreamStrategy = .collect,
         use closure: @escaping @Sendable (Request) async throws -> T
     ) throws {
         let dockerPattern = try DockerRoutePattern(pattern)
         let path = dockerPattern.pathComponents
-        self.on(method, path, use: closure)
-        self.on(method, [.parameter("version")] + path) { request async throws -> T in
+        self.on(method, path, body: body, use: closure)
+        let versionedPath: [PathComponent] = [.parameter("version")] + path
+        self.on(method, versionedPath, body: body) { request async throws -> T in
             guard let component = request.parameters.get("version"),
                 let version = DockerAPIVersionPath.parse(component)
             else {

@@ -2,6 +2,9 @@ import Foundation
 import NIOCore
 import Vapor
 
+import func Foundation.fputs
+import var Foundation.stderr
+
 enum EngineContainerState: String, Sendable, Equatable {
     case created
     case running
@@ -32,7 +35,7 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func pruneImages(all: Bool) async throws -> DockerRuntimeImageDelete
     func tagImage(source: String, target: String) async throws
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage
-    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error>
+    func exportImages(references: [String]) async throws -> (firstChunk: Data, remaining: AsyncThrowingStream<Data, Error>)
     func importImages(data: Data) async throws -> [DockerRuntimeImage]
     func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage
     func commitImage(
@@ -129,6 +132,12 @@ protocol DockerRuntimeImageImportBackend: DockerRuntimeRouteBackend {
     func importImages(data: Data, reference: String?) async throws -> [DockerRuntimeImage]
 }
 
+/// Backends whose guest protocol accepts streaming uploads, removing the
+/// in-memory size bound on image imports and loads.
+protocol DockerRuntimeImageImportStreamingBackend: DockerRuntimeRouteBackend {
+    func openImportSession(reference: String?) async throws -> GuestImportSession
+}
+
 protocol DockerRuntimeImagePruneBackend: Sendable {
     func pruneImages(all: Bool, filters: [String: [String]]) async throws -> DockerRuntimeImageDelete
 }
@@ -186,7 +195,7 @@ extension DockerRuntimeRouteBackend {
     func pushImage(source: String, target: String, platform: String?, auth: DockerRegistryAuth?) async throws -> DockerRuntimeImage {
         throw DockerRuntimeRouteError.invalidRequest("image push is not supported")
     }
-    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
+    func exportImages(references: [String]) async throws -> (firstChunk: Data, remaining: AsyncThrowingStream<Data, Error>) {
         throw DockerRuntimeRouteError.invalidRequest("image export is not supported")
     }
     func commitImage(
@@ -1034,8 +1043,8 @@ struct DockerRuntimeRoutes: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         try routes.registerVersionedRoute(.POST, pattern: "/build", use: buildImage)
         try routes.registerVersionedRoute(.POST, pattern: "/build/prune", use: pruneBuildCache)
-        try routes.registerVersionedRoute(.POST, pattern: "/images/load", use: importImages)
-        try routes.registerVersionedRoute(.POST, pattern: "/images/create", use: pullImage)
+        try routes.registerVersionedRoute(.POST, pattern: "/images/load", body: .stream, use: importImages)
+        try routes.registerVersionedRoute(.POST, pattern: "/images/create", body: .stream, use: pullImage)
         try routes.registerVersionedRoute(.GET, pattern: "/images/json", use: listImages)
         try routes.registerVersionedRoute(.GET, pattern: "/images/{name:.*}/json", use: inspectImage)
         try routes.registerVersionedRoute(.DELETE, pattern: "/images/{name:.*}", use: deleteImage)
@@ -1177,6 +1186,40 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func importImage(_ req: Request) async throws -> Response {
+        let reference: String? = {
+            guard let repository = req.query[String.self, at: "repo"], !repository.isEmpty else {
+                return nil
+            }
+            return Self.imageReference(
+                fromImage: repository, tag: req.query[String.self, at: "tag"]
+            )
+        }()
+
+        // Streaming path: chunks flow straight from the request body into
+        // guest stdin frames with end-to-end backpressure, so arbitrarily
+        // large archives import without a memory ceiling.
+        if let streamingBackend = backend as? any DockerRuntimeImageImportStreamingBackend {
+            let session = try await call {
+                try await streamingBackend.openImportSession(reference: reference)
+            }
+            let sawData = SawDataFlag()
+            do {
+                try await Self.pumpRequestBody(req) { data in
+                    sawData.mark()
+                    try await session.write(data)
+                }
+                try await session.endInput()
+            } catch {
+                session.abort()
+                throw error
+            }
+            guard sawData.didSeeData else {
+                throw Abort(.badRequest, reason: "Image archive request body is required")
+            }
+            let imported = try await call { try await session.finish() }
+            return try Self.buildImportResponse(imported)
+        }
+
         guard
             let buffer = try await req.body.collect(
                 max: min(
@@ -1189,14 +1232,6 @@ struct DockerRuntimeRoutes: RouteCollection {
         else {
             throw Abort(.badRequest, reason: "Image archive request body is required")
         }
-        let reference: String? = {
-            guard let repository = req.query[String.self, at: "repo"], !repository.isEmpty else {
-                return nil
-            }
-            return Self.imageReference(
-                fromImage: repository, tag: req.query[String.self, at: "tag"]
-            )
-        }()
         let images: [DockerRuntimeImage]
         if let importer = backend as? any DockerRuntimeImageImportBackend {
             images = try await call {
@@ -1205,6 +1240,59 @@ struct DockerRuntimeRoutes: RouteCollection {
         } else {
             images = try await call { try await backend.importImages(data: data) }
         }
+        var body = Data()
+        for image in images {
+            body.append(
+                try JSONEncoder().encode(
+                    ImageImportProgress(stream: "Loaded image: \(image.reference)\n")
+                )
+            )
+            body.append(0x0A)
+        }
+        let response = Response(status: .ok, body: .init(data: body))
+        response.headers.contentType = .json
+        return response
+    }
+
+    /// Streams the HTTP request body chunk-by-chunk into `sink`. Vapor's drain
+    /// callback returns a future per chunk, so the next chunk is only read once
+    /// the previous one has been fully written to the guest — that future is
+    /// what carries backpressure.
+    private static func pumpRequestBody(
+        _ req: Request, sink: @escaping @Sendable (Data) async throws -> Void
+    ) async throws {
+        let eventLoop = req.eventLoop
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let completionBox = DrainCompletionBox(continuation: continuation)
+            req.body.drain { (result: BodyStreamResult) -> EventLoopFuture<Void> in
+                switch result {
+                case .buffer(let buffer):
+                    let promise = eventLoop.makePromise(of: Void.self)
+                    Task {
+                        do {
+                            try await sink(Data(buffer: buffer))
+                            promise.succeed(())
+                        } catch {
+                            promise.fail(error)
+                            completionBox.resumeOnce(with: error)
+                        }
+                    }
+                    return promise.futureResult
+                case .end:
+                    completionBox.resumeOnce()
+                    return eventLoop.makeSucceededFuture(())
+                case .error(let error):
+                    completionBox.resumeOnce(with: error)
+                    return eventLoop.makeSucceededFuture(())
+                @unknown default:
+                    completionBox.resumeOnce()
+                    return eventLoop.makeSucceededFuture(())
+                }
+            }
+        }
+    }
+
+    private static func buildImportResponse(_ images: [DockerRuntimeImage]) throws -> Response {
         var body = Data()
         for image in images {
             body.append(
@@ -1473,14 +1561,20 @@ struct DockerRuntimeRoutes: RouteCollection {
         for reference in references {
             _ = try await call { try await backend.inspectImage(reference: reference) }
         }
-        let stream = try await call { try await backend.exportImages(references: references) }
+        // The first chunk gates the response: if the guest rejects the export
+        // during setup (missing content, unknown image), the error surfaces as
+        // a real HTTP 500 instead of a committed 200 with a dropped body.
+        let (first, remaining) = try await call {
+            try await backend.exportImages(references: references)
+        }
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
         return Response(
             status: .ok,
             headers: headers,
             body: .init(managedAsyncStream: { writer in
-                for try await data in stream {
+                try await writer.writeBuffer(ByteBuffer(data: first))
+                for try await data in remaining {
                     try await writer.writeBuffer(ByteBuffer(data: data))
                 }
             })
@@ -4187,5 +4281,50 @@ private struct ExecInspectResponse: Content {
             arguments: Array(entry.request.command.dropFirst()),
             tty: entry.request.tty
         )
+    }
+}
+
+func debugLog(_ message: String) {
+    fputs("[\(Date())] \(message)\n", stderr)
+    fflush(stderr)
+}
+
+final class SawDataFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sawAny = false
+
+    func mark() {
+        lock.withLock { sawAny = true }
+    }
+
+    var didSeeData: Bool {
+        lock.withLock { sawAny }
+    }
+}
+
+/// Ensures a body-drain continuation resumes exactly once.
+private final class DrainCompletionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    private let continuation: CheckedContinuation<Void, any Error>
+
+    init(continuation: CheckedContinuation<Void, any Error>) {
+        self.continuation = continuation
+    }
+
+    func resumeOnce() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        continuation.resume()
+    }
+
+    func resumeOnce(with error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        continuation.resume(throwing: error)
     }
 }

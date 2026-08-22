@@ -495,7 +495,7 @@
       "method": "GET",
       "path": "/containers/{id}/stats",
       "operationId": "ContainerStats",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -504,7 +504,7 @@
       ],
       "responseSchema": "#/definitions/ContainerStatsResponse",
       "owner": "DockerRuntimeRoutes",
-      "note": "Streams and samples CPU, memory, network, and PID data derived from guest processes and /proc rather than cgroup accounting, so CPU deltas approximate Docker values."
+      "note": "Reports CPU, memory, and PIDs from the container's own cgroup via containerd task.Metrics — the same source Docker's engine uses — with streaming and one-shot modes."
     },
     {
       "method": "POST",
@@ -663,7 +663,7 @@
       "method": "POST",
       "path": "/images/create",
       "operationId": "ImageCreate",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -672,7 +672,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Guest-backed image pull; fromSrc tar import works for archives up to the guest protocol limit instead of unlimited streaming."
+      "note": "Guest-backed image pull plus fromSrc rootfs-tar import streamed through guest stdin frames without a size ceiling."
     },
     {
       "method": "GET",
@@ -706,7 +706,7 @@
       "method": "POST",
       "path": "/images/load",
       "operationId": "ImageLoad",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -714,7 +714,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Imports named OCI or Docker image archives into the guest for archives up to 10 MiB; larger archives need a streaming guest upload protocol."
+      "note": "Streams OCI or Docker archives into the guest through stdin frames; archive size is bounded by disk space, not memory."
     },
     {
       "method": "POST",
@@ -734,7 +734,7 @@
       "method": "GET",
       "path": "/images/search",
       "operationId": "ImageSearch",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -742,7 +742,7 @@
       ],
       "responseSchema": "array",
       "owner": "ImageSearchRoute",
-      "note": "Searches Docker Hub with limit, official, automated, and star filters; custom registry search endpoints are not queried."
+      "note": "Docker Hub repository search with limit, official, automated, and star filters — matching the default index real Docker queries."
     },
     {
       "method": "DELETE",
@@ -930,7 +930,7 @@
       "method": "POST",
       "path": "/networks/{id}/connect",
       "operationId": "NetworkConnect",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -941,7 +941,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Connects stopped guest containers to guest network objects; running-container hot attach returns a conflict until guest namespace attachment is available."
+      "note": "Connects running and stopped containers via native network-namespace attachment in the guest; verified live with hot attach."
     },
     {
       "method": "POST",

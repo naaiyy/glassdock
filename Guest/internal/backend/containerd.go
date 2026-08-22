@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/containerd/typeurl/v2"
 	registryreference "github.com/distribution/reference"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -525,9 +527,57 @@ func (b *Backend) ExportImages(ctx context.Context, request api.ImageExportReque
 		if _, err := b.Image(ctx, reference); err != nil {
 			return err
 		}
-		options = append(options, containerarchive.WithImage(b.client.ImageService(), reference))
+		record, err := b.client.ImageService().Get(ctx, reference)
+		if err != nil {
+			return err
+		}
+		// Pulls only download blobs for one platform, while an image target is
+		// often a multi-platform index. Exporting that index verbatim yields an
+		// archive whose sibling manifests are missing ("content digest not
+		// found" on load), so pin the archive to this platform's manifest.
+		desc := record.Target
+		if containerimages.IsIndexType(desc.MediaType) {
+			resolved, err := selectPlatformManifest(ctx, b.client.ContentStore(), desc)
+			if err != nil {
+				return err
+			}
+			desc = resolved
+		}
+		options = append(options, containerarchive.WithManifest(desc, reference))
 	}
 	return b.client.Export(ctx, streamWriter{stream: "stdout", send: stream}, options...)
+}
+
+// selectPlatformManifest resolves a multi-platform index to the single
+// manifest matching the guest platform.
+func selectPlatformManifest(
+	ctx context.Context, store content.Store, indexDesc imagespec.Descriptor,
+) (imagespec.Descriptor, error) {
+	p, err := content.ReadBlob(ctx, store, indexDesc)
+	if err != nil {
+		return imagespec.Descriptor{}, err
+	}
+	var index imagespec.Index
+	if err := json.Unmarshal(p, &index); err != nil {
+		return imagespec.Descriptor{}, err
+	}
+	for _, m := range index.Manifests {
+		// Exact OS/architecture match. containerd's platforms.Match treats
+		// arm64 as compatible with arm/vN ("Only" semantics), which silently
+		// selects foreign-platform manifests whose blobs were never pulled.
+		if m.Platform == nil {
+			continue
+		}
+		log.Printf("DEBUG-SELECT: child %s platform=%s", m.Digest, platforms.Format(*m.Platform))
+		if m.Platform.OS == platforms.DefaultSpec().OS &&
+			m.Platform.Architecture == platforms.DefaultSpec().Architecture {
+			return m, nil
+		}
+	}
+	return imagespec.Descriptor{}, fmt.Errorf(
+		"index %s has no manifest for platform %s/%s",
+		indexDesc.Digest, platforms.DefaultSpec().OS, platforms.DefaultSpec().Architecture,
+	)
 }
 
 func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.ImageResponse, error) {
@@ -2692,6 +2742,7 @@ func writeArchivePath(ctx context.Context, target, relative string, writer io.Wr
 		}
 		file, err := os.Open(path)
 		if err != nil {
+			log.Printf("DEBUG-TAR: open error at %s: %v", path, err)
 			return err
 		}
 		defer file.Close()
@@ -2740,6 +2791,7 @@ func writeRootfsTar(ctx context.Context, root string, writer io.Writer) error {
 	defer tarWriter.Close()
 	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
+			log.Printf("DEBUG-TAR: walk error at %s: %v", path, walkErr)
 			return walkErr
 		}
 		if path == root {
@@ -2771,6 +2823,7 @@ func writeRootfsTar(ctx context.Context, root string, writer io.Writer) error {
 		}
 		file, err := os.Open(path)
 		if err != nil {
+			log.Printf("DEBUG-TAR: open error at %s: %v", path, err)
 			return err
 		}
 		defer file.Close()
@@ -2782,6 +2835,7 @@ func writeRootfsTar(ctx context.Context, root string, writer io.Writer) error {
 			count, readErr := file.Read(buffer)
 			if count > 0 {
 				if _, err := tarWriter.Write(buffer[:count]); err != nil {
+					log.Printf("DEBUG-TAR: tar write error at %s: %v", path, err)
 					return err
 				}
 			}
@@ -2975,6 +3029,9 @@ type streamWriter struct {
 }
 
 func (w streamWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	copyOfP := append([]byte(nil), p...)
 	if err := w.send(w.stream, copyOfP); err != nil {
 		return 0, err

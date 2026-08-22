@@ -296,6 +296,11 @@ private struct GuestNetworkListPayload: Decodable {
     let networks: [GuestNetworkPayload]
 }
 
+/// Matches the guest's `NetworkCreateResponse`, which wraps the resource.
+private struct GuestNetworkCreatePayload: Decodable {
+    let network: GuestNetworkPayload
+}
+
 private struct GuestNetworkPayload: Decodable {
     let id: String
     let name: String
@@ -778,8 +783,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         return DockerRuntimeImage(reference: result.name, digest: result.digest)
     }
 
-    func exportImages(references: [String]) async throws -> AsyncThrowingStream<Data, Error> {
-        try await streamRequest(
+    func exportImages(
+        references: [String]
+    ) async throws -> (firstChunk: Data, remaining: AsyncThrowingStream<Data, Error>) {
+        try await streamRequestWithFirstChunk(
             method: "image.export",
             payload: ["references": .array(references.map { .string(Self.normalizedRegistryReference($0)) })]
         )
@@ -1409,7 +1416,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             ])
         }
         let response = try await request("network.create", payload)
-        return Self.dockerNetwork(try decode(response, as: GuestNetworkPayload.self))
+        return Self.dockerNetwork(try decode(response, as: GuestNetworkCreatePayload.self).network)
     }
 
     func connectNetwork(
@@ -1723,11 +1730,52 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         }
     }
 
+    /// Like `streamRequest`, but suspends until the guest either delivers its
+    /// first data frame (returned as `firstChunk`) or fails. Callers can then
+    /// commit HTTP response headers only once the guest accepted the request,
+    /// so setup failures become real HTTP errors instead of dropped streams.
+    private func streamRequestWithFirstChunk(
+        method: String, payload: [String: JSONValue]
+    ) async throws -> (Data, AsyncThrowingStream<Data, Error>) {
+        let connection = try await engine.readyConnection()
+        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+        let gate = GuestFirstChunkGate()
+        let control = GuestStreamRequestControl()
+        let request = Task {
+            do {
+                _ = try await connection.request(method: method, payload: .object(payload)) { frame in
+                    guard let data = frame.data else { return }
+                    gate.deliver(data)
+                    continuation.yield(data)
+                }
+                if !gate.closeWithoutData() {
+                    continuation.finish(
+                        throwing: DockerRuntimeRouteError.invalidRequest(
+                            "guest produced an empty export stream"
+                        ))
+                } else {
+                    continuation.finish()
+                }
+            } catch {
+                continuation.finish(throwing: error)
+                await gate.fail(error)
+            }
+        }
+        control.set(request)
+        continuation.onTermination = { _ in control.cancel() }
+        let first = try await gate.wait()
+        return (first, stream)
+    }
+
     private func streamRequest(
         method: String, payload: [String: JSONValue]
     ) async throws -> AsyncThrowingStream<Data, Error> {
         let connection = try await engine.readyConnection()
-        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
+        // Unbounded buffering: dropping frames here silently truncated large
+        // exports whenever the HTTP side drained slower than the guest wrote.
+        // The consumer is always an active response body or file sink, so the
+        // buffer only absorbs vsock/HTTP throughput jitter.
+        return AsyncThrowingStream { continuation in
             let control = GuestStreamRequestControl()
             let request = Task {
                 do {
@@ -2341,5 +2389,89 @@ struct GuestRuntimeLifecycle: LifecycleHandler {
 
     func shutdownAsync(_ application: Application) async {
         await runtime.stopEventMonitor()
+    }
+}
+
+/// Hands the first guest stream chunk to a suspended caller exactly once so a
+/// route can validate the request before committing HTTP response headers.
+private final class GuestFirstChunkGate: @unchecked Sendable {
+    private enum Outcome {
+        case delivered(Data)
+        case failed(Error)
+        case empty
+    }
+
+    private struct EmptyExportError: Error {}
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiting: [CheckedContinuation<Data, Error>] = []
+
+    func deliver(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard outcome == nil else { return }
+        outcome = .delivered(data)
+        waiting.forEach { $0.resume(returning: data) }
+        waiting = []
+    }
+
+    /// Returns true when at least one chunk had been delivered.
+    func closeWithoutData() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if outcome == nil { outcome = .empty }
+        waiting.forEach { $0.resume(throwing: EmptyExportError()) }
+        waiting = []
+        if case .delivered = outcome { return true }
+        return false
+    }
+
+    func fail(_ error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        if outcome == nil { outcome = .failed(error) }
+        waiting.forEach { $0.resume(throwing: error) }
+        waiting = []
+    }
+
+    func wait() async throws -> Data {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                defer { lock.unlock() }
+                switch outcome {
+                case .some(.delivered(let data)): continuation.resume(returning: data)
+                case .some(.failed(let error)): continuation.resume(throwing: error)
+                case .some(.empty): continuation.resume(throwing: EmptyExportError())
+                case nil: waiting.append(continuation)
+                }
+            }
+        } onCancel: {
+            // Cancellation propagates through the guest request failing, which
+            // calls fail(_:); nothing extra to resume here.
+        }
+    }
+}
+
+extension GuestRuntime: DockerRuntimeImageImportStreamingBackend {
+    func openImportSession(reference: String?) async throws -> GuestImportSession {
+        let connection = try await engine.readyConnection()
+        return GuestImportSession(
+            connection: connection,
+            reference: reference.map { Self.normalizedRegistryReference($0) },
+            decodeResponse: { frame in
+                guard let payload = frame.payload else {
+                    throw GuestProtocolError(code: "invalid_response", message: "missing payload")
+                }
+                let data = try JSONEncoder().encode(payload)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let imported = try decoder.decode(GuestImageImportPayload.self, from: data)
+                return imported.images.map {
+                    DockerRuntimeImage(reference: $0.name, digest: $0.digest)
+                }
+            }
+        )
     }
 }
