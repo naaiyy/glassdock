@@ -13,7 +13,7 @@
 # limitations under the License.
 
 BUILD_CONFIGURATION ?= debug
-APP_RELEASE_VERSION ?= 1.3.0
+APP_RELEASE_VERSION ?= 1.3.1
 APP_BUILD_NUMBER ?= 1
 TEST_PARALLELISM ?= $(shell sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || sysctl -n hw.ncpu)
 TEST_SWIFT_FLAGS ?= --disable-index-store
