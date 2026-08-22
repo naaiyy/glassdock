@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	cgroup1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
+	cgroup2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	containerd "github.com/containerd/containerd/v2/client"
 	containerrecords "github.com/containerd/containerd/v2/core/containers"
@@ -2239,15 +2241,7 @@ func (b *Backend) Stats(ctx context.Context, request api.ContainerStatsRequest) 
 	if err != nil {
 		return api.ContainerStatsResponse{}, err
 	}
-	task, err := container.Task(b.ctx(ctx), nil)
-	if err != nil {
-		return api.ContainerStatsResponse{ID: request.ID, Read: time.Now(), PreRead: time.Now()}, nil
-	}
-	processes, err := task.Pids(b.ctx(ctx))
-	if err != nil {
-		return api.ContainerStatsResponse{}, err
-	}
-	sample := readContainerStats(request.ID, processes)
+	sample := b.sampleContainerStats(request.ID, container)
 	b.statsMu.Lock()
 	defer b.statsMu.Unlock()
 	if b.lastStats == nil {
@@ -2263,6 +2257,107 @@ func (b *Backend) Stats(ctx context.Context, request api.ContainerStatsRequest) 
 	return result, nil
 }
 
+// sampleContainerStats reads one stats point for a container. CPU and memory
+// come from the container's own cgroup through containerd task metrics, which
+// is the same source Docker's engine reports from; network counters come from
+// the container network namespace via /proc.
+func (b *Backend) sampleContainerStats(id string, container containerd.Container) api.ContainerStatsResponse {
+	current := api.ContainerStatsResponse{
+		ID:      id,
+		Read:    time.Now(),
+		PreRead: time.Now(),
+		CPUStats: api.CPUStats{
+			CPUUsage:       api.CPUUsage{},
+			SystemCPUUsage: readSystemCPUUsage(cpuTicksPerSecond),
+			OnlineCPUs:     runtime.NumCPU(),
+		},
+		MemoryStats: api.MemoryStats{Limit: hostMemoryLimit()},
+	}
+
+	task, err := container.Task(b.ctx(context.Background()), nil)
+	if err != nil {
+		return current
+	}
+
+	if processes, err := task.Pids(b.ctx(context.Background())); err == nil && len(processes) > 0 {
+		current.PidsStats.Current = uint64(len(processes))
+		current.Networks = readNetworkStats(processes)
+	}
+
+	metric, err := task.Metrics(b.ctx(context.Background()))
+	if err != nil || metric == nil || metric.Data == nil {
+		return current
+	}
+	if typeurl.Is(metric.Data, (*cgroup2stats.Metrics)(nil)) {
+		data := &cgroup2stats.Metrics{}
+		if err := typeurl.UnmarshalTo(metric.Data, data); err != nil {
+			return current
+		}
+		if data.CPU != nil {
+			current.CPUStats.CPUUsage.TotalUsage = data.CPU.UsageUsec * uint64(time.Microsecond)
+			current.CPUStats.CPUUsage.InKernelMode = data.CPU.SystemUsec * uint64(time.Microsecond)
+			current.CPUStats.CPUUsage.InUserMode = data.CPU.UserUsec * uint64(time.Microsecond)
+		}
+		if data.Memory != nil {
+			current.MemoryStats.Usage = data.Memory.Usage
+			current.MemoryStats.Stats = map[string]uint64{
+				"anon": data.Memory.Anon,
+				"file": data.Memory.File,
+				"slab": data.Memory.Slab,
+			}
+			limit := data.Memory.UsageLimit
+			if limit == 0 || limit >= math.MaxUint64 {
+				limit = hostMemoryLimit()
+			}
+			current.MemoryStats.Limit = limit
+		}
+		if data.Pids != nil && data.Pids.Current > 0 {
+			current.PidsStats.Current = data.Pids.Current
+		}
+	} else if typeurl.Is(metric.Data, (*cgroup1stats.Metrics)(nil)) {
+		data := &cgroup1stats.Metrics{}
+		if err := typeurl.UnmarshalTo(metric.Data, data); err != nil {
+			return current
+		}
+		if data.CPU != nil && data.CPU.Usage != nil {
+			current.CPUStats.CPUUsage.TotalUsage = data.CPU.Usage.Total
+			current.CPUStats.CPUUsage.InKernelMode = data.CPU.Usage.Kernel
+			current.CPUStats.CPUUsage.InUserMode = data.CPU.Usage.User
+		}
+		if data.Memory != nil && data.Memory.Usage != nil {
+			current.MemoryStats.Usage = data.Memory.Usage.Usage
+			current.MemoryStats.Limit = data.Memory.Usage.Limit
+		}
+	}
+	return current
+}
+
+const cpuTicksPerSecond = uint64(100)
+
+// hostMemoryLimit reports total guest memory, which is what Docker shows as
+// memory limit when a container has no memory restriction.
+func hostMemoryLimit() uint64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return math.MaxUint64
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			break
+		}
+		kib, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			break
+		}
+		return kib * 1024
+	}
+	return math.MaxUint64
+}
+
 func processCommand(pid uint32) string {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "cmdline"))
 	if err == nil && len(data) > 0 {
@@ -2273,62 +2368,6 @@ func processCommand(pid uint32) string {
 		return strings.TrimSpace(string(data))
 	}
 	return "-"
-}
-
-func readContainerStats(id string, processes []containerd.ProcessInfo) api.ContainerStatsResponse {
-	var userTicks, systemTicks, memoryBytes uint64
-	for _, process := range processes {
-		user, system, memory := readProcessStats(process.Pid)
-		userTicks += user
-		systemTicks += system
-		memoryBytes += memory
-	}
-	const ticksPerSecond = uint64(100)
-	current := api.ContainerStatsResponse{
-		ID:      id,
-		Read:    time.Now(),
-		PreRead: time.Now(),
-		CPUStats: api.CPUStats{
-			CPUUsage: api.CPUUsage{
-				TotalUsage:   (userTicks + systemTicks) * uint64(time.Second) / ticksPerSecond,
-				InKernelMode: systemTicks * uint64(time.Second) / ticksPerSecond,
-				InUserMode:   userTicks * uint64(time.Second) / ticksPerSecond,
-			},
-			SystemCPUUsage: readSystemCPUUsage(ticksPerSecond),
-			OnlineCPUs:     runtime.NumCPU(),
-		},
-		MemoryStats: api.MemoryStats{Usage: memoryBytes, Limit: readMemoryLimit(processes)},
-		PidsStats:   api.PidsStats{Current: uint64(len(processes))},
-	}
-	current.Networks = readNetworkStats(processes)
-	return current
-}
-
-func readProcessStats(pid uint32) (user, system, memory uint64) {
-	base := filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10))
-	if data, err := os.ReadFile(filepath.Join(base, "stat")); err == nil {
-		if end := strings.LastIndexByte(string(data), ')'); end >= 0 {
-			fields := strings.Fields(string(data)[end+1:])
-			if len(fields) > 12 {
-				user, _ = strconv.ParseUint(fields[11], 10, 64)
-				system, _ = strconv.ParseUint(fields[12], 10, 64)
-			}
-		}
-	}
-	if data, err := os.ReadFile(filepath.Join(base, "status")); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "VmRSS:") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				value, _ := strconv.ParseUint(fields[1], 10, 64)
-				memory = value * 1024
-			}
-			break
-		}
-	}
-	return user, system, memory
 }
 
 func readSystemCPUUsage(ticksPerSecond uint64) uint64 {
@@ -2351,29 +2390,6 @@ func readSystemCPUUsage(ticksPerSecond uint64) uint64 {
 		return total * uint64(time.Second) / ticksPerSecond
 	}
 	return 0
-}
-
-func readMemoryLimit(processes []containerd.ProcessInfo) uint64 {
-	if len(processes) > 0 {
-		data, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(processes[0].Pid), 10), "cgroup"))
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				parts := strings.SplitN(line, ":", 3)
-				if len(parts) != 3 || parts[1] != "" {
-					continue
-				}
-				path := filepath.Join("/sys/fs/cgroup", parts[2], "memory.max")
-				value, readErr := os.ReadFile(path)
-				if readErr == nil && strings.TrimSpace(string(value)) != "max" {
-					limit, parseErr := strconv.ParseUint(strings.TrimSpace(string(value)), 10, 64)
-					if parseErr == nil {
-						return limit
-					}
-				}
-			}
-		}
-	}
-	return math.MaxUint64
 }
 
 func readNetworkStats(processes []containerd.ProcessInfo) map[string]api.NetStats {

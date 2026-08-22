@@ -1674,14 +1674,18 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func stopAndWait(id: String, signal: UInt32, timeout: Int) async throws {
         try await call { try await backend.killContainer(id: id, signal: signal) }
-        let wait = Task { try await backend.waitContainer(id: id, condition: .notRunning) }
         if timeout < 0 {
-            _ = try await wait.value
+            // Docker's t=-1 waits indefinitely for the container to exit.
+            _ = try await call { try await backend.waitContainer(id: id, condition: .notRunning) }
             return
         }
         do {
+            // The wait runs as a real group child so cancelAll() can unwind it
+            // when the timeout fires. Awaiting an unstructured Task here would
+            // deadlock: Task.value ignores cancellation, so the group could
+            // never finish and SIGKILL escalation would never run.
             _ = try await withThrowingTaskGroup(of: Int32.self) { group in
-                group.addTask { try await wait.value }
+                group.addTask { try await backend.waitContainer(id: id, condition: .notRunning) }
                 group.addTask {
                     try await Task.sleep(for: .seconds(timeout))
                     throw DockerStopTimeout()
@@ -1694,7 +1698,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             }
         } catch is DockerStopTimeout {
             try await call { try await backend.killContainer(id: id, signal: 9) }
-            _ = try await wait.value
+            _ = try await call { try await backend.waitContainer(id: id, condition: .notRunning) }
         }
     }
 

@@ -464,32 +464,58 @@ struct GuestExitCodeIndex: Sendable {
 
 actor GuestWaitSingleFlight {
     private struct Entry {
-        let token: UUID
-        let task: Task<Int32, Error>
+        var continuations: [UUID: CheckedContinuation<Int32, Error>] = [:]
     }
 
     private var pending: [String: Entry] = [:]
 
+    /// Deduplicates concurrent waits for one container. The first caller runs
+    /// the operation inline so cancellation of its task (a stop timeout, for
+    /// example) unwinds the whole chain; spawning it detached here would make
+    /// every waiter ignore cancellation because `Task.value` cannot be
+    /// interrupted. Late joiners suspend on their own continuation, which each
+    /// can cancel independently without disturbing the shared wait.
     func run(
         id: String, operation: @escaping @Sendable () async throws -> Int32
     ) async throws -> Int32 {
-        if let entry = pending[id] { return try await entry.task.value }
-        let token = UUID()
-        let task = Task { try await operation() }
-        pending[id] = Entry(token: token, task: task)
+        if pending[id] != nil {
+            let waiter = UUID()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    pending[id]?.continuations[waiter] = continuation
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(id: id, token: waiter) }
+            }
+        }
+        pending[id] = Entry()
         do {
-            let result = try await task.value
-            finish(id: id, token: token)
+            let result = try await operation()
+            finish(id: id, result: result)
             return result
         } catch {
-            finish(id: id, token: token)
+            finish(id: id, error: error)
             throw error
         }
     }
 
-    private func finish(id: String, token: UUID) {
-        guard pending[id]?.token == token else { return }
-        pending.removeValue(forKey: id)
+    private func cancelWaiter(id: String, token: UUID) {
+        guard let continuation = pending[id]?.continuations.removeValue(forKey: token) else { return }
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(id: String, result: Int32) {
+        guard let entry = pending.removeValue(forKey: id) else { return }
+        for continuation in entry.continuations.values {
+            continuation.resume(returning: result)
+        }
+    }
+
+    private func finish(id: String, error: Error) {
+        guard let entry = pending.removeValue(forKey: id) else { return }
+        for continuation in entry.continuations.values {
+            continuation.resume(throwing: error)
+        }
     }
 }
 
