@@ -999,7 +999,7 @@ struct DockerRuntimeRoutesTests {
     }
 }
 
-private func withRuntimeRoutes(
+func withRuntimeRoutes(
     _ backend: DockerRuntimeBackendMock,
     volumeClient: (any ClientVolumeProtocol)? = nil,
     test: @escaping (Application) async throws -> Void
@@ -1012,7 +1012,7 @@ private func withRuntimeRoutes(
     }
 }
 
-private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
+actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     struct Pull: Equatable {
         let reference: String
         let platform: String?
@@ -1379,20 +1379,30 @@ private actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     }
 
     func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        try await requireContainer(id)
+        return AsyncThrowingStream { continuation in
             continuation.yield(Data("container-tar".utf8))
             continuation.finish()
         }
     }
 
     func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath {
-        DockerRuntimeArchivePath(
+        try await requireContainer(id)
+        return DockerRuntimeArchivePath(
             name: "etc",
             size: 4,
             mode: 0o755,
             modifiedAt: Date(timeIntervalSince1970: 1_700_000_000),
             linkTarget: ""
         )
+    }
+
+    /// Mirrors the real backend: unknown ids surface as notFound so routes can
+    /// map them to 404 before committing a response.
+    private func requireContainer(_ id: String) async throws {
+        guard id != "missing" else {
+            throw DockerRuntimeRouteError.notFound("No such container: missing")
+        }
     }
 
     func putContainerArchive(

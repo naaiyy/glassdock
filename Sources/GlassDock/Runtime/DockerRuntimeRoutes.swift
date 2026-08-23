@@ -1583,15 +1583,15 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func exportImages(_ req: Request) async throws -> Response {
         let references = try Self.imageExportReferences(req.query[String.self, at: "names"])
-        return try await imageExportResponse(references: references)
+        return try await imageExportResponse(references: references, logger: req.logger)
     }
 
     private func exportNamedImage(_ req: Request) async throws -> Response {
         let reference = try requiredParameter("name", request: req)
-        return try await imageExportResponse(references: [reference])
+        return try await imageExportResponse(references: [reference], logger: req.logger)
     }
 
-    private func imageExportResponse(references: [String]) async throws -> Response {
+    private func imageExportResponse(references: [String], logger: Logger) async throws -> Response {
         // Validate every reference before headers are sent so missing images are
         // clean 404s instead of errors inside an already-committed stream body.
         for reference in references {
@@ -1603,18 +1603,15 @@ struct DockerRuntimeRoutes: RouteCollection {
         let (first, remaining) = try await call {
             try await backend.exportImages(references: references)
         }
-        var headers = HTTPHeaders()
-        headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                try await writer.writeBuffer(ByteBuffer(data: first))
-                for try await data in remaining {
-                    try await writer.writeBuffer(ByteBuffer(data: data))
-                }
-            })
-        )
+        return try await streamingResponse(
+            logger: logger,
+            contentType: HTTPMediaType(type: "application", subType: "x-tar")
+        ) { writer in
+            try await writer.writeBuffer(ByteBuffer(data: first))
+            for try await data in remaining {
+                try await writer.writeBuffer(ByteBuffer(data: data))
+            }
+        }
     }
 
     private func createContainer(_ req: Request) async throws -> Response {
@@ -1767,20 +1764,20 @@ struct DockerRuntimeRoutes: RouteCollection {
             condition = .default
         }
         let backend = self.backend
-        // Resolve before headers are sent: a missing container must surface as a
-        // normal 404, not as an error inside an already-committed stream body.
-        _ = try await call { try await backend.inspectContainer(id: id) }
-        var headers = HTTPHeaders()
-        headers.contentType = .json
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                let exitCode = try await backend.waitContainer(id: id, condition: condition)
-                let data = try JSONEncoder().encode(RESTContainerWait(statusCode: Int64(exitCode)))
-                try await writer.writeBuffer(ByteBuffer(bytes: data))
-            })
-        )
+        return try await streamingResponse(
+            logger: req.logger,
+            contentType: .json,
+            resolve: {
+                // Resolve before headers are sent: a missing container must
+                // surface as a normal 404, not as an error inside an
+                // already-committed stream body.
+                _ = try await backend.inspectContainer(id: id)
+            }
+        ) { writer in
+            let exitCode = try await backend.waitContainer(id: id, condition: condition)
+            let data = try JSONEncoder().encode(RESTContainerWait(statusCode: Int64(exitCode)))
+            try await writer.writeBuffer(ByteBuffer(bytes: data))
+        }
     }
 
     private func stopContainer(_ req: Request) async throws -> Response {
@@ -2044,42 +2041,42 @@ struct DockerRuntimeRoutes: RouteCollection {
         let stream = req.query[String.self, at: "stream"].map(Self.mobyBool) ?? true
         let oneShot = req.query[String.self, at: "one-shot"].map(Self.mobyBool) ?? false
         let backend = self.backend
-        // Resolve before headers are sent so a missing container is a clean 404.
-        _ = try await call { try await backend.inspectContainer(id: id) }
-        var headers = HTTPHeaders()
-        headers.contentType = .json
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                repeat {
-                    let stats = try await backend.statsContainer(id: id)
-                    var data = try JSONEncoder().encode(stats)
-                    if stream { data.append(0x0A) }
-                    try await writer.writeBuffer(ByteBuffer(data: data))
-                    if !stream || oneShot { break }
-                    try await Task.sleep(for: .seconds(1))
-                } while !Task.isCancelled
-            })
-        )
+        return try await streamingResponse(
+            logger: req.logger,
+            contentType: .json,
+            resolve: {
+                // Resolve before headers are sent so a missing container is a
+                // clean 404.
+                _ = try await backend.inspectContainer(id: id)
+            }
+        ) { writer in
+            repeat {
+                let stats = try await backend.statsContainer(id: id)
+                var data = try JSONEncoder().encode(stats)
+                if stream { data.append(0x0A) }
+                try await writer.writeBuffer(ByteBuffer(data: data))
+                if !stream || oneShot { break }
+                try await Task.sleep(for: .seconds(1))
+            } while !Task.isCancelled
+        }
     }
 
     private func exportContainer(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        // Resolve before headers are sent so a missing container is a clean 404.
-        _ = try await call { try await backend.inspectContainer(id: id) }
         let stream = try await call { try await backend.exportContainer(id: id) }
-        var headers = HTTPHeaders()
-        headers.contentType = HTTPMediaType(type: "application", subType: "octet-stream")
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                for try await data in stream {
-                    try await writer.writeBuffer(ByteBuffer(data: data))
-                }
-            })
-        )
+        return try await streamingResponse(
+            logger: req.logger,
+            contentType: HTTPMediaType(type: "application", subType: "octet-stream"),
+            resolve: {
+                // Resolve before headers are sent so a missing container is a
+                // clean 404.
+                _ = try await inspectContainer(id: id)
+            }
+        ) { writer in
+            for try await data in stream {
+                try await writer.writeBuffer(ByteBuffer(data: data))
+            }
+        }
     }
 
     private func archiveContainer(_ req: Request) async throws -> Response {
@@ -2087,18 +2084,18 @@ struct DockerRuntimeRoutes: RouteCollection {
         let path = try requiredQuery("path", request: req)
         let info = try await call { try await backend.archiveContainerInfo(id: id, path: path) }
         let stream = try await call { try await backend.archiveContainer(id: id, path: path) }
-        var headers = HTTPHeaders()
-        headers.contentType = HTTPMediaType(type: "application", subType: "x-tar")
-        headers.replaceOrAdd(name: "X-Docker-Container-Path-Stat", value: try Self.archivePathStatHeader(info))
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                for try await data in stream {
-                    try await writer.writeBuffer(ByteBuffer(data: data))
-                }
-            })
-        )
+        let statHeader = try Self.archivePathStatHeader(info)
+        return try await streamingResponse(
+            logger: req.logger,
+            contentType: HTTPMediaType(type: "application", subType: "x-tar"),
+            extraHeaders: { headers in
+                headers.replaceOrAdd(name: "X-Docker-Container-Path-Stat", value: statHeader)
+            }
+        ) { writer in
+            for try await data in stream {
+                try await writer.writeBuffer(ByteBuffer(data: data))
+            }
+        }
     }
 
     private func archiveInfo(_ req: Request) async throws -> Response {
@@ -2283,31 +2280,30 @@ struct DockerRuntimeRoutes: RouteCollection {
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
         let state = execState
-        let response = Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                do {
-                    var exitCode: Int32 = -1
-                    for try await frame in stream {
-                        if let code = frame.exitCode {
-                            exitCode = code
-                        } else if tty {
-                            try await writer.writeBuffer(ByteBuffer(data: frame.data))
-                        } else {
-                            let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
-                            try await writer.writeBuffer(
-                                ByteBuffer(data: Self.frame(frame.data, stream: streamID))
-                            )
-                        }
+        let response = try await streamingResponse(
+            logger: req.logger,
+            contentType: HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        ) { writer in
+            do {
+                var exitCode: Int32 = -1
+                for try await frame in stream {
+                    if let code = frame.exitCode {
+                        exitCode = code
+                    } else if tty {
+                        try await writer.writeBuffer(ByteBuffer(data: frame.data))
+                    } else {
+                        let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
+                        try await writer.writeBuffer(
+                            ByteBuffer(data: Self.frame(frame.data, stream: streamID))
+                        )
                     }
-                    state.finish(id: id, exitCode: exitCode)
-                } catch {
-                    state.finish(id: id, exitCode: -1)
-                    throw error
                 }
-            })
-        )
+                state.finish(id: id, exitCode: exitCode)
+            } catch {
+                state.finish(id: id, exitCode: -1)
+                throw error
+            }
+        }
         if req.headers.first(name: "Upgrade")?.lowercased() == "tcp" {
             response.status = .switchingProtocols
             response.headers.replaceOrAdd(name: "Connection", value: "Upgrade")
@@ -2374,7 +2370,9 @@ struct DockerRuntimeRoutes: RouteCollection {
                     try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
                 }
             }
-            return Self.streamResponse(stream: stream, tty: container.tty, contentType: false)
+            return Self.streamResponse(
+                logger: req.logger, stream: stream, tty: container.tty, contentType: false
+            )
         }
         let output: DockerRuntimeProcessOutput
         if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
@@ -2490,28 +2488,27 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         var headers = HTTPHeaders()
         headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
-        return Response(
-            status: .ok,
-            headers: headers,
-            body: .init(managedAsyncStream: { writer in
-                if upgraded {
-                    // Send the upgrade response before Docker issues the separate
-                    // container-start request. Attach must not start the container.
-                    try await writer.writeBuffer(ByteBuffer())
+        return try await streamingResponse(
+            logger: req.logger,
+            contentType: HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+        ) { writer in
+            if upgraded {
+                // Send the upgrade response before Docker issues the separate
+                // container-start request. Attach must not start the container.
+                try await writer.writeBuffer(ByteBuffer())
+            }
+            for try await frame in stream {
+                guard frame.exitCode == nil else { continue }
+                if tty {
+                    try await writer.writeBuffer(ByteBuffer(data: frame.data))
+                } else {
+                    let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
+                    try await writer.writeBuffer(
+                        ByteBuffer(data: Self.frame(frame.data, stream: streamID))
+                    )
                 }
-                for try await frame in stream {
-                    guard frame.exitCode == nil else { continue }
-                    if tty {
-                        try await writer.writeBuffer(ByteBuffer(data: frame.data))
-                    } else {
-                        let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
-                        try await writer.writeBuffer(
-                            ByteBuffer(data: Self.frame(frame.data, stream: streamID))
-                        )
-                    }
-                }
-            })
-        )
+            }
+        }
     }
 
     private func attachWebSocket(_ req: Request) async throws -> Response {
@@ -2600,6 +2597,49 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
     }
 
+    /// Builds a streaming response under the resolve-before-commit contract:
+    ///
+    /// - `resolve` runs before response headers are committed and maps errors
+    ///   through `call`, so missing containers or images surface as clean 404s
+    ///   and conflicts as 409s instead of errors inside an already-committed
+    ///   stream body (which clients observe as a silent connection drop).
+    /// - Errors thrown by `body` after commit cannot become HTTP status codes
+    ///   anymore. They are logged here and then terminate the stream; new
+    ///   streaming routes must therefore validate everything client-dependent
+    ///   in `resolve`.
+    ///
+    /// Every streaming route must be built through this helper so the contract
+    /// cannot regress.
+    private func streamingResponse(
+        logger: Logger,
+        status: HTTPResponseStatus = .ok,
+        contentType: HTTPMediaType? = nil,
+        extraHeaders: (inout HTTPHeaders) -> Void = { _ in },
+        resolve: () async throws -> Void = {},
+        body: @escaping @Sendable (AsyncBodyStreamWriter) async throws -> Void
+    ) async throws -> Response {
+        try await call(resolve)
+        var headers = HTTPHeaders()
+        if let contentType { headers.contentType = contentType }
+        extraHeaders(&headers)
+        return Response(
+            status: status,
+            headers: headers,
+            body: .init(managedAsyncStream: { writer in
+                do {
+                    try await body(writer)
+                } catch is CancellationError {
+                    // Client disconnects land here; nothing left to report.
+                } catch {
+                    logger.error(
+                        "stream terminated after response commit",
+                        metadata: ["error": "\(error)"]
+                    )
+                }
+            })
+        )
+    }
+
     private func inspectContainer(id: String) async throws -> DockerRuntimeContainer {
         // Keep generic error mapping outside the escaping response stream closure.
         // Swift 6.3.3 otherwise stalls in ClosureLifetimeFixup while compiling attach.
@@ -2669,7 +2709,11 @@ struct DockerRuntimeRoutes: RouteCollection {
         return response
     }
 
+    /// Streaming body for routes whose setup already completed before this is
+    /// called. Post-commit errors cannot become HTTP statuses; they are logged
+    /// and then terminate the stream.
     private static func streamResponse(
+        logger: Logger,
         stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>,
         tty: Bool,
         contentType: Bool = true
@@ -2677,13 +2721,21 @@ struct DockerRuntimeRoutes: RouteCollection {
         let response = Response(
             status: .ok,
             body: .init(managedAsyncStream: { writer in
-                for try await frame in stream {
-                    guard frame.exitCode == nil else { continue }
-                    let data =
-                        tty
-                        ? frame.data
-                        : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
-                    try await writer.writeBuffer(ByteBuffer(data: data))
+                do {
+                    for try await frame in stream {
+                        guard frame.exitCode == nil else { continue }
+                        let data =
+                            tty
+                            ? frame.data
+                            : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
+                        try await writer.writeBuffer(ByteBuffer(data: data))
+                    }
+                } catch is CancellationError {
+                } catch {
+                    logger.error(
+                        "stream terminated after response commit",
+                        metadata: ["error": "\(error)"]
+                    )
                 }
             })
         )
