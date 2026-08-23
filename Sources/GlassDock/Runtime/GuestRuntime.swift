@@ -106,15 +106,24 @@ final class GuestInputRelay: @unchecked Sendable {
     }
 }
 
-private struct GuestContainerPayload: Decodable {
+struct GuestContainerPayload: Decodable {
     let container: GuestContainer
 }
 
-private struct GuestContainerListPayload: Decodable {
+struct GuestContainerListPayload: Decodable {
     let containers: [GuestContainer]
+
+    enum CodingKeys: String, CodingKey {
+        case containers
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        containers = try container.decodeLenientArray(forKey: .containers)
+    }
 }
 
-private struct GuestContainer: Decodable {
+struct GuestContainer: Decodable {
     let id: String
     let image: String
     let status: String
@@ -127,7 +136,7 @@ private struct GuestContainer: Decodable {
     let health: GuestHealth?
 }
 
-private struct GuestContainerMetadata: Decodable {
+struct GuestContainerMetadata: Decodable {
     let name: String?
     let args: [String]?
     let entrypoint: [String]?
@@ -158,7 +167,9 @@ private struct GuestContainerMetadata: Decodable {
     let stopSignal: String?
 }
 
-private struct GuestHealthcheck: Decodable {
+/// The guest serializes health checks with `omitempty`; absent and null
+/// fields decode as zero values instead of failing the decode.
+struct GuestHealthcheck: Decodable {
     let test: [String]
     let interval: Int64
     let timeout: Int64
@@ -166,45 +177,269 @@ private struct GuestHealthcheck: Decodable {
     let startPeriod: Int64
     let startInterval: Int64
 
-    /// The guest serializes health checks with `omitempty`; absent numeric
-    /// fields decode as zero instead of failing the decode.
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        test = try container.decodeIfPresent([String].self, forKey: .test) ?? []
-        interval = try container.decodeIfPresent(Int64.self, forKey: .interval) ?? 0
-        timeout = try container.decodeIfPresent(Int64.self, forKey: .timeout) ?? 0
-        retries = try container.decodeIfPresent(Int.self, forKey: .retries) ?? 0
-        startPeriod = try container.decodeIfPresent(Int64.self, forKey: .startPeriod) ?? 0
-        startInterval = try container.decodeIfPresent(Int64.self, forKey: .startInterval) ?? 0
+    enum CodingKeys: String, CodingKey {
+        case test, interval, timeout, retries, startPeriod, startInterval
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case test, interval, timeout, retries, startPeriod, startInterval
+    init(
+        test: [String] = [], interval: Int64 = 0, timeout: Int64 = 0, retries: Int = 0,
+        startPeriod: Int64 = 0, startInterval: Int64 = 0
+    ) {
+        self.test = test
+        self.interval = interval
+        self.timeout = timeout
+        self.retries = retries
+        self.startPeriod = startPeriod
+        self.startInterval = startInterval
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        test = try container.decodeLenientArray(forKey: .test)
+        interval = try container.decodeLenient(forKey: .interval)
+        timeout = try container.decodeLenient(forKey: .timeout)
+        retries = try container.decodeLenient(forKey: .retries)
+        startPeriod = try container.decodeLenient(forKey: .startPeriod)
+        startInterval = try container.decodeLenient(forKey: .startInterval)
     }
 }
 
-private struct GuestHealth: Decodable {
+struct GuestHealth: Decodable {
     let status: String
     let failingStreak: Int
     let log: [DockerRuntimeHealth.HealthcheckResult]
+
+    enum CodingKeys: String, CodingKey {
+        case status, failingStreak, log
+    }
+
+    init(status: String, failingStreak: Int = 0, log: [DockerRuntimeHealth.HealthcheckResult] = []) {
+        self.status = status
+        self.failingStreak = failingStreak
+        self.log = log
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(String.self, forKey: .status)
+        failingStreak = try container.decodeLenient(forKey: .failingStreak)
+        log = try container.decodeLenientArray(forKey: .log)
+    }
 }
 
-private struct GuestContainerUpdatePayload: Decodable {
+struct GuestContainerUpdatePayload: Decodable {
     let warnings: [String]?
 }
 
-private struct GuestPublishedPort: Decodable {
+/// Lenient view of the guest's container.top response; the guest's nil Go
+/// slices arrive as JSON null.
+struct GuestTopPayload: Decodable {
+    let titles: [String]
+    let processes: [[String]]
+
+    enum CodingKeys: String, CodingKey {
+        case titles, processes
+    }
+
+    init(titles: [String] = [], processes: [[String]] = []) {
+        self.titles = titles
+        self.processes = processes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        titles = try container.decodeLenientArray(forKey: .titles)
+        processes = try container.decodeLenientArray(forKey: .processes)
+    }
+}
+
+/// Lenient view of the guest's container.stats response. The guest omits
+/// zero-valued memory, blkio, pids, and network fields with `omitempty`, and
+/// nil slices and maps arrive as JSON null.
+struct GuestStatsPayload: Decodable {
+    struct CPUUsage: Decodable {
+        let totalUsage: UInt64
+        let inKernelMode: UInt64
+        let inUserMode: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case totalUsage = "total_usage"
+            case inKernelMode = "usage_in_kernelmode"
+            case inUserMode = "usage_in_usermode"
+        }
+
+        init(totalUsage: UInt64 = 0, inKernelMode: UInt64 = 0, inUserMode: UInt64 = 0) {
+            self.totalUsage = totalUsage
+            self.inKernelMode = inKernelMode
+            self.inUserMode = inUserMode
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            totalUsage = try container.decodeLenient(forKey: .totalUsage)
+            inKernelMode = try container.decodeLenient(forKey: .inKernelMode)
+            inUserMode = try container.decodeLenient(forKey: .inUserMode)
+        }
+    }
+
+    struct ThrottlingData: Decodable {
+        let throttledPeriods: UInt64
+        let throttledTime: UInt64
+        let throttlingPeriods: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case throttledPeriods = "throttled_periods"
+            case throttledTime = "throttled_time"
+            case throttlingPeriods = "throttling_periods"
+        }
+
+        init(
+            throttledPeriods: UInt64 = 0, throttledTime: UInt64 = 0,
+            throttlingPeriods: UInt64 = 0
+        ) {
+            self.throttledPeriods = throttledPeriods
+            self.throttledTime = throttledTime
+            self.throttlingPeriods = throttlingPeriods
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            throttledPeriods = try container.decodeLenient(forKey: .throttledPeriods)
+            throttledTime = try container.decodeLenient(forKey: .throttledTime)
+            throttlingPeriods = try container.decodeLenient(forKey: .throttlingPeriods)
+        }
+    }
+
+    struct CPUStats: Decodable {
+        let cpuUsage: CPUUsage
+        let systemCPUUsage: UInt64
+        let onlineCPUs: Int
+        let throttlingData: ThrottlingData
+
+        enum CodingKeys: String, CodingKey {
+            case cpuUsage = "cpu_usage"
+            case systemCPUUsage = "system_cpu_usage"
+            case onlineCPUs = "online_cpus"
+            case throttlingData = "throttling_data"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            cpuUsage = try container.decode(CPUUsage.self, forKey: .cpuUsage)
+            systemCPUUsage = try container.decodeLenient(forKey: .systemCPUUsage)
+            onlineCPUs = try container.decodeLenient(forKey: .onlineCPUs)
+            throttlingData = try container.decode(ThrottlingData.self, forKey: .throttlingData)
+        }
+    }
+
+    struct MemoryStats: Decodable {
+        let usage: UInt64
+        let limit: UInt64
+        let stats: [String: UInt64]
+
+        enum CodingKeys: String, CodingKey {
+            case usage, limit, stats
+        }
+
+        init(usage: UInt64 = 0, limit: UInt64 = 0, stats: [String: UInt64] = [:]) {
+            self.usage = usage
+            self.limit = limit
+            self.stats = stats
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            usage = try container.decodeLenient(forKey: .usage)
+            limit = try container.decodeLenient(forKey: .limit)
+            stats = try container.decodeLenientMap(forKey: .stats)
+        }
+    }
+
+    struct BlkioEntry: Decodable {
+        let major: UInt64
+        let minor: UInt64
+        let op: String
+        let value: UInt64
+
+        enum CodingKeys: String, CodingKey {
+            case major, minor, op, value
+        }
+
+        init(major: UInt64, minor: UInt64, op: String, value: UInt64) {
+            self.major = major
+            self.minor = minor
+            self.op = op
+            self.value = value
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            major = try container.decodeLenient(forKey: .major)
+            minor = try container.decodeLenient(forKey: .minor)
+            op = try container.decode(String.self, forKey: .op)
+            value = try container.decodeLenient(forKey: .value)
+        }
+    }
+
+    private enum FieldKeys: String, CodingKey {
+        case id, read, preread, networks
+        case cpuStats = "cpu_stats"
+        case precpuStats = "precpu_stats"
+        case memoryStats = "memory_stats"
+        case blkioStats = "blkio_stats"
+        case entries = "io_service_bytes_recursive"
+        case pidsStats = "pids_stats"
+        case current
+    }
+
+    let id: String
+    let read: String
+    let preread: String
+    let cpuStats: CPUStats
+    let precpuStats: CPUStats
+    let memoryStats: MemoryStats
+    let networks: [String: JSONValue]?
+    let blkioEntries: [BlkioEntry]
+    let pidsCurrent: UInt64?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: FieldKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        read = try container.decode(String.self, forKey: .read)
+        preread = try container.decode(String.self, forKey: .preread)
+        cpuStats = try container.decode(CPUStats.self, forKey: .cpuStats)
+        precpuStats = try container.decode(CPUStats.self, forKey: .precpuStats)
+        memoryStats = try container.decode(MemoryStats.self, forKey: .memoryStats)
+        networks = try container.decodeIfPresent([String: JSONValue].self, forKey: .networks)
+        if container.contains(.blkioStats) {
+            let blkio = try container.nestedContainer(keyedBy: FieldKeys.self, forKey: .blkioStats)
+            blkioEntries =
+                blkio.contains(.entries)
+                ? try blkio.decode([BlkioEntry].self, forKey: .entries) : []
+        } else {
+            blkioEntries = []
+        }
+        if container.contains(.pidsStats) {
+            let pids = try container.nestedContainer(keyedBy: FieldKeys.self, forKey: .pidsStats)
+            pidsCurrent = try pids.decodeIfPresent(UInt64.self, forKey: .current)
+        } else {
+            pidsCurrent = nil
+        }
+    }
+}
+
+struct GuestPublishedPort: Decodable {
     let containerPort: Int
     let guestPort: Int
     let `protocol`: String?
 }
 
-private struct GuestImagePayload: Decodable {
+struct GuestImagePayload: Decodable {
     let name: String
     let digest: String
 }
 
-private struct GuestImageDetailPayload: Decodable {
+struct GuestImageDetailPayload: Decodable {
     let id: String
     let digest: String
     let references: [String]
@@ -217,11 +452,36 @@ private struct GuestImageDetailPayload: Decodable {
     let osVersion: String?
     let variant: String?
     let config: GuestImageConfigPayload?
-    let rootFSLayers: [String]?
-    let history: [GuestImageHistoryPayload]?
+    let rootFSLayers: [String]
+    let history: [GuestImageHistoryPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case id, digest, references, createdAt, size, labels, author
+        case architecture, os, osVersion, variant, config
+        case rootFSLayers = "rootfsLayers"
+        case history
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        digest = try container.decode(String.self, forKey: .digest)
+        references = try container.decodeLenientArray(forKey: .references)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        size = try container.decode(Int64.self, forKey: .size)
+        labels = try container.decodeIfPresent([String: String].self, forKey: .labels)
+        author = try container.decodeIfPresent(String.self, forKey: .author)
+        architecture = try container.decodeIfPresent(String.self, forKey: .architecture)
+        os = try container.decodeIfPresent(String.self, forKey: .os)
+        osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
+        variant = try container.decodeIfPresent(String.self, forKey: .variant)
+        config = try container.decodeIfPresent(GuestImageConfigPayload.self, forKey: .config)
+        rootFSLayers = try container.decodeLenientArray(forKey: .rootFSLayers)
+        history = try container.decodeLenientArray(forKey: .history)
+    }
 }
 
-private struct GuestImageConfigPayload: Decodable {
+struct GuestImageConfigPayload: Decodable {
     let user: String?
     let exposedPorts: [String: GuestEmptyObject]?
     let env: [String]?
@@ -236,9 +496,9 @@ private struct GuestImageConfigPayload: Decodable {
     let shell: [String]?
 }
 
-private struct GuestEmptyObject: Decodable {}
+struct GuestEmptyObject: Decodable {}
 
-private struct GuestImageHistoryPayload: Decodable {
+struct GuestImageHistoryPayload: Decodable {
     let created: Date
     let createdBy: String?
     let tags: [String]?
@@ -247,35 +507,53 @@ private struct GuestImageHistoryPayload: Decodable {
     let emptyLayer: Bool?
 }
 
-private struct GuestImageListPayload: Decodable {
+struct GuestImageListPayload: Decodable {
     let images: [GuestImageDetailPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case images
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        images = try container.decodeLenientArray(forKey: .images)
+    }
 }
 
-private struct GuestImageDeletePayload: Decodable {
+struct GuestImageDeletePayload: Decodable {
     let deleted: [String]?
     let untagged: [String]?
     let reclaimed: Int64?
 }
 
-private struct GuestImageImportPayload: Decodable {
+struct GuestImageImportPayload: Decodable {
     let images: [GuestImagePayload]
+
+    enum CodingKeys: String, CodingKey {
+        case images
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        images = try container.decodeLenientArray(forKey: .images)
+    }
 }
 
-private struct GuestImageBuildPayload: Decodable {
+struct GuestImageBuildPayload: Decodable {
     let image: GuestImageDetailPayload
 }
 
-private struct GuestExitPayload: Decodable {
+struct GuestExitPayload: Decodable {
     let id: String
     let exitCode: UInt32
 }
 
-private struct GuestLogsPayload: Decodable {
+struct GuestLogsPayload: Decodable {
     let stdout: Data?
     let stderr: Data?
 }
 
-private struct GuestArchivePathPayload: Decodable {
+struct GuestArchivePathPayload: Decodable {
     let name: String
     let size: Int64
     let mode: Int64
@@ -283,25 +561,43 @@ private struct GuestArchivePathPayload: Decodable {
     let linkTarget: String?
 }
 
-private struct GuestContainerChangePayload: Decodable {
+struct GuestContainerChangePayload: Decodable {
     let path: String
     let kind: Int
 }
 
-private struct GuestContainerChangesPayload: Decodable {
+struct GuestContainerChangesPayload: Decodable {
     let changes: [GuestContainerChangePayload]
+
+    enum CodingKeys: String, CodingKey {
+        case changes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        changes = try container.decodeLenientArray(forKey: .changes)
+    }
 }
 
-private struct GuestNetworkListPayload: Decodable {
+struct GuestNetworkListPayload: Decodable {
     let networks: [GuestNetworkPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case networks
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        networks = try container.decodeLenientArray(forKey: .networks)
+    }
 }
 
 /// Matches the guest's `NetworkCreateResponse`, which wraps the resource.
-private struct GuestNetworkCreatePayload: Decodable {
+struct GuestNetworkCreatePayload: Decodable {
     let network: GuestNetworkPayload
 }
 
-private struct GuestNetworkPayload: Decodable {
+struct GuestNetworkPayload: Decodable {
     let id: String
     let name: String
     let createdAt: Date
@@ -323,8 +619,7 @@ private struct GuestNetworkPayload: Decodable {
         case attachable, ingress, ipam, options, containers, labels
     }
 
-    /// The guest sends nil maps as JSON null, so map fields must tolerate a
-    /// missing or null value.
+    /// The guest sends nil maps as JSON null; they decode as empty maps.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -338,28 +633,40 @@ private struct GuestNetworkPayload: Decodable {
         attachable = try container.decode(Bool.self, forKey: .attachable)
         ingress = try container.decode(Bool.self, forKey: .ingress)
         ipam = try container.decode(NetworkIPAMPayload.self, forKey: .ipam)
-        options = try container.decodeIfPresent([String: String].self, forKey: .options) ?? [:]
-        containers =
-            try container.decodeIfPresent(
-                [String: GuestNetworkContainerPayload].self, forKey: .containers
-            ) ?? [:]
-        labels = try container.decodeIfPresent([String: String].self, forKey: .labels) ?? [:]
+        options = try container.decodeLenientMap(forKey: .options)
+        containers = try container.decodeLenientMap(forKey: .containers)
+        labels = try container.decodeLenientMap(forKey: .labels)
     }
 }
 
-private struct NetworkIPAMPayload: Decodable {
+struct NetworkIPAMPayload: Decodable {
     let driver: String
     let config: [NetworkIPAMConfigPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case driver, config
+    }
+
+    init(driver: String, config: [NetworkIPAMConfigPayload]) {
+        self.driver = driver
+        self.config = config
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        driver = try container.decode(String.self, forKey: .driver)
+        config = try container.decodeLenientArray(forKey: .config)
+    }
 }
 
-private struct NetworkIPAMConfigPayload: Decodable {
+struct NetworkIPAMConfigPayload: Decodable {
     let subnet: String?
     let ipRange: String?
     let gateway: String?
     let auxiliaryAddresses: [String: String]?
 }
 
-private struct GuestNetworkContainerPayload: Decodable {
+struct GuestNetworkContainerPayload: Decodable {
     let name: String
     let endpointID: String?
     let macAddress: String?
@@ -1472,13 +1779,76 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "container.top",
             ["id": .string(resolved), "args": .array(psArguments.map(JSONValue.string))]
         )
-        return try decode(response, as: DockerRuntimeTop.self)
+        let payload = try decode(response, as: GuestTopPayload.self)
+        return DockerRuntimeTop(Titles: payload.titles, Processes: payload.processes)
     }
 
     func statsContainer(id: String) async throws -> DockerRuntimeStats {
         let resolved = try await resolve(id)
         let response = try await request("container.stats", ["id": .string(resolved)])
-        return try decode(response, as: DockerRuntimeStats.self)
+        let payload = try decode(response, as: GuestStatsPayload.self)
+        let cpuUsage = DockerRuntimeStats.CPUUsage(
+            total_usage: payload.cpuStats.cpuUsage.totalUsage,
+            usage_in_kernelmode: payload.cpuStats.cpuUsage.inKernelMode,
+            usage_in_usermode: payload.cpuStats.cpuUsage.inUserMode
+        )
+        let throttling = DockerRuntimeStats.ThrottlingData(
+            throttled_periods: payload.cpuStats.throttlingData.throttledPeriods,
+            throttled_time: payload.cpuStats.throttlingData.throttledTime,
+            throttling_periods: payload.cpuStats.throttlingData.throttlingPeriods
+        )
+        func cpu(_ stats: GuestStatsPayload.CPUStats) -> DockerRuntimeStats.CPUStats {
+            DockerRuntimeStats.CPUStats(
+                cpu_usage: cpuUsage,
+                system_cpu_usage: stats.systemCPUUsage,
+                online_cpus: stats.onlineCPUs,
+                throttling_data: throttling
+            )
+        }
+        var networks: [String: DockerRuntimeStats.NetworkStats]?
+        if let raw = payload.networks {
+            networks = raw.mapValues { value in
+                guard case .object(let fields) = value else {
+                    return DockerRuntimeStats.NetworkStats(
+                        rx_bytes: 0, rx_packets: 0, rx_errors: 0, rx_dropped: 0,
+                        tx_bytes: 0, tx_packets: 0, tx_errors: 0, tx_dropped: 0
+                    )
+                }
+                func number(_ key: String) -> UInt64 {
+                    guard case .number(let n) = fields[key] else { return 0 }
+                    return UInt64(n)
+                }
+                return DockerRuntimeStats.NetworkStats(
+                    rx_bytes: number("rx_bytes"),
+                    rx_packets: number("rx_packets"),
+                    rx_errors: number("rx_errors"),
+                    rx_dropped: number("rx_dropped"),
+                    tx_bytes: number("tx_bytes"),
+                    tx_packets: number("tx_packets"),
+                    tx_errors: number("tx_errors"),
+                    tx_dropped: number("tx_dropped")
+                )
+            }
+        }
+        return DockerRuntimeStats(
+            id: payload.id,
+            read: payload.read,
+            preread: payload.preread,
+            cpu_stats: cpu(payload.cpuStats),
+            precpu_stats: cpu(payload.precpuStats),
+            memory_stats: DockerRuntimeStats.MemoryStats(
+                usage: payload.memoryStats.usage,
+                limit: payload.memoryStats.limit,
+                stats: payload.memoryStats.stats.isEmpty ? nil : payload.memoryStats.stats
+            ),
+            networks: networks,
+            blkio_stats: DockerRuntimeStats.BlkioStats(
+                io_service_bytes_recursive: payload.blkioEntries.map {
+                    .init(major: $0.major, minor: $0.minor, op: $0.op, value: $0.value)
+                }
+            ),
+            pids_stats: DockerRuntimeStats.PidsStats(current: payload.pidsCurrent)
+        )
     }
 
     func exportContainer(id: String) async throws -> AsyncThrowingStream<Data, Error> {
@@ -2330,8 +2700,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 onBuild: image.config?.onBuild ?? [],
                 shell: image.config?.shell ?? []
             ),
-            rootFSLayers: image.rootFSLayers ?? [],
-            history: image.history?.map {
+            rootFSLayers: image.rootFSLayers,
+            history: image.history.map {
                 DockerRuntimeImageHistory(
                     created: $0.created,
                     createdBy: $0.createdBy ?? "",
@@ -2340,7 +2710,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     comment: $0.comment ?? "",
                     emptyLayer: $0.emptyLayer ?? false
                 )
-            } ?? []
+            }
         )
     }
 

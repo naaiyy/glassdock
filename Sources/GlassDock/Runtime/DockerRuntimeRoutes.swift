@@ -502,6 +502,10 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let options: [String]
     var volumeName: String? = nil
 
+    enum CodingKeys: String, CodingKey {
+        case source, target, readOnly, type, options, volumeName
+    }
+
     init(
         source: String,
         target: String,
@@ -516,6 +520,18 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         self.type = type
         self.options = options
         self.volumeName = volumeName
+    }
+
+    /// The guest serializes mounts with `omitempty`; absent `readOnly`,
+    /// `options`, and `source` decode as defaults instead of failing.
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        source = try values.decodeIfPresent(String.self, forKey: .source) ?? ""
+        target = try values.decode(String.self, forKey: .target)
+        readOnly = try values.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+        type = try values.decodeIfPresent(String.self, forKey: .type) ?? "bind"
+        options = try values.decodeIfPresent([String].self, forKey: .options) ?? []
+        volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName)
     }
 }
 
@@ -579,6 +595,26 @@ struct DockerRuntimeHealth: Codable, Sendable, Equatable {
         let end: Date
         let exitCode: Int32
         let output: String
+
+        init(start: Date, end: Date, exitCode: Int32, output: String = "") {
+            self.start = start
+            self.end = end
+            self.exitCode = exitCode
+            self.output = output
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case start, end, exitCode, output
+        }
+
+        /// The guest omits `output` when a probe produced no text.
+        init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            start = try values.decode(Date.self, forKey: .start)
+            end = try values.decode(Date.self, forKey: .end)
+            exitCode = try values.decode(Int32.self, forKey: .exitCode)
+            output = try values.decodeIfPresent(String.self, forKey: .output) ?? ""
+        }
     }
 
     init(

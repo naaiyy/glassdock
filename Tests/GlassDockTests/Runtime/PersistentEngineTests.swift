@@ -34,6 +34,39 @@ struct PersistentEngineTests {
         #expect(await machine.stopCount == 1)
     }
 
+    @Test("fails loudly when the guest agent speaks an old protocol version")
+    func rejectsProtocolMismatch() async {
+        let machine = FakeEngineMachineHost(protocolVersion: "0")
+        let engine = PersistentEngine(machine: machine)
+
+        do {
+            _ = try await engine.readyConnection()
+            Issue.record("readiness should have failed on protocol mismatch")
+        } catch let error as PersistentEngineError {
+            guard case .invalidMachineSnapshot(let message) = error else {
+                Issue.record("unexpected error: \(error)")
+                return
+            }
+            #expect(message.contains("protocol mismatch"))
+            #expect(message.contains("guest speaks 0"))
+            #expect(message.contains("host requires 1"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        await engine.shutdown()
+    }
+
+    @Test("fails loudly when the guest agent has no version method")
+    func rejectsMissingVersionHandshake() async {
+        let machine = FakeEngineMachineHost(answersVersion: false)
+        let engine = PersistentEngine(machine: machine)
+
+        await #expect(throws: PersistentEngineError.self) {
+            _ = try await engine.readyConnection()
+        }
+        await engine.shutdown()
+    }
+
     @Test("coalesces concurrent readiness calls")
     func coalescesConcurrentReadiness() async throws {
         let machine = FakeEngineMachineHost(startDelay: .milliseconds(20))
@@ -167,6 +200,8 @@ private actor BlockingTerminalProbe {
 
 private actor FakeEngineMachineHost: EngineMachineHosting {
     private let pingOK: Bool
+    private let protocolVersion: String
+    private let answersVersion: Bool
     private let startDelay: Duration?
     private var failedConnections: Int
     private(set) var startCount = 0
@@ -177,10 +212,14 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
 
     init(
         pingOK: Bool = true,
+        protocolVersion: String = PersistentEngine.expectedGuestProtocolVersion,
+        answersVersion: Bool = true,
         startDelay: Duration? = nil,
         failedConnections: Int = 0
     ) {
         self.pingOK = pingOK
+        self.protocolVersion = protocolVersion
+        self.answersVersion = answersVersion
         self.startDelay = startDelay
         self.failedConnections = failedConnections
     }
@@ -220,11 +259,39 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
                     let bytes = try Self.readAvailable(peer)
                     guard !bytes.isEmpty else { return }
                     for request in try codec.append(bytes) {
+                        let payload: JSONValue
+                        if request.method == "version" {
+                            guard self.answersVersion else {
+                                let error = GuestFrame(
+                                    id: request.id,
+                                    kind: .response,
+                                    method: request.method,
+                                    payload: nil,
+                                    stream: nil,
+                                    data: nil,
+                                    error: GuestProtocolError(
+                                        code: "unknown_method", message: "unknown method"
+                                    ),
+                                    exitCode: nil
+                                )
+                                try peer.write(contentsOf: GuestFrameCodec.encode(error))
+                                continue
+                            }
+                            // Mirrors api.VersionResponse in
+                            // Guest/internal/api/schema.go.
+                            payload = .object([
+                                "protocol": .string(self.protocolVersion),
+                                "agent": .string("test"),
+                                "containerd": .string("test"),
+                            ])
+                        } else {
+                            payload = .object(["ok": .bool(pingOK)])
+                        }
                         let response = GuestFrame(
                             id: request.id,
                             kind: .response,
                             method: request.method,
-                            payload: .object(["ok": .bool(pingOK)]),
+                            payload: payload,
                             stream: nil,
                             data: nil,
                             error: nil,

@@ -1,0 +1,43 @@
+{
+  "images": [
+    {
+      "architecture": "arm64",
+      "config": {
+        "cmd": [
+          "/bin/sh"
+        ],
+        "env": [
+          "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ],
+        "workingDir": "/"
+      },
+      "createdAt": "2026-04-16T23:53:24.896953537Z",
+      "digest": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+      "history": [
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-04-16T23:53:24.896953537Z",
+          "createdBy": "ADD alpine-minirootfs-3.20.10-aarch64.tar.gz / # buildkit",
+          "size": 0
+        },
+        {
+          "comment": "buildkit.dockerfile.v0",
+          "created": "2026-04-16T23:53:24.896953537Z",
+          "createdBy": "CMD [\"/bin/sh\"]",
+          "emptyLayer": true,
+          "size": 0
+        }
+      ],
+      "id": "sha256:ab3fe4defd29ba6231229a4d41440ac8bde8218e85870e53876277faa24b35c4",
+      "os": "linux",
+      "references": [
+        "docker.io/library/alpine:3.20"
+      ],
+      "rootfsLayers": [
+        "sha256:88b4fba61c4c714a2fc173ddf7e9324a257304696830bf41ad28ecc58c11c95f"
+      ],
+      "size": 4103199,
+      "variant": "v8"
+    }
+  ]
+}
