@@ -1031,6 +1031,15 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         return payload.images.map(Self.dockerImage)
     }
 
+    func systemDataUsage() async throws -> (layersSize: Int64, buildCache: [GuestBuildCacheRecord]) {
+        let payload: GuestSystemDfPayload = try decode(try await request("system.df", [:]))
+        return (payload.layersSize, payload.buildCache ?? [])
+    }
+
+    func pruneBuildCache(all: Bool) async throws -> GuestBuilderPrunePayload {
+        try decode(try await request("builder.prune", ["all": .bool(all)]))
+    }
+
     func inspectImage(reference: String) async throws -> DockerRuntimeImage {
         let response = try await request(
             "image.inspect", ["reference": .string(Self.normalizedRegistryReference(reference))]
@@ -1326,6 +1335,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         manuallyStopped.remove(id)
         committedReservation = true
         await broadcastContainer("create", id: id)
+        // Materialize image VOLUME directories. The guest does not honor
+        // VOLUME declarations when preparing the root filesystem, so official
+        // images (postgres, nginx) abort at startup when their declared
+        // directories are missing. Best effort: a failure here only means the
+        // container behaves as it did before this fix-up existed.
+        if let imageVolumes = try? await inspectImage(reference: request.image).config.volumes,
+            !imageVolumes.isEmpty
+        {
+            let archive = DirectoryArchive.tar(directories: Array(imageVolumes))
+            try? await putContainerArchive(id: id, path: "/", data: archive, noOverwriteDirNonDir: false)
+        }
         return dockerContainer(guest.container)
     }
 
@@ -2844,4 +2864,31 @@ extension GuestRuntime: DockerRuntimeImageImportStreamingBackend {
             }
         )
     }
+}
+
+struct GuestSystemDfPayload: Decodable {
+    let layersSize: Int64
+    let buildCache: [GuestBuildCacheRecord]?
+}
+
+struct GuestBuildCacheRecord: Decodable {
+    let id: String
+    let type: String?
+    let description: String?
+    let inUse: Bool?
+    let shared: Bool?
+    let size: Int64?
+    let createdAt: Date?
+    let lastUsedAt: Date?
+    let usageCount: Int?
+}
+
+struct GuestBuilderPrunePayload: Decodable {
+    struct Deleted: Decodable {
+        let id: String
+        let spaceReclaimed: Int64
+    }
+
+    let cachesDeleted: [Deleted]?
+    let spaceReclaimed: Int64?
 }

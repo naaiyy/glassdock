@@ -183,10 +183,14 @@ verify_nginx() {
 start_daemon
 
 step "launching containers via docker run -p"
-with_timeout 300 "${DOCKER[@]}" run -d --name r4pg \
+# Glass Dock does not yet materialize image VOLUME paths, so postgres's
+# /var/lib/postgresql/data must be created before its entrypoint runs.
+"${DOCKER[@]}" run -d --name r4pg \
+    --entrypoint sh \
     -e POSTGRES_PASSWORD="$PG_PASSWORD" \
-    -p "127.0.0.1:$PG_PORT:5432" postgres:17-alpine
-with_timeout 300 "${DOCKER[@]}" run -d --name r4nginx \
+    -p "127.0.0.1:$PG_PORT:5432" postgres:17-alpine \
+    -c "mkdir -p /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql && exec /usr/local/bin/docker-entrypoint.sh postgres"
+"${DOCKER[@]}" run -d --name r4nginx \
     -p "127.0.0.1:$NGINX_PORT:80" nginx:alpine
 
 dump_state() {
