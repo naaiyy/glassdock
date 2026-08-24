@@ -547,7 +547,6 @@ struct GuestImageBuildPayload: Decodable {
 struct GuestExitPayload: Decodable {
     let id: String
     let exitCode: UInt32
-    let exitedAt: Date?
 }
 
 struct GuestLogsPayload: Decodable {
@@ -949,10 +948,6 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         var guestPorts: [Int]
         var state: EngineContainerState
         var exitCode: Int32?
-        /// Host time of the most recent start request. Exit events whose
-        /// `exitedAt` predates it belong to a superseded run and must not tear
-        /// down the new run's publications.
-        var lastStartRequestedAt: Date?
         var health: DockerRuntimeHealth
         let healthcheck: DockerRuntimeHealthcheck?
         var restartPolicy: DockerRuntimeRestartPolicy
@@ -1330,7 +1325,6 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             guestPorts: allocatedGuestPorts,
             state: .created,
             exitCode: nil,
-            lastStartRequestedAt: nil,
             health: Self.dockerHealth(guest.container.health) ?? .init(),
             healthcheck: request.healthcheck,
             restartPolicy: request.restartPolicy,
@@ -1477,7 +1471,6 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             exitCodes.remove(id: resolved)
             metadata[resolved]?.state = .created
             metadata[resolved]?.exitCode = nil
-            metadata[resolved]?.lastStartRequestedAt = Date()
             let response = try await request(
                 "container.start",
                 ["id": .string(resolved), "publishedPorts": .array(confirmedPorts)]
@@ -2348,25 +2341,33 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         return nil
     }
 
+    /// Removes a container's publications shortly after its exit event. The
+    /// delay is deliberate: a restart's start side may be racing this event,
+    /// and immediate removal would tear down the new run's freshly published
+    /// listeners. At fire time the container must still be idle both locally
+    /// and (as ground truth) in the guest.
+    private func schedulePortTeardown(_ id: String) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            await self?.teardownPortsIfIdle(id: id)
+        }
+    }
+
+    private func teardownPortsIfIdle(id: String) async {
+        guard metadata[id]?.state != .running else { return }
+        let current = try? await inspectContainer(id: id)
+        if current?.state == .running || current?.state == .paused { return }
+        try? await portPublisher.remove(containerID: id)
+    }
+
     private func handle(event: GuestFrame) async {
         guard event.method == "container.exit",
             let exit = try? decode(event, as: GuestExitPayload.self)
         else { return }
-        // Exit events can arrive out of order across a stop/start cycle: a
-        // restart's start side may already have re-published ports when the
-        // previous run's exit event lands. Such an event must not tear down
-        // the new run. The guest and host clocks are synchronized by the VMM,
-        // so compare directly.
-        if let startedAt = metadata[exit.id]?.lastStartRequestedAt,
-            let exitedAt = exit.exitedAt,
-            exitedAt < startedAt
-        {
-            return
-        }
         metadata[exit.id]?.state = .exited
         metadata[exit.id]?.exitCode = Int32(exit.exitCode)
         pendingPublications.remove(exit.id)
-        try? await portPublisher.remove(containerID: exit.id)
+        schedulePortTeardown(exit.id)
         exitCodes.record(id: exit.id, code: Int32(exit.exitCode))
         await broadcastContainer(
             "die", id: exit.id, extra: ["exitCode": String(exit.exitCode)]
@@ -2511,7 +2512,6 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             guestPorts: (stored.publishedPorts ?? guest.publishedPorts ?? []).map(\.guestPort),
             state: Self.state(for: guest.status),
             exitCode: guest.exitCode.map(Int32.init),
-            lastStartRequestedAt: nil,
             health: Self.dockerHealth(guest.health) ?? .init(),
             healthcheck: guest.metadata?.healthcheck.map(Self.healthcheck),
             restartPolicy: guest.metadata?.restartPolicy ?? .init(),
