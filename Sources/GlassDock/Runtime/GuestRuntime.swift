@@ -139,6 +139,7 @@ struct GuestContainer: Decodable {
 struct GuestContainerMetadata: Decodable {
     let name: String?
     let args: [String]?
+    let lifecycleState: String?
     let entrypoint: [String]?
     let cmd: [String]?
     let env: [String]?
@@ -546,6 +547,7 @@ struct GuestImageBuildPayload: Decodable {
 struct GuestExitPayload: Decodable {
     let id: String
     let exitCode: UInt32
+    let exitedAt: Date?
 }
 
 struct GuestLogsPayload: Decodable {
@@ -947,6 +949,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         var guestPorts: [Int]
         var state: EngineContainerState
         var exitCode: Int32?
+        /// Host time of the most recent start request. Exit events whose
+        /// `exitedAt` predates it belong to a superseded run and must not tear
+        /// down the new run's publications.
+        var lastStartRequestedAt: Date?
         var health: DockerRuntimeHealth
         let healthcheck: DockerRuntimeHealthcheck?
         var restartPolicy: DockerRuntimeRestartPolicy
@@ -1324,6 +1330,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             guestPorts: allocatedGuestPorts,
             state: .created,
             exitCode: nil,
+            lastStartRequestedAt: nil,
             health: Self.dockerHealth(guest.container.health) ?? .init(),
             healthcheck: request.healthcheck,
             restartPolicy: request.restartPolicy,
@@ -1470,6 +1477,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             exitCodes.remove(id: resolved)
             metadata[resolved]?.state = .created
             metadata[resolved]?.exitCode = nil
+            metadata[resolved]?.lastStartRequestedAt = Date()
             let response = try await request(
                 "container.start",
                 ["id": .string(resolved), "publishedPorts": .array(confirmedPorts)]
@@ -2344,6 +2352,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         guard event.method == "container.exit",
             let exit = try? decode(event, as: GuestExitPayload.self)
         else { return }
+        // Exit events can arrive out of order across a stop/start cycle: a
+        // restart's start side may already have re-published ports when the
+        // previous run's exit event lands. Such an event must not tear down
+        // the new run. The guest and host clocks are synchronized by the VMM,
+        // so compare directly.
+        if let startedAt = metadata[exit.id]?.lastStartRequestedAt,
+            let exitedAt = exit.exitedAt,
+            exitedAt < startedAt
+        {
+            return
+        }
         metadata[exit.id]?.state = .exited
         metadata[exit.id]?.exitCode = Int32(exit.exitCode)
         pendingPublications.remove(exit.id)
@@ -2492,6 +2511,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             guestPorts: (stored.publishedPorts ?? guest.publishedPorts ?? []).map(\.guestPort),
             state: Self.state(for: guest.status),
             exitCode: guest.exitCode.map(Int32.init),
+            lastStartRequestedAt: nil,
             health: Self.dockerHealth(guest.health) ?? .init(),
             healthcheck: guest.metadata?.healthcheck.map(Self.healthcheck),
             restartPolicy: guest.metadata?.restartPolicy ?? .init(),
@@ -2540,6 +2560,18 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             if metadata[container.id]?.autoRemove == true {
                 try await deleteContainer(id: container.id, force: true, removeVolumes: true)
             }
+        }
+        // Containers that were running when the daemon (and with it the VM)
+        // went away come back as stopped tasks; restart them so `docker ps`
+        // shows the same workload after a daemon restart. The exit event of
+        // the VM teardown never reaches this runtime, so lifecycle state is
+        // the only signal.
+        for container in payload.containers
+        where container.metadata?.lifecycleState == "running"
+            && container.status != "running"
+            && container.status != "paused"
+        {
+            try? await startContainer(id: container.id)
         }
         reservedGuestPorts.removeAll()
         for container in payload.containers.sorted(by: { $0.id < $1.id }) {

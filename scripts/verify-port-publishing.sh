@@ -191,7 +191,17 @@ step "launching containers via docker run -p"
     -p "127.0.0.1:$PG_PORT:5432" postgres:17-alpine \
     -c "mkdir -p /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql && exec /usr/local/bin/docker-entrypoint.sh postgres"
 "${DOCKER[@]}" run -d --name r4nginx \
-    -p "127.0.0.1:$NGINX_PORT:80" nginx:alpine
+    --entrypoint sh \
+    -p "127.0.0.1:$NGINX_PORT:80" nginx:alpine \
+    -c "mkdir -p /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp \
+        /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp \
+        /var/cache/nginx/scgi_temp /var/run/nginx \
+        && exec /docker-entrypoint.sh nginx -g 'daemon off;'"
+# NOTE: nginx normally needs no override. Current dev guest builds return
+# transient ENOENT when the FIRST mkdir() into these lower-layer directories
+# comes from the nginx binary itself; pre-creating them from the shell avoids
+# it. Production 1.3.1 guests do not show this. Revisit once the guest
+# filesystem issue is root-caused (see R4 report).
 
 dump_state() {
     echo "--- docker ps -a ---"
