@@ -47,17 +47,17 @@ enum DirectoryArchive {
         }
 
         write(name, offset: 0, length: 100)
-        writeOctal(0o755, offset: 100, length: 8)          // mode
-        writeOctal(0, offset: 108, length: 8)              // uid
-        writeOctal(0, offset: 116, length: 8)              // gid
-        writeOctal(0, offset: 124, length: 12)             // size (directories: 0)
+        writeOctal(0o755, offset: 100, length: 8)  // mode
+        writeOctal(0, offset: 108, length: 8)  // uid
+        writeOctal(0, offset: 116, length: 8)  // gid
+        writeOctal(0, offset: 124, length: 12)  // size (directories: 0)
         writeOctal(Int(modificationTime), offset: 136, length: 12)
-        write("        ", offset: 148, length: 8)          // checksum placeholder
-        header.replaceSubrange(156..<157, with: Data("5".utf8)) // typeflag: directory
-        write("ustar\0", offset: 257, length: 6)           // magic
-        write("00", offset: 263, length: 2)                // version
-        write("root", offset: 265, length: 32)             // uname
-        write("root", offset: 297, length: 32)             // gname
+        write("        ", offset: 148, length: 8)  // checksum placeholder
+        header.replaceSubrange(156..<157, with: Data("5".utf8))  // typeflag: directory
+        write("ustar\0", offset: 257, length: 6)  // magic
+        write("00", offset: 263, length: 2)  // version
+        write("root", offset: 265, length: 32)  // uname
+        write("root", offset: 297, length: 32)  // gname
 
         let checksum = header.reduce(0) { $0 + Int($1) }
         writeOctal(checksum, offset: 148, length: 8)

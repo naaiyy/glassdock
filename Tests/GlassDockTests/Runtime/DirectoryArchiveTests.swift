@@ -13,10 +13,10 @@ struct DirectoryArchiveTests {
             return String(decoding: bytes, as: UTF8.self)
         }
         return [
-            string(0..<100),      // name
-            string(100..<108),    // mode
+            string(0..<100),  // name
+            string(100..<108),  // mode
             String(UnicodeScalar(header[156])),  // typeflag
-            string(257..<263),    // magic
+            string(257..<263),  // magic
         ]
     }
 
