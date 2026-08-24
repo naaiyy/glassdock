@@ -34,6 +34,9 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
         let tcpRelaySocket =
             runtimeDirectory
             .appendingPathComponent("vsock/1026.sock", isDirectory: false)
+        let builderSocket =
+            runtimeDirectory
+            .appendingPathComponent("vsock/1027.sock", isDirectory: false)
         let process = Process()
         process.executableURL = configuration.helperExecutable
         process.arguments = Self.arguments(
@@ -49,7 +52,7 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
         }
         return FoundationRuntimeMachineProcess(
             process: process,
-            readinessSockets: [controlSocket, tcpRelaySocket]
+            readinessSockets: [controlSocket, tcpRelaySocket, builderSocket]
         )
     }
 
@@ -68,6 +71,8 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
             runtimeDirectory.appendingPathComponent("vsock/1025.sock").path,
             "--tcp-relay-socket",
             runtimeDirectory.appendingPathComponent("vsock/1026.sock").path,
+            "--builder-socket",
+            runtimeDirectory.appendingPathComponent("vsock/1027.sock").path,
             "--console-log",
             runtimeDirectory.appendingPathComponent("console.log").path,
             "--cpus", String(configuration.cpuCount),
@@ -89,9 +94,17 @@ private final class FoundationRuntimeMachineProcess: RuntimeMachineProcess, @unc
         self.processIdentifier = process.processIdentifier
         let processIdentifier = process.processIdentifier
         self.exitTask = Task.detached {
-            process.waitUntilExit()
-            _ = Darwin.kill(-processIdentifier, SIGTERM)
-            return process.terminationStatus
+            // Wait on Foundation's own listener thread, never on a Swift
+            // concurrency cooperative thread: waitUntilExit() blocks its
+            // caller for the VM's whole lifetime, and a pinned cooperative
+            // thread starves every resumed Task (Vapor's streaming-response
+            // continuations included) until the pool can grow a replacement.
+            let box = ExitContinuation()
+            process.terminationHandler = { [processIdentifier] process in
+                _ = Darwin.kill(-processIdentifier, SIGTERM)
+                box.fulfill(process.terminationStatus)
+            }
+            return await box.wait()
         }
     }
 
@@ -135,4 +148,38 @@ private final class FoundationRuntimeMachineProcess: RuntimeMachineProcess, @unc
         _ = await exitTask.value
     }
 
+}
+
+/// Bridges Foundation's process-termination callback into an async wait
+/// without blocking a cooperative thread.
+private final class ExitContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Int32, Never>?
+    private var status: Int32?
+
+    func fulfill(_ newStatus: Int32) {
+        let resume: (CheckedContinuation<Int32, Never>)?
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = continuation {
+            continuation = nil
+            resume = existing
+        } else {
+            status = newStatus
+            resume = nil
+        }
+        resume?.resume(returning: newStatus)
+    }
+
+    func wait() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            if let status {
+                continuation.resume(returning: status)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
 }
