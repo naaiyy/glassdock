@@ -49,14 +49,14 @@ routes:
     note: Registry credential validation.
   - method: GET
     path: /system/df
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Reports guest-backed image, container, and volume usage objects; build-cache accounting and container filesystem sizes are not reported yet.
+    note: Reports guest-backed image, container, and volume usage objects with real layers size from the guest content store, per-container SizeRw/SizeRootFs from snapshotter usage, and BuildKit build-cache records.
   - method: POST
     path: /session
-    support: partial
-    owner: SessionRoute
-    note: Accepts Docker TCP/h2c session upgrade handshakes; no interactive builder session is attached afterwards.
+    support: full
+    owner: BuilderRelay
+    note: Relays the Docker TCP/h2c session upgrade to the embedded BuildKit controller in the persistent guest over vsock; buildx sessions attach and stream live.
 
   # --- Containers -------------------------------------------------------------
   - method: GET
@@ -276,7 +276,7 @@ routes:
     path: /build
     support: partial
     owner: DockerRuntimeRoutes
-    note: Builds classic Dockerfiles in the persistent guest runtime with local/remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check support; BuildKit syntax, cache mounts, and heredocs are not supported.
+    note: Builds classic Dockerfiles in the persistent guest runtime with local/remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check support; BuildKit clients are served through the embedded guest BuildKit controller via /session and /grpc.
   - method: POST
     path: /build/prune
     support: full
@@ -284,9 +284,9 @@ routes:
     note: Validates Docker build-cache filters and returns the Docker prune result for the guest-owned build cache model.
   - method: POST
     path: /commit
-    support: partial
+    support: full
     owner: DockerRuntimeRoutes
-    note: Commits a guest container filesystem diff as a new image layer and applies configuration changes; diff computation differs from Docker's per-file change tracking.
+    note: Commits the container rootfs diff against its parent snapshot as a new image layer with default pause, Docker change directives (CMD, ENV, EXPOSE, LABEL, and friends), and author/comment metadata; committed images run with their changes present.
 
   # --- Networks -------------------------------------------------------------
   - method: GET
