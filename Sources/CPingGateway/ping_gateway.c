@@ -59,6 +59,7 @@ struct st_connection {
     st_connection_state_t state;
     uint64_t accepted_milliseconds;
     bool closing;
+    bool builder_target;
     bool client_read_eof;
     bool backend_read_eof;
     bool client_write_closed;
@@ -80,9 +81,11 @@ struct glassdock_ping_gateway {
     pthread_t thread;
     bool thread_started;
     bool public_socket_bound;
+    bool builder_relay_enabled;
     atomic_bool stopping;
     char public_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     char backend_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    char builder_socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     char *get_response;
     size_t get_response_length;
     char *head_response;
@@ -352,6 +355,75 @@ static int st_classify_ping(const unsigned char *bytes, size_t length) {
     return has_close && (!http_1_1 || host_count == 1) ? method : 0;
 }
 
+// Returns true for POST /session or POST /grpc requests (optionally under the
+// /vX.Y Docker API prefix) that carry an Upgrade header. These hijacked
+// connections are relayed to the builder socket instead of the Vapor backend.
+static bool st_classify_builder(const unsigned char *bytes, size_t length) {
+    size_t header_length = st_complete_header_length(bytes, length);
+    if (header_length == 0) {
+        return false;
+    }
+    const unsigned char *line_end = st_find_crlf(bytes, length);
+    if (line_end == NULL) {
+        return false;
+    }
+    size_t request_line_length = (size_t)(line_end - bytes);
+    const unsigned char *first_space = memchr(bytes, ' ', request_line_length);
+    if (first_space == NULL) {
+        return false;
+    }
+    if ((size_t)(first_space - bytes) != 4 || memcmp(bytes, "POST", 4) != 0) {
+        return false;
+    }
+    const unsigned char *second_space = memchr(
+        first_space + 1,
+        ' ',
+        request_line_length - (size_t)(first_space + 1 - bytes)
+    );
+    if (second_space == NULL || memchr(second_space + 1, ' ', (size_t)(line_end - second_space - 1)) != NULL) {
+        return false;
+    }
+    const unsigned char *target = first_space + 1;
+    size_t target_length = (size_t)(second_space - target);
+    // Skip the optional Docker API version prefix (/vX.Y).
+    if (target_length > 2 && target[0] == '/' && target[1] == 'v') {
+        size_t index = 2;
+        while (index < target_length && target[index] >= '0' && target[index] <= '9') {
+            index++;
+        }
+        if (index < target_length && index > 2 && target[index] == '.') {
+            index++;
+            while (index < target_length && target[index] >= '0' && target[index] <= '9') {
+                index++;
+            }
+            if (index < target_length && target[index] == '/') {
+                target += index;
+                target_length -= index;
+            }
+        }
+    }
+    const bool is_session = target_length == 8 && memcmp(target, "/session", 8) == 0;
+    const bool is_grpc = target_length == 5 && memcmp(target, "/grpc", 5) == 0;
+    if (!is_session && !is_grpc) {
+        return false;
+    }
+    const unsigned char *cursor = line_end + 2;
+    const unsigned char *header_end = bytes + header_length - 2;
+    while (cursor < header_end) {
+        const unsigned char *end = st_find_crlf(cursor, (size_t)(header_end - cursor));
+        if (end == NULL || end == cursor) {
+            return false;
+        }
+        const unsigned char *colon = memchr(cursor, ':', (size_t)(end - cursor));
+        if (colon != NULL && colon > cursor &&
+            st_ascii_equal_case_insensitive(cursor, (size_t)(colon - cursor), "upgrade")) {
+            return colon + 1 < end;
+        }
+        cursor = end + 2;
+    }
+    return false;
+}
+
 static void st_unlink_connection(st_connection_t *connection) {
     glassdock_ping_gateway_t *gateway = connection->gateway;
     st_connection_t **cursor = &gateway->connections;
@@ -515,7 +587,10 @@ static bool st_start_backend(st_connection_t *connection) {
     }
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
-    memcpy(address.sun_path, gateway->backend_socket_path, strlen(gateway->backend_socket_path) + 1);
+    const char *backend_path = connection->builder_target
+        ? gateway->builder_socket_path
+        : gateway->backend_socket_path;
+    memcpy(address.sun_path, backend_path, strlen(backend_path) + 1);
     int result = connect(descriptor, (struct sockaddr *)&address, sizeof(address));
     if (result < 0 && errno != EINPROGRESS) {
         close(descriptor);
@@ -568,8 +643,12 @@ static void st_handle_header_read(st_connection_t *connection) {
                 connection->fast_response_length = ping == 1 ? connection->gateway->get_response_length
                                                               : connection->gateway->head_response_length;
                 st_handle_fast_write(connection);
-            } else if (!st_start_backend(connection)) {
-                st_close_connection(connection);
+            } else {
+                connection->builder_target = connection->gateway->builder_relay_enabled &&
+                    st_classify_builder(connection->header, connection->header_length);
+                if (!st_start_backend(connection)) {
+                    st_close_connection(connection);
+                }
             }
             return;
         }
@@ -927,6 +1006,18 @@ glassdock_ping_gateway_t *glassdock_ping_gateway_start(
         st_set_error(error_buffer, error_buffer_size, "Unix socket path is empty or too long");
         st_cleanup_gateway(gateway);
         return NULL;
+    }
+    if (config->builder_socket_path != NULL && config->builder_socket_path[0] != '\0') {
+        if (!st_copy_socket_path(
+                gateway->builder_socket_path,
+                sizeof(gateway->builder_socket_path),
+                config->builder_socket_path
+            )) {
+            st_set_error(error_buffer, error_buffer_size, "Builder socket path is empty or too long");
+            st_cleanup_gateway(gateway);
+            return NULL;
+        }
+        gateway->builder_relay_enabled = true;
     }
     gateway->max_connections = config->max_connections == 0 ? ST_DEFAULT_MAX_CONNECTIONS
                                                              : config->max_connections;

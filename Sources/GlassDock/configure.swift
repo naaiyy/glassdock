@@ -50,6 +50,19 @@ func configure(
     )
     let engine = PersistentEngine(machine: machine)
     app.lifecycle.use(PersistentEngineLifecycle(engine: engine))
+    // The builder relay serves hijacked /session and /grpc connections. It must
+    // start before the public gateway becomes reachable and stop before the
+    // engine tears down its guest connections.
+    let builderRelay = BuilderRelay(
+        eventLoopGroup: app.eventLoopGroup,
+        ready: { try await machine.start() }
+    )
+    try builderRelay.start(
+        socketPath: builderRelaySocketPath(
+            homeDirectory: GlassDockDirectories.hostHome.path
+        )
+    )
+    app.lifecycle.use(BuilderRelayLifecycle(relay: builderRelay))
     let ready: @Sendable () async throws -> RuntimeMachineReady = {
         try await machine.start()
     }

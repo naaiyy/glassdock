@@ -123,7 +123,9 @@ do {
         configuration: DockerAPIGatewayConfiguration(
             publicSocketPath: containerSocketPath(homeDirectory: homeDirectory),
             backendSocketPath: backendSocketPath(homeDirectory: homeDirectory),
-            apiVersion: DockerPing.apiVersion
+            builderSocketPath: builderRelaySocketPath(homeDirectory: homeDirectory),
+            apiVersion: DockerPing.apiVersion,
+            builderVersion: "2"
         )
     )
     try openUnixSocketToAllUsers(homeDirectory: homeDirectory)

@@ -24,6 +24,7 @@ struct configuration {
     const char *excluded_bind_source;
     const char *control_socket;
     const char *tcp_relay_socket;
+    const char *builder_socket;
     const char *console_log;
     uint8_t cpus;
     uint32_t memory_mib;
@@ -33,7 +34,7 @@ static void usage(const char *program) {
     fprintf(stderr,
         "usage: %s --kernel PATH --root-disk PATH --data-disk PATH "
         "--bind-source PATH --excluded-bind-source PATH --control-socket PATH "
-        "--tcp-relay-socket PATH --console-log PATH --parent-pid PID "
+        "--tcp-relay-socket PATH --builder-socket PATH --console-log PATH --parent-pid PID "
         "[--cpus COUNT] [--memory-mib SIZE]\n",
         program);
 }
@@ -127,6 +128,7 @@ static struct configuration parse_configuration(int argc, char **argv) {
         {"excluded-bind-source", required_argument, NULL, 'x'},
         {"control-socket", required_argument, NULL, 'c'},
         {"tcp-relay-socket", required_argument, NULL, 't'},
+        {"builder-socket", required_argument, NULL, 'B'},
         {"console-log", required_argument, NULL, 'l'},
         {"cpus", required_argument, NULL, 'C'},
         {"memory-mib", required_argument, NULL, 'm'},
@@ -144,6 +146,7 @@ static struct configuration parse_configuration(int argc, char **argv) {
         case 'x': configuration.excluded_bind_source = optarg; break;
         case 'c': configuration.control_socket = optarg; break;
         case 't': configuration.tcp_relay_socket = optarg; break;
+        case 'B': configuration.builder_socket = optarg; break;
         case 'l': configuration.console_log = optarg; break;
         case 'C': configuration.cpus = (uint8_t)parse_uint32("CPU count", optarg, 1, 64); break;
         case 'm': configuration.memory_mib = parse_uint32("memory size", optarg, 96, 65536); break;
@@ -161,6 +164,7 @@ static struct configuration parse_configuration(int argc, char **argv) {
     require_absolute("excluded bind source", configuration.excluded_bind_source);
     require_absolute("control socket", configuration.control_socket);
     require_absolute("TCP relay socket", configuration.tcp_relay_socket);
+    require_absolute("builder socket", configuration.builder_socket);
     require_absolute("console log", configuration.console_log);
     if (configuration.parent_pid <= 1 || getppid() != configuration.parent_pid) {
         fprintf(stderr, "glassdock-vmm: parent process is not alive\n");
@@ -219,6 +223,8 @@ int main(int argc, char **argv) {
         configuration.control_socket, true));
     fail_krun("configure TCP relay port", krun_add_vsock_port2((uint32_t)context, 1026,
         configuration.tcp_relay_socket, true));
+    fail_krun("configure builder port", krun_add_vsock_port2((uint32_t)context, 1027,
+        configuration.builder_socket, true));
     uint8_t network_mac[6] = {0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee};
     fail_krun("configure network", krun_add_net_unixgram((uint32_t)context,
         gvproxy.datapath_socket, -1, network_mac, 0, NET_FLAG_VFKIT));
