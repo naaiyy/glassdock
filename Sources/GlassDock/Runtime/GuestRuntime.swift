@@ -919,7 +919,8 @@ actor GuestRemovalGate {
 /// snapshots, and lifecycle state.
 actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     DockerRuntimeImageImportBackend, DockerRuntimeImagePruneBackend,
-    DockerRuntimeImageBuildOptionsBackend, DockerRuntimeInteractiveBackend
+    DockerRuntimeImageBuildOptionsBackend, DockerRuntimeInteractiveBackend,
+    DockerRuntimeBuildCacheBackend
 {
     private struct Metadata: Sendable {
         var name: String

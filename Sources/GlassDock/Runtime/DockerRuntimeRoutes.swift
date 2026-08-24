@@ -142,6 +142,14 @@ protocol DockerRuntimeImagePruneBackend: Sendable {
     func pruneImages(all: Bool, filters: [String: [String]]) async throws -> DockerRuntimeImageDelete
 }
 
+/// Real build-cache accounting served by the embedded BuildKit controller.
+protocol DockerRuntimeBuildCacheBackend: Sendable {
+    func systemDataUsage() async throws -> (
+        layersSize: Int64, buildCache: [GuestBuildCacheRecord]
+    )
+    func pruneBuildCache(all: Bool) async throws -> GuestBuilderPrunePayload
+}
+
 protocol DockerRuntimeImageBuildOptionsBackend: Sendable {
     func buildImage(
         context: Data, dockerfile: String, tags: [String], buildArgs: [String: String]
@@ -1184,9 +1192,17 @@ struct DockerRuntimeRoutes: RouteCollection {
             let CachesDeleted: [String]
             let SpaceReclaimed: Int64
         }
-        return try jsonResponse(
-            .ok, BuildCachePruneResponse(CachesDeleted: [], SpaceReclaimed: 0)
-        )
+        if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
+            let result = try await call { try await cacheBackend.pruneBuildCache(all: true) }
+            return try jsonResponse(
+                .ok,
+                BuildCachePruneResponse(
+                    CachesDeleted: (result.cachesDeleted ?? []).map { $0.id },
+                    SpaceReclaimed: result.spaceReclaimed ?? 0
+                )
+            )
+        }
+        return try jsonResponse(.ok, BuildCachePruneResponse(CachesDeleted: [], SpaceReclaimed: 0))
     }
 
     private func pullImage(_ req: Request) async throws -> Response {
@@ -2325,6 +2341,15 @@ struct DockerRuntimeRoutes: RouteCollection {
         let types = query.type ?? []
         try Self.validateSystemDataUsageTypes(types)
         let includeAll = types.isEmpty
+        var layersSize: Int64?
+        var buildCache: [SystemDataUsageResponse.BuildCacheUsage] = []
+        if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
+            let usage = try await call { try await cacheBackend.systemDataUsage() }
+            layersSize = usage.layersSize
+            if includeAll || types.contains("buildcache") {
+                buildCache = usage.buildCache.map(Self.buildCacheUsage)
+            }
+        }
         let images =
             includeAll || types.contains("image")
             ? try await call { try await backend.listImages() }
@@ -2343,7 +2368,27 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         return try jsonResponse(
             .ok,
-            SystemDataUsageResponse(images: images, containers: containers, volumes: volumes)
+            SystemDataUsageResponse(
+                images: images,
+                containers: containers,
+                volumes: volumes,
+                layersSizeOverride: layersSize,
+                buildCache: buildCache
+            )
+        )
+    }
+
+    private static func buildCacheUsage(_ record: GuestBuildCacheRecord) -> SystemDataUsageResponse.BuildCacheUsage {
+        SystemDataUsageResponse.BuildCacheUsage(
+            id: record.id,
+            type: record.type ?? "exec.cachemount",
+            description: record.description ?? "",
+            inUse: record.inUse ?? false,
+            shared: record.shared ?? false,
+            size: record.size ?? 0,
+            createdAt: record.createdAt ?? Date(timeIntervalSince1970: 0),
+            lastUsedAt: record.lastUsedAt,
+            usageCount: record.usageCount ?? 0
         )
     }
 
@@ -2627,6 +2672,14 @@ struct DockerRuntimeRoutes: RouteCollection {
             headers: headers,
             body: .init(managedAsyncStream: { writer in
                 do {
+                    // Commit the response headers immediately by flushing an
+                    // empty first chunk. Vapor defers the header write until
+                    // the first body byte, but Moby's streaming endpoints
+                    // (wait, events, attach, stats, logs follow) send their
+                    // status line right away: docker run -d opens /wait and
+                    // blocks on its response headers BEFORE sending the
+                    // container start request.
+                    try await writer.writeBuffer(ByteBuffer())
                     try await body(writer)
                 } catch is CancellationError {
                     // Client disconnects land here; nothing left to report.
@@ -2722,6 +2775,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             status: .ok,
             body: .init(managedAsyncStream: { writer in
                 do {
+                    // Commit headers immediately; see streamingResponse.
                     for try await frame in stream {
                         guard frame.exitCode == nil else { continue }
                         let data =
@@ -3150,7 +3204,7 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private static let systemDataUsageTypes: Set<String> = [
-        "container", "image", "volume", "build-cache",
+        "container", "image", "volume", "buildcache",
     ]
 
     private static func validateSystemDataUsageTypes(_ types: [String]) throws {
@@ -3781,8 +3835,37 @@ private struct SystemDataUsageResponse: Encodable {
         let Shared: Bool
         let Size: Int64
         let CreatedAt: String
-        let LastUsedAt: String
+        let LastUsedAt: String?
         let UsageCount: Int
+
+        init(
+            id: String,
+            type: String,
+            description: String,
+            inUse: Bool,
+            shared: Bool,
+            size: Int64,
+            createdAt: Date,
+            lastUsedAt: Date?,
+            usageCount: Int
+        ) {
+            ID = id
+            Parents = []
+            self.`Type` = type
+            Description = description
+            InUse = inUse
+            Shared = shared
+            Size = size
+            CreatedAt = Self.dockerTimestamp(createdAt)
+            LastUsedAt = lastUsedAt.map(Self.dockerTimestamp)
+            UsageCount = usageCount
+        }
+
+        private static func dockerTimestamp(_ date: Date) -> String {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter.string(from: date)
+        }
     }
 
     let LayersSize: Int64
@@ -3794,11 +3877,15 @@ private struct SystemDataUsageResponse: Encodable {
     init(
         images: [DockerRuntimeImage],
         containers: [DockerRuntimeContainer],
-        volumes: [Volume] = []
+        volumes: [Volume] = [],
+        layersSizeOverride: Int64? = nil,
+        buildCache: [BuildCacheUsage] = []
     ) {
-        LayersSize = images.reduce(into: Int64(0)) { total, image in
-            total += max(image.size, 0)
-        }
+        LayersSize =
+            layersSizeOverride
+            ?? images.reduce(into: Int64(0)) { total, image in
+                total += max(image.size, 0)
+            }
         Images = images.map { image in
             let count = containers.filter {
                 DockerRuntimeRoutes.imageMatchesContainer($0, image: image)
@@ -3807,7 +3894,7 @@ private struct SystemDataUsageResponse: Encodable {
         }
         Containers = containers.map(ContainerUsage.init)
         Volumes = volumes
-        BuildCache = []
+        BuildCache = buildCache
     }
 }
 

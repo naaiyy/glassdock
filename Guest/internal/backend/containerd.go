@@ -39,6 +39,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/containerd/typeurl/v2"
 	registryreference "github.com/distribution/reference"
+	digest "github.com/opencontainers/go-digest"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 
@@ -69,27 +70,29 @@ func decodeRuntimeMetadata(labels map[string]string) api.ContainerMetadata {
 }
 
 type Backend struct {
-	client        *containerd.Client
-	namespace     string
-	snapshotter   string
-	runtime       string
-	runtimeBinary string
-	logsDir       string
-	logCaptures   sync.Map
-	containers    sync.Map
-	networks      sync.Map // map[string]*networkPreparation
-	createMu      sync.Mutex
-	metadataMu    sync.Mutex
-	statsMu       sync.Mutex
-	lastStats     map[string]api.ContainerStatsResponse
-	healthMu      sync.Mutex
-	healthStops   map[string]chan struct{}
-	execMu        sync.Mutex
-	execProcesses map[string]containerd.Process
-	network       *NetworkManager
-	taskCreates   chan struct{}
-	cleanups      orderedCleanupBarrier
-	bindMount     bindMountConfiguration
+	client          *containerd.Client
+	namespace       string
+	snapshotter     string
+	runtime         string
+	runtimeBinary   string
+	logsDir         string
+	logCaptures     sync.Map
+	containers      sync.Map
+	networks        sync.Map // map[string]*networkPreparation
+	createMu        sync.Mutex
+	metadataMu      sync.Mutex
+	statsMu         sync.Mutex
+	lastStats       map[string]api.ContainerStatsResponse
+	healthMu        sync.Mutex
+	healthStops     map[string]chan struct{}
+	execMu          sync.Mutex
+	execProcesses   map[string]containerd.Process
+	network         *NetworkManager
+	taskCreates     chan struct{}
+	cleanups        orderedCleanupBarrier
+	bindMount       bindMountConfiguration
+	buildCacheUsage func(ctx context.Context) ([]api.BuildCacheRecord, error)
+	buildCachePrune func(ctx context.Context, all bool) (api.BuilderPruneResponse, error)
 }
 
 type bindMountConfiguration struct {
@@ -568,7 +571,6 @@ func selectPlatformManifest(
 		if m.Platform == nil {
 			continue
 		}
-		log.Printf("DEBUG-SELECT: child %s platform=%s", m.Digest, platforms.Format(*m.Platform))
 		if m.Platform.OS == platforms.DefaultSpec().OS &&
 			m.Platform.Architecture == platforms.DefaultSpec().Architecture {
 			return m, nil
@@ -643,18 +645,38 @@ func (b *Backend) Images(ctx context.Context) ([]api.Image, error) {
 	}
 	grouped := make(map[string]*api.Image)
 	for _, record := range records {
-		config, err := record.Config(ctx)
+		// BuildKit exports images as indexes with unknown/unknown attestation
+		// manifests. Resolve the guest-platform manifest and ignore entries
+		// whose config is not a real image configuration.
+		target := record.Target()
+		if containerimages.IsIndexType(target.MediaType) {
+			resolved, err := selectPlatformManifest(ctx, b.client.ContentStore(), target)
+			if err != nil {
+				return nil, err
+			}
+			target = resolved
+		}
+		configDescriptor, err := containerimages.Config(ctx, b.client.ContentStore(), target, nil)
 		if err != nil {
 			return nil, err
 		}
+		if configDescriptor.MediaType != containerimages.MediaTypeDockerSchema2Config &&
+			configDescriptor.MediaType != imagespec.MediaTypeImageConfig {
+			continue
+		}
+		configData, err := content.ReadBlob(ctx, b.client.ContentStore(), configDescriptor)
+		if err != nil {
+			return nil, err
+		}
+		var spec imagespec.Image
+		if err := json.Unmarshal(configData, &spec); err != nil {
+			return nil, fmt.Errorf("decode image configuration %s: %w", configDescriptor.Digest, err)
+		}
+		config := configDescriptor
 		id := config.Digest.String()
 		item := grouped[id]
 		if item == nil {
 			size, err := record.Size(ctx)
-			if err != nil {
-				return nil, err
-			}
-			spec, err := record.Spec(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -751,11 +773,17 @@ func (b *Backend) Image(ctx context.Context, reference string) (api.Image, error
 	if err != nil {
 		return api.Image{}, err
 	}
+	names := map[string]bool{reference: true}
+	for _, candidate := range equivalentImageReferences(reference) {
+		names[candidate] = true
+	}
 	var matches []api.Image
 	for _, image := range images {
-		matched := image.ID == reference || image.Digest == reference || strings.HasPrefix(image.ID, reference) || strings.HasPrefix(strings.TrimPrefix(image.ID, "sha256:"), strings.TrimPrefix(reference, "sha256:"))
+		matched := names[image.ID] || names[image.Digest] ||
+			strings.HasPrefix(image.ID, reference) ||
+			strings.HasPrefix(strings.TrimPrefix(image.ID, "sha256:"), strings.TrimPrefix(reference, "sha256:"))
 		for _, name := range image.References {
-			matched = matched || name == reference
+			matched = matched || names[name]
 		}
 		if matched {
 			matches = append(matches, image)
@@ -1078,9 +1106,15 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		}()
 	}
 	ctx = b.ctx(ctx)
-	image, err := b.client.GetImage(ctx, request.Image)
+	image, err := b.LookupImage(ctx, request.Image)
 	if err != nil {
 		return api.Container{}, fmt.Errorf("image must already exist: %w", err)
+	}
+	// BuildKit exports tag images into the content store without unpacking.
+	// Snapshot creation below requires the guest-platform layers locally, so
+	// unpack on demand; Unpack short-circuits when chains already exist.
+	if err := image.Unpack(ctx, b.snapshotter); err != nil {
+		return api.Container{}, fmt.Errorf("unpack image %q: %w", request.Image, err)
 	}
 	effectiveHealthcheck := request.Healthcheck
 	if effectiveHealthcheck == nil {
@@ -3267,4 +3301,115 @@ func (b *Backend) ResizeExec(ctx context.Context, request api.ExecResizeRequest)
 		return fmt.Errorf("exec process %s is not running", request.ID)
 	}
 	return process.Resize(b.ctx(ctx), request.Width, request.Height)
+}
+
+// LookupImage finds a local image by reference, accepting the equivalent
+// normalized and short forms ("gdtest/hello:latest" matches
+// "docker.io/gdtest/hello:latest") so images tagged by BuildKit exports are
+// runnable through the fully-qualified references Docker clients send.
+func (b *Backend) LookupImage(ctx context.Context, reference string) (containerd.Image, error) {
+	image, err := b.client.GetImage(ctx, reference)
+	if err == nil {
+		return image, nil
+	}
+	for _, candidate := range equivalentImageReferences(reference) {
+		if candidate == reference {
+			continue
+		}
+		if image, err := b.client.GetImage(ctx, candidate); err == nil {
+			return image, nil
+		}
+	}
+	return nil, err
+}
+
+// equivalentImageReferences lists alternative names for the same image
+// reference: the familiar docker.io form and the bare repository form.
+func equivalentImageReferences(reference string) []string {
+	candidates := make([]string, 0, 3)
+	if qualified, err := registryreference.ParseDockerRef(reference); err == nil {
+		candidates = append(candidates, qualified.String())
+	}
+	bare := strings.TrimPrefix(reference, "docker.io/")
+	bare = strings.TrimPrefix(bare, "library/")
+	if bare != reference {
+		candidates = append(candidates, bare)
+	}
+	return candidates
+}
+
+// SystemDataUsage computes Docker system-df inputs that only the guest can
+// author: the total size of unique layer blobs across all local images and
+// the BuildKit build-cache records.
+func (b *Backend) SystemDataUsage(ctx context.Context) (api.SystemDfResponse, error) {
+	ctx = b.ctx(ctx)
+	response := api.SystemDfResponse{BuildCache: []api.BuildCacheRecord{}}
+
+	records, err := b.client.ListImages(ctx)
+	if err != nil {
+		return response, err
+	}
+	contentStore := b.client.ContentStore()
+	seen := make(map[digest.Digest]bool)
+	for _, record := range records {
+		descriptor := record.Target()
+		if containerimages.IsIndexType(descriptor.MediaType) {
+			resolved, err := selectPlatformManifest(ctx, contentStore, descriptor)
+			if err != nil {
+				continue
+			}
+			descriptor = resolved
+		}
+		payload, err := content.ReadBlob(ctx, contentStore, descriptor)
+		if err != nil {
+			continue
+		}
+		var manifest imagespec.Manifest
+		if err := json.Unmarshal(payload, &manifest); err != nil {
+			continue
+		}
+		for _, layer := range manifest.Layers {
+			if seen[layer.Digest] {
+				continue
+			}
+			info, err := contentStore.Info(ctx, layer.Digest)
+			if err != nil {
+				continue
+			}
+			seen[layer.Digest] = true
+			response.LayersSize += info.Size
+		}
+	}
+
+	if b.buildCacheUsage != nil {
+		cacheRecords, err := b.buildCacheUsage(ctx)
+		if err != nil {
+			return response, err
+		}
+		response.BuildCache = cacheRecords
+	}
+	return response, nil
+}
+
+// SetBuildCacheUsage wires the embedded BuildKit controller's disk-usage
+// reporting into the backend for /system/df.
+func (b *Backend) SetBuildCacheUsage(provider func(ctx context.Context) ([]api.BuildCacheRecord, error)) {
+	b.buildCacheUsage = provider
+}
+
+// PruneBuildCache removes unused BuildKit cache records and reports the
+// reclaimed space.
+func (b *Backend) PruneBuildCache(ctx context.Context, all bool) (api.BuilderPruneResponse, error) {
+	ctx = b.ctx(ctx)
+	response := api.BuilderPruneResponse{CachesDeleted: []api.BuilderPruneRecord{}}
+	if b.buildCachePrune == nil {
+		return response, nil
+	}
+	return b.buildCachePrune(ctx, all)
+}
+
+// SetBuildCachePrune wires the embedded BuildKit controller's prune into the
+// backend for /build/prune.
+func (b *Backend) SetBuildCachePrune(prune func(ctx context.Context, all bool) (api.BuilderPruneResponse, error)) {
+	b.buildCachePrune = prune
 }
