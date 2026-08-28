@@ -56,7 +56,7 @@
       "method": "POST",
       "path": "/build",
       "operationId": "ImageBuild",
-      "support": "partial",
+      "support": "full",
       "expectedStatus": 200,
       "responseStatuses": [
         200,
@@ -65,7 +65,7 @@
       ],
       "responseSchema": null,
       "owner": "DockerRuntimeRoutes",
-      "note": "Builds classic Dockerfiles in the persistent guest runtime with local/remote ADD, multi-stage COPY, RUN, ARG, SHELL, and health-check support; BuildKit clients are served through the embedded guest BuildKit controller via /session and /grpc."
+      "note": "Live coverage verifies ordered classic Dockerfile execution with ENV, WORKDIR, COPY, RUN, ARG, SHELL, multi-stage COPY, local archive ADD, .dockerignore, labels, CMD, and healthchecks; BuildKit clients are served through the embedded guest BuildKit controller via /session and /grpc."
     },
     {
       "method": "POST",

@@ -70,29 +70,30 @@ func decodeRuntimeMetadata(labels map[string]string) api.ContainerMetadata {
 }
 
 type Backend struct {
-	client          *containerd.Client
-	namespace       string
-	snapshotter     string
-	runtime         string
-	runtimeBinary   string
-	logsDir         string
-	logCaptures     sync.Map
-	containers      sync.Map
-	networks        sync.Map // map[string]*networkPreparation
-	createMu        sync.Mutex
-	metadataMu      sync.Mutex
-	statsMu         sync.Mutex
-	lastStats       map[string]api.ContainerStatsResponse
-	healthMu        sync.Mutex
-	healthStops     map[string]chan struct{}
-	execMu          sync.Mutex
-	execProcesses   map[string]containerd.Process
-	network         *NetworkManager
-	taskCreates     chan struct{}
-	cleanups        orderedCleanupBarrier
-	bindMount       bindMountConfiguration
-	buildCacheUsage func(ctx context.Context) ([]api.BuildCacheRecord, error)
-	buildCachePrune func(ctx context.Context, all bool) (api.BuilderPruneResponse, error)
+	client              *containerd.Client
+	namespace           string
+	snapshotter         string
+	runtime             string
+	runtimeBinary       string
+	logsDir             string
+	logCaptures         sync.Map
+	containers          sync.Map
+	networks            sync.Map // map[string]*networkPreparation
+	createMu            sync.Mutex
+	metadataMu          sync.Mutex
+	statsMu             sync.Mutex
+	lastStats           map[string]api.ContainerStatsResponse
+	imageDirectoryCache sync.Map
+	healthMu            sync.Mutex
+	healthStops         map[string]chan struct{}
+	execMu              sync.Mutex
+	execProcesses       map[string]containerd.Process
+	network             *NetworkManager
+	taskCreates         chan struct{}
+	cleanups            orderedCleanupBarrier
+	bindMount           bindMountConfiguration
+	buildCacheUsage     func(ctx context.Context) ([]api.BuildCacheRecord, error)
+	buildCachePrune     func(ctx context.Context, all bool) (api.BuilderPruneResponse, error)
 }
 
 type bindMountConfiguration struct {
@@ -1285,6 +1286,13 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		container: container, snapshotter: snapshotter, snapshotKey: request.ID,
 	}
 	b.containers.Store(request.ID, record)
+	if err := b.materializeImageDirectories(ctx, request.ID, image); err != nil {
+		b.containers.Delete(request.ID)
+		if deleteErr := container.Delete(ctx); deleteErr != nil {
+			log.Printf("glassdock: delete failed container %s after image directory repair: %v", request.ID, deleteErr)
+		}
+		return api.Container{}, fmt.Errorf("prepare image filesystem: %w", err)
+	}
 	info, err := container.Info(ctx)
 	if err != nil {
 		return api.Container{}, err
@@ -3160,8 +3168,7 @@ func (b *Backend) ExecInput(
 	if cwd == "" {
 		cwd = containerSpec.Process.Cwd
 	}
-	env := append([]string(nil), containerSpec.Process.Env...)
-	env = append(env, request.Env...)
+	env := mergeEnvironment(containerSpec.Process.Env, request.Env)
 	processSpec := &specs.Process{Args: request.Args, Env: env, Cwd: cwd, Terminal: request.Terminal, User: containerSpec.Process.User}
 	if request.User != "" {
 		info, err := container.Info(ctx)
@@ -3247,6 +3254,31 @@ func (b *Backend) ExecInput(
 		return 0, err
 	}
 	return int32(code), nil
+}
+
+func mergeEnvironment(base, overrides []string) []string {
+	result := append([]string(nil), base...)
+	indexes := make(map[string]int, len(result)+len(overrides))
+	for index, value := range result {
+		key, _, ok := strings.Cut(value, "=")
+		if ok && key != "" {
+			indexes[key] = index
+		}
+	}
+	for _, value := range overrides {
+		key, _, ok := strings.Cut(value, "=")
+		if !ok || key == "" {
+			result = append(result, value)
+			continue
+		}
+		if index, exists := indexes[key]; exists {
+			result[index] = value
+			continue
+		}
+		indexes[key] = len(result)
+		result = append(result, value)
+	}
+	return result
 }
 
 func (b *Backend) AttachInput(

@@ -122,7 +122,7 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 ## Key Features ✨
 
 - Runs one persistent Linux VM with a custom Hypervisor.framework VMM 🍏
-- Tracks Docker REST API compatibility 🔄 across 107 Moby v1.51 operations: 65 full, 1 partial, and 41 intentional error-only routes
+- Tracks Docker REST API compatibility 🔄 across 107 Moby v1.51 operations: 66 full and 41 intentional error-only routes
 - Listens on a Unix domain socket `$HOME/.glassdock/container.sock` and auto-registers a `glassdock` Docker context
 - Uses containerd, overlayfs, runc, and Linux namespaces for containers
 - Supports create, start, stop, wait, remove, inspect, list, logs, and noninteractive exec
@@ -168,9 +168,11 @@ Refer to **Quick Start** above for immediate usage examples.
 
 Glass Dock runs BuildKit inside the persistent engine VM and supports Buildx
 through the Docker `/session` and `/grpc` relays. The classic `POST /build`
-route remains partial because some Moby Dockerfile-build semantics still need
-implementation and live proof. Buildx support does not make the classic route
-fully compatible automatically.
+route supports the regular Dockerfile workflow through the persistent guest
+runtime. Live coverage includes ordered `ENV`, `WORKDIR`, `COPY`, and `RUN`,
+build arguments, JSON-form `RUN`, `SHELL`, multi-stage `COPY --from`, local
+archive `ADD`, `.dockerignore`, labels, `CMD`, and healthchecks. Run it with
+`make api-compatibility-build`.
 
 ### Image names, IDs, and repeated builds
 
@@ -407,9 +409,9 @@ rules. Do not compare result values from different machines.
   relay. Swarm and plugin operations remain intentionally error-only because
   Glass Dock is a single-node runtime and does not execute Swarm schedulers or
   host plugin processes.
-- Build cache accounting and pruning use the guest BuildKit cache. The classic
-  `/build` route remains the one compatibility gap in the current matrix; see
-  `Compatibility/README.md` for the exact scope.
+- Build cache accounting and pruning use the guest BuildKit cache. The
+  compatibility matrix defines full support for the regular Dockerfile workflow
+  and does not include Swarm or Docker plugin hosting.
 - Glass Dock replaces a readable data disk only when it identifies the previous
   unjournaled alpha format. It preserves that disk as
   `data.ext4.incompatible-<UUID>`. An unreadable or corrupt disk stops startup

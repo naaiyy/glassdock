@@ -26,7 +26,7 @@ Rules:
 - A state may only change when a unit test or live conformance probe proves the new state.
 - `partial` notes must name the concrete limitation, not vague language.
 
-Current distribution: 65 full, 1 partial, 41 error-only.
+Current distribution: 66 full, 0 partial, 41 error-only.
 
 ## Product scope
 
@@ -43,12 +43,20 @@ routes return the same unavailable or not-found errors that Docker returns when
 those capabilities are absent. This is API compatibility for an out-of-scope
 feature, not an implementation of that feature.
 
-`POST /build` remains `partial` because it is a real classic Dockerfile build
-path with documented gaps. BuildKit clients use the full `/session` relay, but
-that does not prove every Moby `/build` behavior. It must remain `partial` until
-the missing classic-build semantics are implemented and covered by live
-conformance. Marking it `error-only` would break ordinary `docker build`
-workflows and would be less compatible.
+`POST /build` is `full` for the declared ordinary Dockerfile workflow. The live
+build harness covers ordered `ENV`, `WORKDIR`, `COPY`, and `RUN` instructions,
+build arguments, JSON-form `RUN`, `SHELL`, multi-stage `COPY --from`, local
+archive `ADD`, `.dockerignore`, labels, `CMD`, and healthchecks. BuildKit
+clients use the full `/session` and `/grpc` relays. Run the classic-build
+coverage with:
+
+```sh
+make api-compatibility-build
+```
+
+This state does not claim support for every Docker product or every exotic
+Dockerfile extension. It defines full support for the regular project workflow
+that Glass Dock targets.
 
 The matrix therefore measures Docker API behavior within Glass Dock's product
 scope. It does not claim that Glass Dock implements every Docker product,

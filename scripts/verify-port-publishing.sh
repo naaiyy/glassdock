@@ -33,8 +33,8 @@ HOME_DIR="$TMPD/home"
 STATE_DIR="$TMPD/state"
 LOG="$TMPD/daemon.log"
 SOCK="$HOME_DIR/.glassdock/container.sock"
-PG_PORT=55432
-NGINX_PORT=55080
+PG_PORT="${GLASSDOCK_R4_PG_PORT:-55432}"
+NGINX_PORT="${GLASSDOCK_R4_NGINX_PORT:-55080}"
 PG_PASSWORD="r4-secret"
 
 DOCKER=(docker -H "unix://$SOCK")
@@ -183,26 +183,13 @@ verify_nginx() {
 start_daemon
 
 step "launching containers via docker run -p"
-# Glass Dock materializes declared image VOLUME paths with a create-time
-# fallback, but the current dev guest still has an independent lower-layer
-# mkdir() issue. Pre-create the PostgreSQL data directory for this harness.
+# Glass Dock repairs image-layer directory copy-up during container creation,
+# so these probes use the normal image entrypoints.
 "${DOCKER[@]}" run -d --name r4pg \
-    --entrypoint sh \
     -e POSTGRES_PASSWORD="$PG_PASSWORD" \
-    -p "127.0.0.1:$PG_PORT:5432" postgres:17-alpine \
-    -c "mkdir -p /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data && chown -R postgres:postgres /var/lib/postgresql && exec /usr/local/bin/docker-entrypoint.sh postgres"
+    -p "127.0.0.1:$PG_PORT:5432" postgres:17-alpine
 "${DOCKER[@]}" run -d --name r4nginx \
-    --entrypoint sh \
-    -p "127.0.0.1:$NGINX_PORT:80" nginx:alpine \
-    -c "mkdir -p /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp \
-        /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp \
-        /var/cache/nginx/scgi_temp /var/run/nginx \
-        && exec /docker-entrypoint.sh nginx -g 'daemon off;'"
-# NOTE: nginx normally needs no override. Current dev guest builds return
-# transient ENOENT when the FIRST mkdir() into these lower-layer directories
-# comes from the nginx binary itself; pre-creating them from the shell avoids
-# it. Production 1.3.1 guests do not show this. Revisit once the guest
-# filesystem issue is root-caused (see R4 report).
+    -p "127.0.0.1:$NGINX_PORT:80" nginx:alpine
 
 dump_state() {
     echo "--- docker ps -a ---"
