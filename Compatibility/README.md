@@ -26,7 +26,33 @@ Rules:
 - A state may only change when a unit test or live conformance probe proves the new state.
 - `partial` notes must name the concrete limitation, not vague language.
 
-Current distribution: 62 full, 4 partial, 41 error-only.
+Current distribution: 65 full, 1 partial, 41 error-only.
+
+## Product scope
+
+Glass Dock is a local, single-node Docker-compatible runtime for macOS on
+Apple Silicon. The compatibility target is ordinary application workflows:
+containers, images, networks, volumes, logs, exec, published ports, and
+Dockerfile or BuildKit builds. Clients and Dockerfiles in that scope should not
+need a migration.
+
+The 41 `error-only` operations are intentional. They cover Swarm management,
+Swarm objects, Docker plugin lifecycle, and the Swarm-only volume update route.
+Glass Dock does not run a Swarm scheduler or host Docker plugins, so these
+routes return the same unavailable or not-found errors that Docker returns when
+those capabilities are absent. This is API compatibility for an out-of-scope
+feature, not an implementation of that feature.
+
+`POST /build` remains `partial` because it is a real classic Dockerfile build
+path with documented gaps. BuildKit clients use the full `/session` relay, but
+that does not prove every Moby `/build` behavior. It must remain `partial` until
+the missing classic-build semantics are implemented and covered by live
+conformance. Marking it `error-only` would break ordinary `docker build`
+workflows and would be less compatible.
+
+The matrix therefore measures Docker API behavior within Glass Dock's product
+scope. It does not claim that Glass Dock implements every Docker product,
+including Swarm and plugins.
 
 ## Live conformance
 

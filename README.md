@@ -122,7 +122,7 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 ## Key Features ✨
 
 - Runs one persistent Linux VM with a custom Hypervisor.framework VMM 🍏
-- Tracks Docker REST API compatibility 🔄 across 107 Moby v1.51 operations; 18 are implemented and 89 remain partial
+- Tracks Docker REST API compatibility 🔄 across 107 Moby v1.51 operations: 65 full, 1 partial, and 41 intentional error-only routes
 - Listens on a Unix domain socket `$HOME/.glassdock/container.sock` and auto-registers a `glassdock` Docker context
 - Uses containerd, overlayfs, runc, and Linux namespaces for containers
 - Supports create, start, stop, wait, remove, inspect, list, logs, and noninteractive exec
@@ -166,10 +166,11 @@ Refer to **Quick Start** above for immediate usage examples.
 
 ### Docker builds and Buildx
 
-Docker builds are not available in this alpha. The old build service started a
-second Apple VM, so the single-VM runtime does not register the Docker build
-endpoints. BuildKit integration must run inside the persistent engine VM before
-Glass Dock can support Buildx.
+Glass Dock runs BuildKit inside the persistent engine VM and supports Buildx
+through the Docker `/session` and `/grpc` relays. The classic `POST /build`
+route remains partial because some Moby Dockerfile-build semantics still need
+implementation and live proof. Buildx support does not make the classic route
+fully compatible automatically.
 
 ### Image names, IDs, and repeated builds
 
@@ -402,12 +403,13 @@ rules. Do not compare result values from different machines.
   arbitrary Docker bind requests. Containers receive only their requested bind
   paths. Glass Dock rejects binds that overlap its engine state, and the
   virtio-fs server confines all file operations beneath the exported root.
-- Interactive stdin remains unavailable for attach and exec streams. Output,
-  detached execution, resize, logs, and Docker stream framing are implemented.
-- Swarm and plugin endpoints persist Docker-compatible single-node metadata;
-  Glass Dock does not execute Swarm schedulers or host plugin processes.
-- Build cache pruning returns an empty result because build layers are owned by
-  the guest image store.
+- Attach and exec streams support Docker framing, output, resize, and stdin
+  relay. Swarm and plugin operations remain intentionally error-only because
+  Glass Dock is a single-node runtime and does not execute Swarm schedulers or
+  host plugin processes.
+- Build cache accounting and pruning use the guest BuildKit cache. The classic
+  `/build` route remains the one compatibility gap in the current matrix; see
+  `Compatibility/README.md` for the exact scope.
 - Glass Dock replaces a readable data disk only when it identifies the previous
   unjournaled alpha format. It preserves that disk as
   `data.ext4.incompatible-<UUID>`. An unreadable or corrupt disk stops startup
