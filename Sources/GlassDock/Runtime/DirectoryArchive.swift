@@ -2,12 +2,10 @@ import Foundation
 
 /// Builds an in-memory ustar archive containing directory entries.
 ///
-/// Glass Dock does not yet honor image `VOLUME` declarations when preparing a
-/// container's root filesystem, so images like postgres and nginx fail at
-/// startup when their declared volume directories are missing. Creating the
-/// directories through a small archive applied with the container archive-put
-/// path restores the behavior Docker users expect until native VOLUME
-/// handling lands.
+/// Glass Dock currently materializes image `VOLUME` declarations through a
+/// create-time archive fallback. Native volume handling is still separate
+/// work, and this fallback does not repair unrelated lower-layer filesystem
+/// issues.
 enum DirectoryArchive {
     /// Writes a POSIX ustar archive whose members are the given absolute
     /// directory paths (mode 0755), sorted and de-duplicated, including every
