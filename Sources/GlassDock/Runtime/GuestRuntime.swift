@@ -1336,11 +1336,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         manuallyStopped.remove(id)
         committedReservation = true
         await broadcastContainer("create", id: id)
-        // Materialize image VOLUME directories. The guest does not honor
-        // VOLUME declarations when preparing the root filesystem, so official
-        // images (postgres, nginx) abort at startup when their declared
-        // directories are missing. Best effort: a failure here only means the
-        // container behaves as it did before this fix-up existed.
+        // Materialize declared image VOLUME directories as a create-time
+        // fallback. Native volume handling is still separate work. Best
+        // effort: a failure here only means the container behaves as it did
+        // before this fix-up existed.
         if let imageVolumes = try? await inspectImage(reference: request.image).config.volumes,
             !imageVolumes.isEmpty
         {

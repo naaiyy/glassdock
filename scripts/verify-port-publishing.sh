@@ -183,8 +183,9 @@ verify_nginx() {
 start_daemon
 
 step "launching containers via docker run -p"
-# Glass Dock does not yet materialize image VOLUME paths, so postgres's
-# /var/lib/postgresql/data must be created before its entrypoint runs.
+# Glass Dock materializes declared image VOLUME paths with a create-time
+# fallback, but the current dev guest still has an independent lower-layer
+# mkdir() issue. Pre-create the PostgreSQL data directory for this harness.
 "${DOCKER[@]}" run -d --name r4pg \
     --entrypoint sh \
     -e POSTGRES_PASSWORD="$PG_PASSWORD" \
