@@ -11,8 +11,13 @@ import Testing
 @Suite("Guest golden fixtures")
 struct GuestFixtureDecodingTests {
     private func fixtureData(_ name: String) throws -> Data {
-        // SPM flattens processed resources into the bundle root.
-        let url = Bundle.module.bundleURL.appendingPathComponent("\(name).json")
+        guard let url = Bundle.module.url(forResource: name, withExtension: "json") else {
+            throw CocoaError(
+                .fileNoSuchFile,
+                userInfo: [
+                    NSURLErrorKey: "Missing bundled guest fixture: \(name).json"
+                ])
+        }
         return try Data(contentsOf: url)
     }
 
