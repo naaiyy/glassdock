@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -13,6 +14,23 @@ import (
 	"github.com/glassdock/glassdock/guest/internal/api"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestPrivilegedSpecOptGrantsKnownCapabilities(t *testing.T) {
+	if privilegedSpecOpt(false) != nil {
+		t.Fatal("unprivileged containers must not receive a capability spec option")
+	}
+
+	spec := &specs.Spec{Process: &specs.Process{}}
+	if err := privilegedSpecOpt(true)(context.Background(), nil, nil, spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Process.Capabilities == nil {
+		t.Fatal("privileged containers must receive an OCI capability set")
+	}
+	if runtime.GOOS == "linux" && len(spec.Process.Capabilities.Bounding) == 0 {
+		t.Fatal("privileged containers must receive known Linux capabilities")
+	}
+}
 
 func TestContainerUpdateResourcesMapsAndPersistsOCIFields(t *testing.T) {
 	shares := uint64(512)

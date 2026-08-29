@@ -201,6 +201,7 @@ type ContainerCreateRequest struct {
 	Labels         map[string]string `json:"labels,omitempty"`
 	Hostname       string            `json:"hostname,omitempty"`
 	ReadonlyRootfs bool              `json:"readonlyRootfs,omitempty"`
+	Privileged     bool              `json:"privileged,omitempty"`
 	Mounts         []Mount           `json:"mounts,omitempty"`
 	Network        Network           `json:"network,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
@@ -251,6 +252,7 @@ type ContainerMetadata struct {
 	AutoRemove     bool                `json:"autoRemove,omitempty"`
 	Mounts         []Mount             `json:"mounts,omitempty"`
 	ReadonlyRootfs bool                `json:"readonlyRootfs,omitempty"`
+	Privileged     bool                `json:"privileged,omitempty"`
 	DNS            []string            `json:"dns,omitempty"`
 	DNSSearch      []string            `json:"dnsSearch,omitempty"`
 	ExtraHosts     []string            `json:"extraHosts,omitempty"`

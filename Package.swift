@@ -20,7 +20,7 @@ let package = Package(
         .executable(name: "GlassDockMenu", targets: ["GlassDockMenu"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/container.git", exact: "1.2.1"),
+        .package(url: "https://github.com/apple/container.git", exact: "1.2.2"),
         .package(url: "https://github.com/apple/containerization.git", exact: "0.40.1"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.121.3"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.11.0"),

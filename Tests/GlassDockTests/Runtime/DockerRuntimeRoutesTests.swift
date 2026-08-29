@@ -596,6 +596,26 @@ struct DockerRuntimeRoutesTests {
         }
     }
 
+    @Test("builder prune broadcasts a Docker builder event")
+    func builderPruneBroadcastsEvent() async throws {
+        let backend = DockerRuntimeBackendMock()
+        let broadcaster = EventBroadcaster()
+        try await withRuntimeRoutes(backend, broadcaster: broadcaster) { app in
+            try await app.testing().test(.POST, "/v1.51/build/prune") { response async in
+                #expect(response.status == .ok)
+            }
+        }
+
+        let stream = await broadcaster.stream(since: 0)
+        var iterator = stream.makeAsyncIterator()
+        let event = await iterator.next()
+        #expect(event?.Type == "builder")
+        #expect(event?.Action == "prune")
+        #expect(event?.Actor.ID == "")
+        #expect(event?.Actor.Attributes["reclaimed"] == "0")
+        #expect(await backend.lastBuildPruneAll == true)
+    }
+
     @Test("info separates paused containers from stopped containers")
     func infoCountsPausedContainers() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -645,6 +665,17 @@ struct DockerRuntimeRoutesTests {
         try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
             try await app.testing().test(.GET, "/v1.51/system/df?type=unknown") { response async in
                 #expect(response.status == .badRequest)
+            }
+        }
+    }
+
+    @Test("system df accepts Docker's build-cache object type")
+    func systemDataUsageAcceptsBuildCacheType() async throws {
+        try await withRuntimeRoutes(DockerRuntimeBackendMock()) { app in
+            try await app.testing().test(.GET, "/v1.51/system/df?type=build-cache") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect((value?["BuildCache"] as? [[String: Any]])?.isEmpty == true)
             }
         }
     }
@@ -955,6 +986,7 @@ struct DockerRuntimeRoutesTests {
         }
         let create = try #require(await backend.lastCreate)
         #expect(create.openStdin)
+        #expect(create.privileged)
         #expect(create.networkMode == "host")
         #expect(create.restartPolicy.name == "always")
         #expect(create.resources.memory == 1_048_576)
@@ -1002,17 +1034,21 @@ struct DockerRuntimeRoutesTests {
 func withRuntimeRoutes(
     _ backend: DockerRuntimeBackendMock,
     volumeClient: (any ClientVolumeProtocol)? = nil,
+    broadcaster: EventBroadcaster? = nil,
     test: @escaping (Application) async throws -> Void
 ) async throws {
     try await withApp(configure: { _ in }) { app in
         let router = app.regexRouter(with: app.logger)
         app.setRegexRouter(router)
+        if let broadcaster {
+            app.storage[EventBroadcasterKey.self] = broadcaster
+        }
         try app.register(collection: DockerRuntimeRoutes(backend: backend, volumeClient: volumeClient))
         try await test(app)
     }
 }
 
-actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
+actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCacheBackend {
     struct Pull: Equatable {
         let reference: String
         let platform: String?
@@ -1051,6 +1087,7 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastCommit: Commit?
     private(set) var lastImportedData: Data?
     private(set) var lastBuild: (Data, String, [String])?
+    private(set) var lastBuildPruneAll: Bool?
     private(set) var lastTopArguments: [String]?
     private(set) var lastArchiveData: Data?
     private(set) var lastArchiveNoOverwriteDirNonDir = false
@@ -1173,6 +1210,18 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
         lastBuild = (context, dockerfile, tags)
         return DockerRuntimeImage(reference: tags.first ?? "glassdock/build:latest", digest: "sha256:built")
+    }
+
+    func systemDataUsage() async throws -> (layersSize: Int64, buildCache: [GuestBuildCacheRecord]) {
+        (0, [])
+    }
+
+    func pruneBuildCache(all: Bool) async throws -> GuestBuilderPrunePayload {
+        lastBuildPruneAll = all
+        return try JSONDecoder().decode(
+            GuestBuilderPrunePayload.self,
+            from: Data(#"{"cachesDeleted":[],"spaceReclaimed":0}"#.utf8)
+        )
     }
 
     func exportImages(
