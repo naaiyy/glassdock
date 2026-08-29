@@ -1,0 +1,53 @@
+{
+  "containers": [
+    {
+      "createdAt": "2026-08-23T00:26:55.553986169Z",
+      "id": "12770fb144054fbb9777cc9d1099e0d9151532aa7852456b888cd3f276d78dc5",
+      "image": "docker.io/library/alpine:3.20",
+      "metadata": {
+        "args": [
+          "sh",
+          "-c",
+          "sleep 300"
+        ],
+        "cmd": [
+          "sh",
+          "-c",
+          "sleep 300"
+        ],
+        "env": [
+          "FIXTURE=yes"
+        ],
+        "hostname": "fixtured",
+        "labels": {
+          "probe": "golden"
+        },
+        "name": "fxc",
+        "networkMode": "private",
+        "portBindings": [
+          {
+            "containerPort": 8080,
+            "hostIP": "127.0.0.1",
+            "hostPort": 55990,
+            "protocol": "tcp"
+          }
+        ],
+        "publishedPorts": [
+          {
+            "containerPort": 8080,
+            "guestPort": 20000,
+            "hostSource": "192.168.127.1",
+            "protocol": "tcp"
+          }
+        ],
+        "resources": {},
+        "restartPolicy": {
+          "name": "no"
+        }
+      },
+      "sizeRootFs": 4107295,
+      "sizeRw": 4096,
+      "status": "created"
+    }
+  ]
+}

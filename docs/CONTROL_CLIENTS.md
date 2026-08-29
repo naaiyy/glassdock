@@ -65,6 +65,39 @@ The package installer puts the daemon and helpers in `/opt/glassdock`. Homebrew
 installs the command-line package. Before this control foundation, neither model
 installed or owned a background process.
 
+## Directory layout
+
+Glass Dock keeps data in three places, each for a different reason
+(`GlassDockDirectories` is the single source of truth):
+
+| Location | Contents | Why here |
+|---|---|---|
+| `~/.glassdock` | `container.sock` (public Docker socket), `daemon.sock` (private backend), `builder.sock` (builder relay), optional `glassdock` Docker context | Under the user home so per-user permission scoping works; the 0700 parent guards the world-readable socket |
+| `/Users/Shared/.glassdock-<uid>` | `data.ext4` (guest persistent disk), `engine.lock` | Must stay outside the exported bind-mount source (the whole home directory) while remaining writable by the console user |
+| `/opt/glassdock` | daemon, VMM helper, gvproxy, kernel, root disk | Installer-owned read-only prefix, never written at runtime |
+
+The VMM also derives ephemeral control sockets under
+`/tmp/glassdock-vmm-<generation>`; they exist only for one VM boot.
+
+### Isolated development instances
+
+A production daemon may own `~/.glassdock/container.sock`. Never test against
+it. Override both writable locations instead:
+
+```sh
+make dev-daemon
+# then:
+docker -H unix://.build/glassdock-dev/home/.glassdock/container.sock ps
+```
+
+`make dev-daemon` sets `GLASSDOCK_HOST_HOME_DIRECTORY` and
+`GLASSDOCK_ENGINE_STATE_DIRECTORY` to `.build/glassdock-dev` and runs the debug
+binary with `--no-docker-context`. Set `GLASSDOCK_DEV_DIR`, `GLASSDOCK_DEV_CPUS`,
+and `GLASSDOCK_DEV_MEMORY_MIB` to change the scratch directory, CPU count, and
+memory. For one-off manual runs, export the two environment variables yourself;
+the conformance harness reads the socket with
+`GLASSDOCK_SOCKET=<socket> make api-compatibility-conformance`.
+
 ## Shared control contract
 
 `GlassDockControl` is the deep module at the control seam. Its small interface

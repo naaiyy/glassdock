@@ -1256,6 +1256,16 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		return api.Container{}, err
 	}
 	keepNetwork = true
+	// Give the container an /etc/resolv.conf so name resolution works inside.
+	// Images rarely ship one and nothing else provides it, so apk/pip/curl
+	// fail with "bad address" without it. Prefer the user's --dns servers,
+	// otherwise reuse the VM's own resolver configuration. Host-network
+	// containers already see the VM's file.
+	if request.Network.Mode != "host" {
+		if err := b.writeResolvConf(ctx, request.ID, metadata.DNS); err != nil {
+			log.Printf("glassdock: write resolv.conf for %s: %v", request.ID, err)
+		}
+	}
 	b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
 	return api.Container{
 		ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata,
@@ -2606,6 +2616,34 @@ func (b *Backend) Changes(ctx context.Context, id string) ([]api.ContainerChange
 	diff := rootfsarchive.Diff(ctx, parentRoot, currentRoot)
 	defer diff.Close()
 	return parseContainerChanges(parentRoot, diff)
+}
+
+// writeResolvConf writes /etc/resolv.conf into the container's root
+// filesystem. Nameservers come from the user's --dns flags when set,
+// otherwise the VM's own resolver configuration is reused.
+func (b *Backend) writeResolvConf(ctx context.Context, id string, dnsServers []string) error {
+	var content []byte
+	if len(dnsServers) > 0 {
+		for _, server := range dnsServers {
+			content = append(content, []byte("nameserver "+server+"\n")...)
+		}
+	} else {
+		var err error
+		content, err = os.ReadFile("/etc/resolv.conf")
+		if err != nil {
+			return fmt.Errorf("read VM resolv.conf: %w", err)
+		}
+	}
+	root, cleanup, err := b.mountContainerRoot(ctx, id, "glassdock-resolv-")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	etc := filepath.Join(root, "etc")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(etc, "resolv.conf"), content, 0o644)
 }
 
 func (b *Backend) mountContainerRoot(ctx context.Context, id, prefix string) (string, func(), error) {

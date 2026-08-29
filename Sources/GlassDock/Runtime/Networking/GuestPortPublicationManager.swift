@@ -289,9 +289,23 @@ actor GuestPortPublicationManager {
                     )
                 )
             }
-            let visible = try await controller.all()
-            for endpoint in realizedEndpoints where !visible.contains(endpoint) {
-                throw GuestPortPublicationError.publicationNotVisible(endpoint.local)
+            var visible = try await controller.all()
+            // Same convergence rule as restore(): a concurrent remover may
+            // have pulled an endpoint between expose and this check.
+            let missingPublish = Set(realizedEndpoints).subtracting(visible)
+                .sorted(by: { $0.local < $1.local })
+            for endpoint in missingPublish {
+                registry.remove(endpoint)
+                try Self.rejectConflict(endpoint, registry: registry)
+                try await controller.expose(endpoint)
+                registry.insert(endpoint)
+                added.append(endpoint)
+            }
+            if !missingPublish.isEmpty {
+                visible = try await controller.all()
+                for endpoint in realizedEndpoints where !visible.contains(endpoint) {
+                    throw GuestPortPublicationError.publicationNotVisible(endpoint.local)
+                }
             }
         } catch {
             for endpoint in added.reversed() { try? await controller.unexpose(endpoint) }
@@ -358,9 +372,27 @@ actor GuestPortPublicationManager {
                 registry.insert(endpoint)
                 added.append(endpoint)
             }
-            let visible = try await controller.all()
-            for endpoint in endpoints where !visible.contains(endpoint) {
-                throw GuestPortPublicationError.publicationNotVisible(endpoint.local)
+            var visible = try await controller.all()
+            // Endpoints can disappear between the registry snapshot above and
+            // this check: a concurrent container-exit handler removes
+            // publications while a restart's start side is restoring them.
+            // Converge by re-exposing instead of failing the operation.
+            let missing = Set(endpoints).subtracting(visible)
+                .sorted(by: { $0.local < $1.local })
+            for endpoint in missing {
+                // Drop this container's own stale registry entry; only a
+                // genuinely foreign endpoint should raise a conflict.
+                registry.remove(endpoint)
+                try Self.rejectConflict(endpoint, registry: registry)
+                try await controller.expose(endpoint)
+                registry.insert(endpoint)
+                added.append(endpoint)
+            }
+            if !missing.isEmpty {
+                visible = try await controller.all()
+                for endpoint in endpoints where !visible.contains(endpoint) {
+                    throw GuestPortPublicationError.publicationNotVisible(endpoint.local)
+                }
             }
         } catch {
             for endpoint in added.reversed() { try? await controller.unexpose(endpoint) }

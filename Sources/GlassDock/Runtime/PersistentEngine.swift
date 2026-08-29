@@ -12,6 +12,10 @@ enum PersistentEngineError: Error, Equatable {
 actor PersistentEngine {
     static let guestPort: UInt32 = 1025
 
+    /// The control-protocol version this host speaks. Must match `Version` in
+    /// `Guest/internal/api/schema.go`; bump both sides together.
+    static let expectedGuestProtocolVersion = "1"
+
     private let machine: any EngineMachineHosting
     private let logger: Logger
     private let guestReadinessTimeout: Duration
@@ -118,6 +122,7 @@ actor PersistentEngine {
                         "guest ping returned an invalid response"
                     )
                 }
+                try await Self.verifyProtocolVersion(candidate)
                 return candidate
             } catch let error as PersistentEngineError {
                 await connection?.close()
@@ -131,6 +136,43 @@ actor PersistentEngine {
             }
         }
         throw PersistentEngineError.guestReadinessTimedOut
+    }
+
+    /// Verifies the guest agent speaks the expected control-protocol version.
+    /// A stale guest agent previously booted silently and then failed at
+    /// runtime with `unknown_method`; this check fails the connection up front
+    /// with a loud, actionable error instead.
+    private static func verifyProtocolVersion(_ connection: GuestConnection) async throws {
+        let response: GuestFrame
+        do {
+            response = try await connection.request(method: "version", payload: .object([:]))
+        } catch {
+            await connection.close()
+            throw PersistentEngineError.invalidMachineSnapshot(
+                """
+                guest agent did not answer the version handshake \
+                (protocol \(Self.expectedGuestProtocolVersion) required): \(error)
+                """
+            )
+        }
+        guard case .object(let fields)? = response.payload,
+            case .string(let protocolVersion)? = fields["protocol"]
+        else {
+            await connection.close()
+            throw PersistentEngineError.invalidMachineSnapshot(
+                "guest version handshake returned no protocol field"
+            )
+        }
+        guard protocolVersion == Self.expectedGuestProtocolVersion else {
+            await connection.close()
+            throw PersistentEngineError.invalidMachineSnapshot(
+                """
+                guest agent protocol mismatch: guest speaks \(protocolVersion), \
+                host requires \(Self.expectedGuestProtocolVersion); \
+                rebuild the guest image (cd Guest && make image)
+                """
+            )
+        }
     }
 
     func invalidateConnection() async {

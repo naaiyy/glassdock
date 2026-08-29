@@ -79,6 +79,7 @@ let package = Package(
                 .product(name: "VaporTesting", package: "vapor"),
                 .product(name: "libzstd", package: "zstd"),
             ],
+            resources: [.process("Fixtures")],
         ),
         .testTarget(
             name: "GlassDockControlTests",

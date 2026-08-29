@@ -1,0 +1,27 @@
+{
+  "networks": [
+    {
+      "attachable": false,
+      "createdAt": "1970-01-01T00:00:00Z",
+      "driver": "bridge",
+      "enableIPv4": true,
+      "enableIPv6": false,
+      "gateway": "10.88.0.1",
+      "id": "bridge",
+      "ingress": false,
+      "internal": false,
+      "ipam": {
+        "config": [
+          {
+            "gateway": "10.88.0.1",
+            "subnet": "10.88.0.0/16"
+          }
+        ],
+        "driver": "default"
+      },
+      "name": "bridge",
+      "scope": "local",
+      "subnet": "10.88.0.0/16"
+    }
+  ]
+}

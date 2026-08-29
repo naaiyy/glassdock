@@ -57,7 +57,9 @@ actor DirectTCPPublishedPortController: PublishedPortControlling {
         }
         let snapshot = try await ready()
         try await synchronize(with: snapshot)
-        if listeners[endpoint] != nil { return }
+        if listeners[endpoint] != nil {
+            return
+        }
         let guestPort = try Self.port(from: endpoint.remote)
         let (host, hostPort) = try Self.hostAndPort(from: endpoint.local)
         let relayAddress = try SocketAddress(unixDomainSocketPath: snapshot.tcpRelaySocket.path)

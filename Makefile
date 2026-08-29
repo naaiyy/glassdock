@@ -48,6 +48,13 @@ build:
 .PHONY: glassdock
 glassdock: build
 
+# Boots an isolated development daemon (sockets and engine state under
+# .build/glassdock-dev) that never touches ~/.glassdock or the production
+# engine state. See scripts/dev-daemon.sh for overrides.
+.PHONY: dev-daemon
+dev-daemon:
+	@bash scripts/dev-daemon.sh $(ARGS)
+
 .PHONY: release
 release: BUILD_CONFIGURATION = release
 release:
