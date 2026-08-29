@@ -414,6 +414,25 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, api.ImageBuildResponse{Image: image})
+	case api.MethodSystemDf:
+		response, err := s.backend.SystemDataUsage(ctx)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, response)
+	case api.MethodBuilderPrune:
+		body, err := decode[api.BuilderPruneRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		response, err := s.backend.PruneBuildCache(ctx, body.All)
+		if err != nil {
+			fail("containerd", err)
+			return
+		}
+		_ = writePayload(w, request.ID, response)
 	case api.MethodNetworkList:
 		items, err := s.backend.Networks(ctx)
 		if err != nil {

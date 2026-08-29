@@ -40,6 +40,57 @@ func TestParseBuildDockerfileExpandsBuildArguments(t *testing.T) {
 	}
 }
 
+func TestParseBuildDockerfilePreservesInstructionOrderAndRunForms(t *testing.T) {
+	plan, err := parseBuildDockerfile([]byte(
+		"FROM alpine\nENV MARKER=ready\nWORKDIR /app\nCOPY source /app/source\nRUN echo $MARKER\nRUN [\"test\", \"-f\", \"/app/source\"]\n",
+	))
+	if err != nil {
+		t.Fatalf("parse Dockerfile: %v", err)
+	}
+	instructions := plan.stages[0].instructions
+	if len(instructions) != 5 {
+		t.Fatalf("instruction count = %d, want 5", len(instructions))
+	}
+	if instructions[0].kind != "change" || instructions[0].change != "ENV MARKER=ready" {
+		t.Fatalf("first instruction = %#v", instructions[0])
+	}
+	if instructions[3].kind != "run" || instructions[3].run.command != "echo ready" || !instructions[3].run.shell {
+		t.Fatalf("shell RUN instruction = %#v", instructions[3])
+	}
+	if instructions[4].kind != "run" || instructions[4].run.shell || len(instructions[4].run.args) != 3 {
+		t.Fatalf("exec-form RUN instruction = %#v", instructions[4])
+	}
+}
+
+func TestSubstituteBuildVariablesPreservesUnknownRuntimeVariables(t *testing.T) {
+	got := substituteBuildVariables("echo $KNOWN $PATH ${UNKNOWN}", map[string]string{"KNOWN": "value"})
+	if got != "echo value $PATH ${UNKNOWN}" {
+		t.Fatalf("substituted command = %q", got)
+	}
+}
+
+func TestMergeEnvironmentOverridesExistingKeys(t *testing.T) {
+	got := mergeEnvironment(
+		[]string{"PATH=/bin", "MARKER=old"},
+		[]string{"MARKER=new", "EXTRA=value"},
+	)
+	want := []string{"PATH=/bin", "MARKER=new", "EXTRA=value"}
+	if !equalStrings(got, want) {
+		t.Fatalf("merged environment = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyBuildEnvironmentExpandsInheritedValues(t *testing.T) {
+	environment := []string{"PATH=/bin", "MARKER=old"}
+	if err := applyBuildEnvironment(&environment, "PATH=$PATH:/app MARKER=$PATH"); err != nil {
+		t.Fatalf("apply build environment: %v", err)
+	}
+	want := []string{"PATH=/bin:/app", "MARKER=/bin:/app"}
+	if !equalStrings(environment, want) {
+		t.Fatalf("build environment = %#v, want %#v", environment, want)
+	}
+}
+
 func TestRewriteBuildArchiveCopiesStageContents(t *testing.T) {
 	archive := buildTestTar(t, map[string]string{
 		"out":         "",

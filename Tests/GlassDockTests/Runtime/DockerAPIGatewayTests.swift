@@ -74,6 +74,63 @@ struct DockerAPIGatewayTests {
         }
     }
 
+    @Test("routes hijacked builder endpoints to the builder relay socket")
+    func builderRouting() async throws {
+        let directory = URL(
+            fileURLWithPath: "/tmp/stgw-\(UUID().uuidString.prefix(8))",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backendPath = directory.appendingPathComponent("backend.sock").path
+        let builderPath = directory.appendingPathComponent("builder.sock").path
+        let publicPath = directory.appendingPathComponent("public.sock").path
+        let backendRecorder = GatewayRequestRecorder()
+        let builderRecorder = GatewayRequestRecorder()
+
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        defer {
+            eventLoopGroup.shutdownGracefully { _ in }
+        }
+
+        func echoServer(path: String, recorder: GatewayRequestRecorder) throws -> Channel {
+            try ServerBootstrap(group: eventLoopGroup)
+                .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+                .childChannelInitializer { channel in
+                    channel.pipeline.addHandler(GatewayEchoHandler(recorder: recorder))
+                }
+                .bind(unixDomainSocketPath: path)
+                .wait()
+        }
+        let backend = try echoServer(path: backendPath, recorder: backendRecorder)
+        let builder = try echoServer(path: builderPath, recorder: builderRecorder)
+
+        let gateway = try DockerAPIGateway(
+            configuration: .init(
+                publicSocketPath: publicPath,
+                backendSocketPath: backendPath,
+                builderSocketPath: builderPath,
+                apiVersion: "1.51"
+            )
+        )
+
+        // Upgrade requests for /session and /grpc (optionally versioned) go to
+        // the builder relay, everything else keeps proxying to the backend.
+        let sessionUpgrade =
+            "POST /session HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+        let grpcUpgrade =
+            "POST /v1.51/grpc HTTP/1.1\r\nHost: docker\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n"
+        let plainGet = "GET /session HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+        #expect(try exchange(path: publicPath, request: sessionUpgrade) == sessionUpgrade)
+        #expect(try exchange(path: publicPath, request: grpcUpgrade) == grpcUpgrade)
+        #expect(try exchange(path: publicPath, request: plainGet) == plainGet)
+        #expect(backendRecorder.snapshot().count == 1)
+        #expect(builderRecorder.snapshot().count == 2)
+        gateway.stop()
+        backend.close(promise: nil)
+        builder.close(promise: nil)
+    }
+
     @Test("stops active proxy connections and removes the public socket")
     func stop() async throws {
         let directory = URL(

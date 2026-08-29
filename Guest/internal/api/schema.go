@@ -19,6 +19,8 @@ const (
 	MethodImageCommit             = "image.commit"
 	MethodImageImport             = "image.import"
 	MethodImageBuild              = "image.build"
+	MethodSystemDf                = "system.df"
+	MethodBuilderPrune            = "builder.prune"
 	MethodContainerList           = "container.list"
 	MethodContainerInspect        = "container.inspect"
 	MethodContainerLogs           = "container.logs"
@@ -611,4 +613,35 @@ type ContainerExitEvent struct {
 type ContainerWaitRequest struct {
 	ID        string `json:"id"`
 	Condition string `json:"condition,omitempty"`
+}
+
+type BuildCacheRecord struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type,omitempty"`
+	Description string    `json:"description,omitempty"`
+	InUse       bool      `json:"inUse"`
+	Shared      bool      `json:"shared"`
+	Size        int64     `json:"size"`
+	CreatedAt   time.Time `json:"createdAt"`
+	LastUsedAt  time.Time `json:"lastUsedAt"`
+	UsageCount  int       `json:"usageCount"`
+}
+
+type SystemDfResponse struct {
+	LayersSize int64              `json:"layersSize"`
+	BuildCache []BuildCacheRecord `json:"buildCache"`
+}
+
+type BuilderPruneRecord struct {
+	ID             string `json:"id"`
+	SpaceReclaimed int64  `json:"spaceReclaimed"`
+}
+
+type BuilderPruneResponse struct {
+	CachesDeleted  []BuilderPruneRecord `json:"cachesDeleted"`
+	SpaceReclaimed int64                `json:"spaceReclaimed"`
+}
+
+type BuilderPruneRequest struct {
+	All bool `json:"all"`
 }

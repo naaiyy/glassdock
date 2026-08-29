@@ -34,12 +34,33 @@ type buildPlan struct {
 }
 
 type buildStage struct {
-	base    string
-	name    string
-	shell   []string
-	changes []string
-	runs    []string
-	copies  []buildCopy
+	base         string
+	name         string
+	shell        []string
+	changes      []string
+	runs         []string
+	copies       []buildCopy
+	instructions []buildInstruction
+}
+
+type buildInstruction struct {
+	change string
+	copy   buildCopy
+	run    buildRun
+	kind   string
+}
+
+type buildRun struct {
+	command string
+	args    []string
+	shell   bool
+}
+
+type buildStageState struct {
+	env   []string
+	cwd   string
+	user  string
+	shell []string
 }
 
 type buildCopy struct {
@@ -94,6 +115,19 @@ func (b *Backend) Build(ctx context.Context, request api.ImageBuildRequest) (api
 		if err != nil {
 			return api.ImageResponse{}, fmt.Errorf("pull build base image %q: %w", stage.base, err)
 		}
+		baseDetails, err := b.Image(ctx, base.Name)
+		if err != nil {
+			return api.ImageResponse{}, fmt.Errorf("inspect build base image %q: %w", stage.base, err)
+		}
+		state := buildStageState{
+			env:   append([]string(nil), baseDetails.Config.Env...),
+			cwd:   baseDetails.Config.WorkingDir,
+			user:  baseDetails.Config.User,
+			shell: append([]string(nil), baseDetails.Config.Shell...),
+		}
+		if len(state.shell) == 0 {
+			state.shell = []string{"/bin/sh", "-c"}
+		}
 		id := fmt.Sprintf("glassdock-build-%d-%d", time.Now().UnixNano(), stageIndex)
 		if _, err := b.Create(ctx, api.ContainerCreateRequest{
 			ID: id, Image: base.Name, Cmd: &keepAlive,
@@ -106,101 +140,75 @@ func (b *Backend) Build(ctx context.Context, request api.ImageBuildRequest) (api
 			stageNames[strings.ToLower(stage.name)] = id
 		}
 
-		contextArchive, err := filterBuildContext(request.Context, dockerfile, stage.copies)
-		if err != nil {
-			return api.ImageResponse{}, err
-		}
-		if len(contextArchive) > 0 {
-			if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
-				ID: id, Path: "/", Data: contextArchive,
-			}); err != nil {
-				return api.ImageResponse{}, fmt.Errorf("apply build context to stage %d: %w", stageIndex, err)
-			}
-		}
-
-		for copyIndex, copyInstruction := range stage.copies {
-			if copyInstruction.from == "" {
-				if copyInstruction.remote {
-					for _, source := range copyInstruction.sources {
-						archiveData, err := downloadBuildSource(ctx, source, copyInstruction.destination)
-						if err != nil {
-							return api.ImageResponse{}, fmt.Errorf("download ADD source %q: %w", source, err)
-						}
-						if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
-							ID: id, Path: "/", Data: archiveData,
-						}); err != nil {
-							return api.ImageResponse{}, fmt.Errorf("apply remote ADD archive: %w", err)
-						}
-					}
-				} else if copyInstruction.add {
-					for _, source := range copyInstruction.sources {
-						data, found, err := readBuildContextFile(request.Context, source)
-						if err != nil {
-							return api.ImageResponse{}, fmt.Errorf("read ADD source %q: %w", source, err)
-						}
-						if !found || !isBuildArchive(data) {
-							continue
-						}
-						extracted, err := rewriteArchiveContents(data, copyInstruction.destination)
-						if err != nil {
-							return api.ImageResponse{}, fmt.Errorf("extract ADD source %q: %w", source, err)
-						}
-						if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
-							ID: id, Path: "/", Data: extracted,
-						}); err != nil {
-							return api.ImageResponse{}, fmt.Errorf("apply ADD archive: %w", err)
-						}
-					}
-				}
-				continue
-			}
-			sourceID, err := resolveBuildStage(
-				ctx, b, copyInstruction.from, stageIndex, stageContainers, stageNames, &cleanupIDs,
-			)
-			if err != nil {
-				return api.ImageResponse{}, fmt.Errorf("resolve COPY --from at stage %d instruction %d: %w", stageIndex, copyIndex, err)
-			}
-			for _, source := range copyInstruction.sources {
-				archiveData, err := archiveBuildPath(ctx, b, sourceID, source)
-				if err != nil {
-					return api.ImageResponse{}, fmt.Errorf("copy %q from stage %d: %w", source, stageIndex, err)
-				}
-				rewritten, err := rewriteBuildArchive(
-					archiveData, source, copyInstruction.destination, len(copyInstruction.sources) > 1,
+		started := false
+		for instructionIndex, instruction := range stage.instructions {
+			switch instruction.kind {
+			case "copy":
+				copyInstruction := instruction.copy
+				copyInstruction.destination = substituteBuildVariables(
+					copyInstruction.destination, buildEnvironmentVariables(state.env),
 				)
-				if err != nil {
-					return api.ImageResponse{}, fmt.Errorf("rewrite COPY --from archive: %w", err)
+				for index, source := range copyInstruction.sources {
+					copyInstruction.sources[index] = substituteBuildVariables(
+						source, buildEnvironmentVariables(state.env),
+					)
 				}
-				if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
-					ID: id, Path: "/", Data: rewritten,
-				}); err != nil {
-					return api.ImageResponse{}, fmt.Errorf("apply COPY --from archive: %w", err)
+				if err := applyBuildCopy(
+					ctx, b, request.Context, dockerfile, id, copyInstruction, state.cwd,
+					stageIndex, stageContainers, stageNames, &cleanupIDs,
+				); err != nil {
+					return api.ImageResponse{}, fmt.Errorf(
+						"apply Dockerfile copy at stage %d instruction %d: %w",
+						stageIndex, instructionIndex, err,
+					)
 				}
-			}
-		}
-
-		if len(stage.runs) > 0 {
-			if _, err := b.Start(ctx, api.ContainerStartRequest{ID: id}); err != nil {
-				return api.ImageResponse{}, fmt.Errorf("start build stage %d: %w", stageIndex, err)
-			}
-			for index, command := range stage.runs {
-				execArgs := append(append([]string(nil), stage.shell...), command)
+			case "change":
+				if err := applyBuildStageChange(ctx, b, id, &state, instruction.change); err != nil {
+					return api.ImageResponse{}, fmt.Errorf(
+						"apply Dockerfile change at stage %d instruction %d: %w",
+						stageIndex, instructionIndex, err,
+					)
+				}
+			case "run":
+				if !started {
+					if _, err := b.Start(ctx, api.ContainerStartRequest{ID: id}); err != nil {
+						return api.ImageResponse{}, fmt.Errorf("start build stage %d: %w", stageIndex, err)
+					}
+					started = true
+				}
+				execArgs := append([]string(nil), instruction.run.args...)
+				environment := buildEnvironmentVariables(state.env)
+				if instruction.run.shell {
+					command := substituteBuildVariables(instruction.run.command, environment)
+					execArgs = append(append([]string(nil), state.shell...), command)
+				} else {
+					for index, argument := range execArgs {
+						execArgs[index] = substituteBuildVariables(argument, environment)
+					}
+				}
 				exitCode, err := b.Exec(ctx, api.ContainerExecRequest{
-					ID: id, ExecID: fmt.Sprintf("%s-run-%d", id, index),
-					Args: execArgs,
+					ID: id, ExecID: fmt.Sprintf("%s-run-%d", id, instructionIndex),
+					Args: execArgs, Env: append([]string(nil), state.env...), Cwd: state.cwd, User: state.user,
 				}, func(string, []byte) error { return nil })
 				if err != nil {
-					return api.ImageResponse{}, fmt.Errorf("run Dockerfile command %q: %w", command, err)
+					return api.ImageResponse{}, fmt.Errorf("run Dockerfile command %q: %w", instruction.run.command, err)
 				}
 				if exitCode != 0 {
-					return api.ImageResponse{}, fmt.Errorf("Dockerfile command %q exited with code %d", command, exitCode)
+					return api.ImageResponse{}, fmt.Errorf(
+						"Dockerfile command %q exited with code %d", instruction.run.command, exitCode,
+					)
 				}
 			}
-			_ = b.Kill(ctx, id, 15)
-			_, _, _ = b.Wait(ctx, id)
+		}
+		if started {
+			if err := b.Kill(ctx, id, 9); err != nil {
+				return api.ImageResponse{}, fmt.Errorf("stop build stage %d: %w", stageIndex, err)
+			}
+			if _, _, err := b.Wait(ctx, id); err != nil {
+				return api.ImageResponse{}, fmt.Errorf("wait for build stage %d: %w", stageIndex, err)
+			}
 		}
 	}
-
 	targets := append([]string(nil), request.Tags...)
 	if len(targets) == 0 {
 		targets = []string{"glassdock/build:latest"}
@@ -222,6 +230,197 @@ func (b *Backend) Build(ctx context.Context, request api.ImageBuildRequest) (api
 		}
 	}
 	return image, nil
+}
+
+func applyBuildStageChange(
+	ctx context.Context, b *Backend, id string, state *buildStageState, raw string,
+) error {
+	parts := strings.SplitN(strings.TrimSpace(raw), " ", 2)
+	if len(parts) != 2 {
+		return errors.New("Dockerfile change requires a value")
+	}
+	instruction := strings.ToUpper(parts[0])
+	argument := strings.TrimSpace(parts[1])
+	switch instruction {
+	case "ENV":
+		return applyBuildEnvironment(&state.env, argument)
+	case "USER":
+		if argument == "" {
+			return errors.New("USER requires a value")
+		}
+		argument = substituteBuildVariables(argument, buildEnvironmentVariables(state.env))
+		state.user = argument
+		return nil
+	case "WORKDIR":
+		if argument == "" {
+			return errors.New("WORKDIR requires a value")
+		}
+		argument = substituteBuildVariables(argument, buildEnvironmentVariables(state.env))
+		state.cwd = resolveBuildPath(state.cwd, argument)
+		return ensureBuildDirectory(ctx, b, id, state.cwd)
+	case "SHELL":
+		var shell []string
+		if err := json.Unmarshal([]byte(argument), &shell); err != nil || len(shell) == 0 {
+			return errors.New("SHELL requires a non-empty JSON array")
+		}
+		state.shell = shell
+		return nil
+	default:
+		// CMD, ENTRYPOINT, LABEL, EXPOSE, VOLUME, STOPSIGNAL, and HEALTHCHECK
+		// affect the image configuration at commit time, but not the process
+		// that executes a preceding or following RUN instruction.
+		return nil
+	}
+}
+
+func buildEnvironmentVariables(environment []string) map[string]string {
+	variables := make(map[string]string, len(environment))
+	for _, value := range environment {
+		key, replacement, ok := strings.Cut(value, "=")
+		if ok && key != "" {
+			variables[key] = replacement
+		}
+	}
+	return variables
+}
+
+func applyBuildEnvironment(environment *[]string, argument string) error {
+	assignments, err := commitAssignments(argument, "ENV")
+	if err != nil {
+		return err
+	}
+	variables := buildEnvironmentVariables(*environment)
+	for _, assignment := range assignments {
+		key, value, _ := strings.Cut(assignment, "=")
+		value = substituteBuildVariables(value, variables)
+		assignment = key + "=" + value
+		if err := applyCommitEnvironment(environment, assignment); err != nil {
+			return err
+		}
+		variables[key] = value
+	}
+	return nil
+}
+
+func applyBuildCopy(
+	ctx context.Context,
+	b *Backend,
+	contextData []byte,
+	dockerfile string,
+	id string,
+	copyInstruction buildCopy,
+	cwd string,
+	stageIndex int,
+	stageContainers []string,
+	stageNames map[string]string,
+	cleanupIDs *[]string,
+) error {
+	copyInstruction.destination = resolveBuildPath(cwd, copyInstruction.destination)
+	if copyInstruction.from == "" {
+		if copyInstruction.remote {
+			for _, source := range copyInstruction.sources {
+				archiveData, err := downloadBuildSource(ctx, source, copyInstruction.destination)
+				if err != nil {
+					return fmt.Errorf("download ADD source %q: %w", source, err)
+				}
+				if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
+					ID: id, Path: "/", Data: archiveData,
+				}); err != nil {
+					return fmt.Errorf("apply remote ADD archive: %w", err)
+				}
+			}
+			return nil
+		}
+		if copyInstruction.add {
+			for _, source := range copyInstruction.sources {
+				data, found, err := readBuildContextFile(contextData, source)
+				if err != nil {
+					return fmt.Errorf("read ADD source %q: %w", source, err)
+				}
+				if !found || !isBuildArchive(data) {
+					continue
+				}
+				extracted, err := rewriteArchiveContents(data, copyInstruction.destination)
+				if err != nil {
+					return fmt.Errorf("extract ADD source %q: %w", source, err)
+				}
+				if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
+					ID: id, Path: "/", Data: extracted,
+				}); err != nil {
+					return fmt.Errorf("apply ADD archive: %w", err)
+				}
+			}
+			// Non-archive ADD uses the same context path rules as COPY.
+		}
+		contextArchive, err := filterBuildContext(
+			contextData, dockerfile, []buildCopy{copyInstruction},
+		)
+		if err != nil {
+			return err
+		}
+		if len(contextArchive) == 0 {
+			return nil
+		}
+		if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
+			ID: id, Path: "/", Data: contextArchive,
+		}); err != nil {
+			return fmt.Errorf("apply build context archive: %w", err)
+		}
+		return nil
+	}
+
+	sourceID, err := resolveBuildStage(
+		ctx, b, copyInstruction.from, stageIndex, stageContainers, stageNames, cleanupIDs,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve source stage %q: %w", copyInstruction.from, err)
+	}
+	for _, source := range copyInstruction.sources {
+		archiveData, err := archiveBuildPath(ctx, b, sourceID, source)
+		if err != nil {
+			return fmt.Errorf("archive source %q: %w", source, err)
+		}
+		rewritten, err := rewriteBuildArchive(
+			archiveData, source, copyInstruction.destination, len(copyInstruction.sources) > 1,
+		)
+		if err != nil {
+			return fmt.Errorf("rewrite source archive: %w", err)
+		}
+		if err := b.PutArchive(ctx, api.ContainerArchivePutRequest{
+			ID: id, Path: "/", Data: rewritten,
+		}); err != nil {
+			return fmt.Errorf("apply source archive: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureBuildDirectory(ctx context.Context, b *Backend, id, directory string) error {
+	directory = path.Clean(directory)
+	if directory == "." || directory == "/" || directory == "" {
+		return nil
+	}
+	name := strings.TrimPrefix(cleanBuildPath(directory), "/") + "/"
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Typeflag: tar.TypeDir}); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return b.PutArchive(ctx, api.ContainerArchivePutRequest{ID: id, Path: "/", Data: archive.Bytes()})
+}
+
+func resolveBuildPath(cwd, value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "/") {
+		return path.Clean(value)
+	}
+	if cwd == "" {
+		cwd = "/"
+	}
+	return path.Clean(path.Join(cwd, value))
 }
 
 func readBuildFile(contextData []byte, name string) ([]byte, error) {
@@ -320,7 +519,15 @@ func parseBuildDockerfileWithArgs(data []byte, buildArgs map[string]string) (bui
 			if argument == "" {
 				return buildPlan{}, errors.New("RUN requires a command")
 			}
+			run := buildRun{command: argument, shell: true}
+			if strings.HasPrefix(strings.TrimSpace(argument), "[") {
+				if err := json.Unmarshal([]byte(argument), &run.args); err != nil || len(run.args) == 0 {
+					return buildPlan{}, errors.New("RUN exec form requires a non-empty JSON string array")
+				}
+				run.shell = false
+			}
 			current.runs = append(current.runs, argument)
+			current.instructions = append(current.instructions, buildInstruction{kind: "run", run: run})
 			if len(plan.stages) == 1 {
 				plan.runs = append(plan.runs, argument)
 			}
@@ -331,7 +538,20 @@ func parseBuildDockerfileWithArgs(data []byte, buildArgs map[string]string) (bui
 			if argument == "" {
 				return buildPlan{}, fmt.Errorf("%s requires a value", instruction)
 			}
+			if instruction == "ENV" {
+				assignments, err := commitAssignments(argument, "ENV")
+				if err != nil {
+					return buildPlan{}, err
+				}
+				for _, assignment := range assignments {
+					key, value, _ := strings.Cut(assignment, "=")
+					variables[key] = value
+				}
+			}
 			current.changes = append(current.changes, instruction+" "+argument)
+			current.instructions = append(current.instructions, buildInstruction{
+				kind: "change", change: instruction + " " + argument,
+			})
 			if len(plan.stages) == 1 {
 				plan.changes = append(plan.changes, instruction+" "+argument)
 			}
@@ -344,6 +564,9 @@ func parseBuildDockerfileWithArgs(data []byte, buildArgs map[string]string) (bui
 				return buildPlan{}, errors.New("Dockerfile instruction appears before FROM")
 			}
 			current.copies = append(current.copies, copyInstruction)
+			current.instructions = append(current.instructions, buildInstruction{
+				kind: "copy", copy: copyInstruction,
+			})
 			if len(plan.stages) == 1 {
 				plan.copies = append(plan.copies, copyInstruction)
 			}
@@ -486,7 +709,19 @@ func substituteBuildVariables(value string, variables map[string]string) string 
 			continue
 		}
 		name := value[start:end]
-		output.WriteString(variables[name])
+		replacement, found := variables[name]
+		if !found {
+			output.WriteString(value[index:end])
+			if braced {
+				output.WriteByte('}')
+			}
+			index = end
+			if braced {
+				index++
+			}
+			continue
+		}
+		output.WriteString(replacement)
 		index = end
 		if braced {
 			index++

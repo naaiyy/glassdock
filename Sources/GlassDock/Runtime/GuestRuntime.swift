@@ -541,7 +541,7 @@ struct GuestImageImportPayload: Decodable {
 }
 
 struct GuestImageBuildPayload: Decodable {
-    let image: GuestImageDetailPayload
+    let image: GuestImagePayload
 }
 
 struct GuestExitPayload: Decodable {
@@ -919,7 +919,8 @@ actor GuestRemovalGate {
 /// snapshots, and lifecycle state.
 actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     DockerRuntimeImageImportBackend, DockerRuntimeImagePruneBackend,
-    DockerRuntimeImageBuildOptionsBackend, DockerRuntimeInteractiveBackend
+    DockerRuntimeImageBuildOptionsBackend, DockerRuntimeInteractiveBackend,
+    DockerRuntimeBuildCacheBackend
 {
     private struct Metadata: Sendable {
         var name: String
@@ -1147,7 +1148,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             data: context
         )
         let result: GuestImageBuildPayload = try decode(response)
-        return Self.dockerImage(result.image)
+        return DockerRuntimeImage(reference: result.image.name, digest: result.image.digest)
     }
 
     func commitImage(

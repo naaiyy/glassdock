@@ -10,6 +10,7 @@ typedef struct glassdock_ping_gateway glassdock_ping_gateway_t;
 typedef struct {
     const char *public_socket_path;
     const char *backend_socket_path;
+    const char *builder_socket_path;
     const char *api_version;
     const char *builder_version;
     bool experimental;

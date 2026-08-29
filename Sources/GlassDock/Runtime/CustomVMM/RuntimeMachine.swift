@@ -84,6 +84,28 @@ struct RuntimeMachineReady: Sendable, Equatable {
     let hostGatewayIPv4: String
     let gvproxyAPI: URL
     let tcpRelaySocket: URL
+    let builderSocket: URL
+
+    init(
+        generation: UUID,
+        processIdentifier: Int32,
+        guestIPv4: String,
+        hostGatewayIPv4: String,
+        gvproxyAPI: URL,
+        tcpRelaySocket: URL,
+        builderSocket: URL? = nil
+    ) {
+        self.generation = generation
+        self.processIdentifier = processIdentifier
+        self.guestIPv4 = guestIPv4
+        self.hostGatewayIPv4 = hostGatewayIPv4
+        self.gvproxyAPI = gvproxyAPI
+        self.tcpRelaySocket = tcpRelaySocket
+        self.builderSocket =
+            builderSocket
+            ?? tcpRelaySocket.deletingLastPathComponent()
+            .appendingPathComponent("1027.sock")
+    }
 }
 
 private struct RuntimeMachineNetworkState: Decodable {
@@ -300,7 +322,8 @@ actor RuntimeMachine: EngineMachineHosting {
                     guestIPv4: String(guestIPv4),
                     hostGatewayIPv4: networkState.gateway,
                     gvproxyAPI: runtimeDirectory.appendingPathComponent("network/a.sock"),
-                    tcpRelaySocket: runtimeDirectory.appendingPathComponent("vsock/1026.sock")
+                    tcpRelaySocket: runtimeDirectory.appendingPathComponent("vsock/1026.sock"),
+                    builderSocket: runtimeDirectory.appendingPathComponent("vsock/1027.sock")
                 ),
                 runtimeDirectory: runtimeDirectory,
                 process: process
