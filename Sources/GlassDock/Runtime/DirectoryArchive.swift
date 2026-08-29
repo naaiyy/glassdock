@@ -2,10 +2,9 @@ import Foundation
 
 /// Builds an in-memory ustar archive containing directory entries.
 ///
-/// Glass Dock currently materializes image `VOLUME` declarations through a
-/// create-time archive fallback. Native volume handling is still separate
-/// work, and this fallback does not repair unrelated lower-layer filesystem
-/// issues.
+/// Glass Dock materializes image `VOLUME` declarations through a create-time
+/// archive fallback. The guest runtime separately repairs image-layer
+/// directory copy-up where the guest overlayfs needs it.
 enum DirectoryArchive {
     /// Writes a POSIX ustar archive whose members are the given absolute
     /// directory paths (mode 0755), sorted and de-duplicated, including every

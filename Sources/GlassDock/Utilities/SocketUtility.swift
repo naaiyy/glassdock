@@ -17,6 +17,10 @@ func backendSocketPath(homeDirectory: String) -> String {
     "\(socketDirectory(homeDirectory: homeDirectory))/daemon.sock"
 }
 
+func builderRelaySocketPath(homeDirectory: String) -> String {
+    "\(socketDirectory(homeDirectory: homeDirectory))/builder.sock"
+}
+
 public func prepareUnixSocket(for app: Application, homeDirectory: String? = nil) throws {
     guard let homeDir = homeDirectory else {
         throw UnixSocketError.missingHomeDirectory
@@ -25,10 +29,11 @@ public func prepareUnixSocket(for app: Application, homeDirectory: String? = nil
     let socketDirectory = socketDirectory(homeDirectory: homeDir)
     let publicSocketPath = containerSocketPath(homeDirectory: homeDir)
     let privateSocketPath = backendSocketPath(homeDirectory: homeDir)
+    let builderRelayPath = builderRelaySocketPath(homeDirectory: homeDir)
 
     try restrictDirectoryToOwner(at: socketDirectory)
 
-    for path in [publicSocketPath, privateSocketPath]
+    for path in [publicSocketPath, privateSocketPath, builderRelayPath]
     where FileManager.default.fileExists(atPath: path) {
         try FileManager.default.removeItem(atPath: path)
     }

@@ -1,49 +1,44 @@
-# Known issue: ENOENT from `mkdir()` into lower-layer directories
+# Resolved: ENOENT from `mkdir()` into lower-layer directories
 
-**Status:** open on current dev guest builds; not present in production 1.3.1.
+**Status:** fixed in the current development guest.
 
 ## Symptom
 
-Processes that call `mkdir()` directly at startup fail with `ENOENT` even
-though the parent directory exists. The official nginx image aborts:
+Some guest overlayfs mounts need an image directory inode to be copied into
+the writable upper layer before a process creates a child. Without that
+copy-up, the official nginx image aborts:
 
 ```
 [emerg] 1#1: mkdir() "/var/cache/nginx/client_temp" failed (2: No such file or directory)
 ```
 
-`ls /var/cache/nginx` inside the same container shows the directory, and
-busybox `mkdir` of the same path succeeds when run first.
+`ls /var/cache/nginx` can show the directory even though the first nested
+create returns `ENOENT`.
 
 ## Characteristics
 
-- Whoever performs the *first* create decides the outcome: shell-first
-  succeeds; nginx-first fails, and subsequent shell `mkdir`s for that path
-  keep failing too.
-- `touch`/`mkdir` under other lower-layer directories works in fresh
-  containers.
-- The kernel is identical between production and dev (`glassdock-vmlinux`
-  digests match); the difference is rootfs userspace (guest agent and
-  containerd dependency set in `Guest/go.mod`).
+- The failure affects empty image directories that need runtime children.
+- A directory copy-up before the first child create makes both shell and
+  native application creates succeed.
+- The kernel is unchanged. The repair is in the guest backend's container
+  creation path.
 
-## Suspected area
+## Fix
 
-Guest overlayfs copy-up during directory creation — possibly influenced by
-the newer containerd/dependency versions in the current build.
+`Guest/internal/backend/image_directories.go` reads the final directory set
+from the image layers. During container creation it repairs missing image
+directories and forces empty lower-layer directories into the writable upper
+layer with a temporary marker file that is removed immediately. The image
+contents remain unchanged.
 
-## Reproduction
+## Coverage
 
-```sh
-cd Guest && make image   # current main
-# boot a dev daemon with the fresh rootfs, then:
-docker -H <dev-socket> run --rm nginx:alpine sh -c "nginx -t"
-# → mkdir() "/var/cache/nginx/client_temp" failed (2: No such file or directory)
+`scripts/verify-dockerfile-build.sh` now checks all of the following against a
+fresh isolated daemon and a real Docker client:
 
-docker -H <dev-socket> run --rm --entrypoint sh nginx:alpine \
-    -c "mkdir -p /var/cache/nginx/client_temp && exec nginx -t"
-# → succeeds; production 1.3.1 succeeds without the workaround
-```
+- `/var/cache/nginx` exists after container creation.
+- A shell can create `/var/cache/nginx/client_temp`.
+- An unmodified `nginx:alpine` container stays running.
 
-## Workaround
-
-Pre-create the leaf directories from a shell entrypoint before the real
-binary runs. `scripts/verify-port-publishing.sh` does this for nginx.
+The port-publishing harness uses the normal nginx entrypoint. It no longer
+pre-creates nginx directories.

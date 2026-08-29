@@ -26,7 +26,7 @@ enum DockerPing {
         let response = Response(status: .ok)
         if includeBody { response.body = .init(string: "OK") }
         response.headers.add(name: "Api-Version", value: apiVersion)
-        response.headers.add(name: "Builder-Version", value: "")
+        response.headers.add(name: "Builder-Version", value: "2")
         response.headers.add(name: "Docker-Experimental", value: "false")
         response.headers.add(name: "Cache-Control", value: "no-cache, no-store, must-revalidate")
         response.headers.add(name: "Pragma", value: "no-cache")

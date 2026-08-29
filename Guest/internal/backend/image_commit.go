@@ -14,6 +14,7 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	registryreference "github.com/distribution/reference"
 	"github.com/containerd/containerd/v2/core/content"
 	containerimages "github.com/containerd/containerd/v2/core/images"
 	rootfsarchive "github.com/containerd/containerd/v2/pkg/archive"
@@ -144,6 +145,10 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 		return api.ImageResponse{}, fmt.Errorf("store container diff: %w", err)
 	}
 
+	if request.Author != "" {
+		imageConfig.Author = request.Author
+	}
+
 	now := time.Now().UTC()
 	imageConfig.Created = &now
 	imageConfig.RootFS.Type = "layers"
@@ -197,12 +202,21 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 		Digest:    digest.FromBytes(manifestData),
 		Size:      int64(len(manifestData)),
 	}
+	// Label the manifest with gc references so containerd's GC keeps the
+	// config and layer blobs alive once the commit lease is released.
+	gcRefs := map[string]string{
+		"containerd.io/gc.ref.content.config": newConfigDescriptor.Digest.String(),
+	}
+	for i, layer := range manifest.Layers {
+		gcRefs[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = layer.Digest.String()
+	}
 	if err := content.WriteBlob(
 		ctx,
 		b.client.ContentStore(),
 		fmt.Sprintf("glassdock-commit-manifest-%s", manifestDescriptor.Digest.Encoded()),
 		bytes.NewReader(manifestData),
 		manifestDescriptor,
+		content.WithLabels(gcRefs),
 	); err != nil {
 		return api.ImageResponse{}, fmt.Errorf("store committed image manifest: %w", err)
 	}
@@ -278,11 +292,17 @@ func commitManifestMediaType(mediaType string) string {
 
 func commitImageName(request api.ImageCommitRequest, digest digest.Digest) string {
 	if request.Repository != "" {
+		// The host may hand over a fully-qualified reference that already
+		// carries a tag; strip it so the requested tag can be applied cleanly.
+		repository := request.Repository
+		if parsed, err := registryreference.ParseDockerRef(repository); err == nil {
+			repository = parsed.Name()
+		}
 		tag := request.Tag
 		if tag == "" {
 			tag = "latest"
 		}
-		return request.Repository + ":" + tag
+		return repository + ":" + tag
 	}
 	return "glassdock/commit:" + digest.Encoded()
 }

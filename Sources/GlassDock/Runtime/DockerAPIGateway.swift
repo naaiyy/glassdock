@@ -4,6 +4,7 @@ import Foundation
 struct DockerAPIGatewayConfiguration: Sendable {
     let publicSocketPath: String
     let backendSocketPath: String
+    var builderSocketPath: String? = nil
     let apiVersion: String
     var builderVersion = ""
     var experimental = false
@@ -28,24 +29,28 @@ final class DockerAPIGateway: @unchecked Sendable {
 
     init(configuration: DockerAPIGatewayConfiguration) throws {
         var error = [CChar](repeating: 0, count: 512)
+        let builderSocketPath = configuration.builderSocketPath ?? ""
         let started: OpaquePointer? = configuration.publicSocketPath.withCString { publicPath in
             configuration.backendSocketPath.withCString { backendPath in
-                configuration.apiVersion.withCString { apiVersion in
-                    configuration.builderVersion.withCString { builderVersion in
-                        var cConfiguration = glassdock_ping_gateway_config_t(
-                            public_socket_path: publicPath,
-                            backend_socket_path: backendPath,
-                            api_version: apiVersion,
-                            builder_version: builderVersion,
-                            experimental: configuration.experimental,
-                            max_connections: configuration.maxConnections,
-                            header_timeout_milliseconds: configuration.headerTimeoutMilliseconds
-                        )
-                        return glassdock_ping_gateway_start(
-                            &cConfiguration,
-                            &error,
-                            error.count
-                        )
+                builderSocketPath.withCString { relayPath in
+                    configuration.apiVersion.withCString { apiVersion in
+                        configuration.builderVersion.withCString { builderVersion in
+                            var cConfiguration = glassdock_ping_gateway_config_t(
+                                public_socket_path: publicPath,
+                                backend_socket_path: backendPath,
+                                builder_socket_path: relayPath,
+                                api_version: apiVersion,
+                                builder_version: builderVersion,
+                                experimental: configuration.experimental,
+                                max_connections: configuration.maxConnections,
+                                header_timeout_milliseconds: configuration.headerTimeoutMilliseconds
+                            )
+                            return glassdock_ping_gateway_start(
+                                &cConfiguration,
+                                &error,
+                                error.count
+                            )
+                        }
                     }
                 }
             }

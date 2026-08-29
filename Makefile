@@ -93,6 +93,7 @@ help:
 	@echo "  benchmark        - Run the configured runtime benchmark matrix"
 	@echo "  api-compatibility-check - Validate the pinned Moby v28.5.2 matrix and registered route coverage"
 	@echo "  api-compatibility-test  - Test compatibility validation scripts"
+	@echo "  api-compatibility-build - Verify classic Dockerfile builds through the live Docker API"
 	@echo "  api-compatibility-conformance - Probe a running Glass Dock socket against the matrix"
 	@echo "  fmt              - Format source code"
 	@echo "  clean            - Clean build artifacts"
@@ -182,6 +183,10 @@ api-compatibility-check:
 api-compatibility-test:
 	@ruby scripts/tests/compatibility-matrix-test.rb
 
+.PHONY: api-compatibility-build
+api-compatibility-build:
+	@bash scripts/verify-dockerfile-build.sh
+
 .PHONY: api-compatibility-conformance
 api-compatibility-conformance:
 	@test -n "$(GLASSDOCK_SOCKET)" || (echo "Set GLASSDOCK_SOCKET to a running Glass Dock Unix socket" >&2; exit 1)
@@ -243,7 +248,7 @@ release-tools-test:
 
 .PHONY: shellcheck
 shellcheck:
-	@shellcheck scripts/benchmark-tools.sh scripts/release/*.sh scripts/tests/benchmark-tools-test.sh scripts/tests/release-tools-test.sh \
+	@shellcheck scripts/benchmark-tools.sh scripts/verify-dockerfile-build.sh scripts/release/*.sh scripts/tests/benchmark-tools-test.sh scripts/tests/release-tools-test.sh \
 		pkginstaller/tests/*.sh VMM/scripts/*.sh
 	@shellcheck -x Guest/scripts/*.sh
 	@shellcheck -s bash pkginstaller/Resources/glassdock.in \

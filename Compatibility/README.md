@@ -26,7 +26,41 @@ Rules:
 - A state may only change when a unit test or live conformance probe proves the new state.
 - `partial` notes must name the concrete limitation, not vague language.
 
-Current distribution: 62 full, 4 partial, 41 error-only.
+Current distribution: 66 full, 0 partial, 41 error-only.
+
+## Product scope
+
+Glass Dock is a local, single-node Docker-compatible runtime for macOS on
+Apple Silicon. The compatibility target is ordinary application workflows:
+containers, images, networks, volumes, logs, exec, published ports, and
+Dockerfile or BuildKit builds. Clients and Dockerfiles in that scope should not
+need a migration.
+
+The 41 `error-only` operations are intentional. They cover Swarm management,
+Swarm objects, Docker plugin lifecycle, and the Swarm-only volume update route.
+Glass Dock does not run a Swarm scheduler or host Docker plugins, so these
+routes return the same unavailable or not-found errors that Docker returns when
+those capabilities are absent. This is API compatibility for an out-of-scope
+feature, not an implementation of that feature.
+
+`POST /build` is `full` for the declared ordinary Dockerfile workflow. The live
+build harness covers ordered `ENV`, `WORKDIR`, `COPY`, and `RUN` instructions,
+build arguments, JSON-form `RUN`, `SHELL`, multi-stage `COPY --from`, local
+archive `ADD`, `.dockerignore`, labels, `CMD`, and healthchecks. BuildKit
+clients use the full `/session` and `/grpc` relays. Run the classic-build
+coverage with:
+
+```sh
+make api-compatibility-build
+```
+
+This state does not claim support for every Docker product or every exotic
+Dockerfile extension. It defines full support for the regular project workflow
+that Glass Dock targets.
+
+The matrix therefore measures Docker API behavior within Glass Dock's product
+scope. It does not claim that Glass Dock implements every Docker product,
+including Swarm and plugins.
 
 ## Live conformance
 
