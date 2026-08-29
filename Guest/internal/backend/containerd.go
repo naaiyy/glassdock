@@ -1161,6 +1161,9 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if request.ReadonlyRootfs {
 		specOpts = append(specOpts, oci.WithRootFSReadonly())
 	}
+	if privilegedOpt := privilegedSpecOpt(request.Privileged); privilegedOpt != nil {
+		specOpts = append(specOpts, privilegedOpt)
+	}
 	if resourceOpt := initialResourceOpt(request.Resources); resourceOpt != nil {
 		specOpts = append(specOpts, resourceOpt)
 	}
@@ -1230,6 +1233,7 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	metadata.AutoRemove = metadata.AutoRemove || request.AutoRemove
 	metadata.Mounts = append([]api.Mount(nil), request.Mounts...)
 	metadata.ReadonlyRootfs = request.ReadonlyRootfs
+	metadata.Privileged = request.Privileged
 	metadata.DNS = append([]string(nil), request.DNS...)
 	metadata.DNSSearch = append([]string(nil), request.DNSSearch...)
 	metadata.ExtraHosts = append([]string(nil), request.ExtraHosts...)
@@ -1418,6 +1422,13 @@ func initialResourceOpt(request api.Resources) oci.SpecOpts {
 		}
 		return nil
 	}
+}
+
+func privilegedSpecOpt(privileged bool) oci.SpecOpts {
+	if !privileged {
+		return nil
+	}
+	return oci.WithAllKnownCapabilities
 }
 
 func (b *Backend) persistRunningState(ctx context.Context, container containerd.Container, published []api.PublishedPort) error {

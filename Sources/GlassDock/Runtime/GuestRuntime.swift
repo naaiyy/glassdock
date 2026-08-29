@@ -155,6 +155,7 @@ struct GuestContainerMetadata: Decodable {
     let stopTimeout: Int?
     let mounts: [DockerRuntimeMount]?
     let readonlyRootfs: Bool?
+    let privileged: Bool?
     let dns: [String]?
     let dnsSearch: [String]?
     let extraHosts: [String]?
@@ -940,6 +941,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         let stopTimeout: Int?
         let mounts: [DockerRuntimeMount]
         let readonlyRootfs: Bool
+        let privileged: Bool
         let dns: [String]
         let dnsSearch: [String]
         let extraHosts: [String]
@@ -1216,6 +1218,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "labels": .object(request.labels.mapValues(JSONValue.string)),
             "hostname": request.hostname.map(JSONValue.string) ?? .string(id.prefix(12).description),
             "readonlyRootfs": .bool(request.readonlyRootfs),
+            "privileged": .bool(request.privileged),
             "attachStdin": .bool(request.attachStdin),
             "openStdin": .bool(request.openStdin),
             "stdinOnce": .bool(request.stdinOnce),
@@ -1259,6 +1262,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     }
                 ),
                 "readonlyRootfs": .bool(request.readonlyRootfs),
+                "privileged": .bool(request.privileged),
                 "dns": .array(request.dns.map(JSONValue.string)),
                 "dnsSearch": .array(request.dnsSearch.map(JSONValue.string)),
                 "extraHosts": .array(request.extraHosts.map(JSONValue.string)),
@@ -1317,6 +1321,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stopTimeout: request.stopTimeout,
             mounts: request.mounts,
             readonlyRootfs: request.readonlyRootfs,
+            privileged: request.privileged,
             dns: request.dns,
             dnsSearch: request.dnsSearch,
             extraHosts: request.extraHosts,
@@ -2440,6 +2445,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stdinOnce: meta?.stdinOnce ?? guest.metadata?.stdinOnce ?? false,
             mounts: meta?.mounts ?? guest.metadata?.mounts ?? [],
             readonlyRootfs: meta?.readonlyRootfs ?? guest.metadata?.readonlyRootfs ?? false,
+            privileged: meta?.privileged ?? guest.metadata?.privileged ?? false,
             dns: meta?.dns ?? guest.metadata?.dns ?? [],
             dnsSearch: meta?.dnsSearch ?? guest.metadata?.dnsSearch ?? [],
             extraHosts: meta?.extraHosts ?? guest.metadata?.extraHosts ?? []
@@ -2503,6 +2509,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stopTimeout: stored.stopTimeout,
             mounts: stored.mounts ?? [],
             readonlyRootfs: stored.readonlyRootfs ?? false,
+            privileged: stored.privileged ?? false,
             dns: stored.dns ?? [],
             dnsSearch: stored.dnsSearch ?? [],
             extraHosts: stored.extraHosts ?? [],
@@ -2547,6 +2554,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             workingDirectory: meta.workingDirectory, user: meta.user, hostname: meta.hostname,
             attachStdin: meta.attachStdin, openStdin: meta.openStdin, stdinOnce: meta.stdinOnce,
             mounts: meta.mounts, readonlyRootfs: meta.readonlyRootfs,
+            privileged: meta.privileged,
             dns: meta.dns, dnsSearch: meta.dnsSearch, extraHosts: meta.extraHosts
         )
     }

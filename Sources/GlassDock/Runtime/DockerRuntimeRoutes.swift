@@ -743,6 +743,7 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
     let stdinOnce: Bool
     let networkMode: String
     let readonlyRootfs: Bool
+    let privileged: Bool
     let healthcheck: DockerRuntimeHealthcheck?
     let restartPolicy: DockerRuntimeRestartPolicy
     let restartCount: Int
@@ -758,7 +759,7 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
         labels: [String: String], tty: Bool, autoRemove: Bool, stopTimeout: Int?,
         mounts: [DockerRuntimeMount], ports: [DockerRuntimePortBinding],
         attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
-        networkMode: String = "default", readonlyRootfs: Bool = false,
+        networkMode: String = "default", readonlyRootfs: Bool = false, privileged: Bool = false,
         healthcheck: DockerRuntimeHealthcheck? = nil,
         restartPolicy: DockerRuntimeRestartPolicy = .init(),
         restartCount: Int = 0, resources: DockerRuntimeResources = .init(), stopSignal: String? = nil,
@@ -784,6 +785,7 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
         self.stdinOnce = stdinOnce
         self.networkMode = networkMode
         self.readonlyRootfs = readonlyRootfs
+        self.privileged = privileged
         self.healthcheck = healthcheck
         self.restartPolicy = restartPolicy
         self.restartCount = restartCount
@@ -828,6 +830,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let stdinOnce: Bool
     let mounts: [DockerRuntimeMount]
     let readonlyRootfs: Bool
+    let privileged: Bool
     let dns: [String]
     let dnsSearch: [String]
     let extraHosts: [String]
@@ -855,7 +858,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         entrypoint: [String]? = nil, cmd: [String]? = nil, environment: [String] = [],
         workingDirectory: String = "", user: String = "", hostname: String = "",
         attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
-        mounts: [DockerRuntimeMount] = [], readonlyRootfs: Bool = false,
+        mounts: [DockerRuntimeMount] = [], readonlyRootfs: Bool = false, privileged: Bool = false,
         dns: [String] = [], dnsSearch: [String] = [], extraHosts: [String] = []
     ) {
         self.id = id
@@ -890,6 +893,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         self.stdinOnce = stdinOnce
         self.mounts = mounts
         self.readonlyRootfs = readonlyRootfs
+        self.privileged = privileged
         self.dns = dns
         self.dnsSearch = dnsSearch
         self.extraHosts = extraHosts
@@ -1194,6 +1198,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
             let result = try await call { try await cacheBackend.pruneBuildCache(all: true) }
+            await broadcastBuilderPrune(req, reclaimed: result.spaceReclaimed ?? 0)
             return try jsonResponse(
                 .ok,
                 BuildCachePruneResponse(
@@ -1202,7 +1207,18 @@ struct DockerRuntimeRoutes: RouteCollection {
                 )
             )
         }
+        await broadcastBuilderPrune(req, reclaimed: 0)
         return try jsonResponse(.ok, BuildCachePruneResponse(CachesDeleted: [], SpaceReclaimed: 0))
+    }
+
+    private func broadcastBuilderPrune(_ req: Request, reclaimed: Int64) async {
+        guard let broadcaster = req.application.storage[EventBroadcasterKey.self] else { return }
+        await broadcaster.broadcast(
+            DockerEvent.make(
+                type: "builder", action: "prune", actorID: "",
+                attributes: ["reclaimed": String(reclaimed)]
+            )
+        )
     }
 
     private func pullImage(_ req: Request) async throws -> Response {
@@ -1415,10 +1431,10 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func listImages(_ req: Request) async throws -> Response {
-        let filters = try Self.imageFilters(req.query[String.self, at: "filters"])
-        try Self.validateImageFilters(filters)
+        let filters = try ImageListFilter.parse(req.query[String.self, at: "filters"])
+        try ImageListFilter.validate(filters)
         let images = try await call { try await backend.listImages() }
-        let filtered = try Self.applyImageFilters(images, filters: filters)
+        let filtered = try ImageListFilter.apply(images, filters: filters)
         let containers = try await call { try await backend.listContainers(showAll: true) }
         let includeSharedSize = Self.mobyBool(req.query[String.self, at: "shared-size"])
         let includeDigests = Self.mobyBool(req.query[String.self, at: "digests"])
@@ -1668,6 +1684,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             stdinOnce: body.StdinOnce ?? false,
             networkMode: Self.networkMode(body: body),
             readonlyRootfs: body.HostConfig?.ReadonlyRootfs ?? false,
+            privileged: body.HostConfig?.Privileged ?? false,
             healthcheck: body.Healthcheck.flatMap(Self.healthcheck),
             restartPolicy: Self.restartPolicy(body.HostConfig?.RestartPolicy),
             resources: Self.resources(body.HostConfig),
@@ -2346,7 +2363,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
             let usage = try await call { try await cacheBackend.systemDataUsage() }
             layersSize = usage.layersSize
-            if includeAll || types.contains("buildcache") {
+            if includeAll || types.contains("build-cache") {
                 buildCache = usage.buildCache.map(Self.buildCacheUsage)
             }
         }
@@ -2994,13 +3011,6 @@ struct DockerRuntimeRoutes: RouteCollection {
         return auth
     }
 
-    private static func matchesReference(_ reference: String, pattern: String) -> Bool {
-        let forms = familiarReferenceForms(reference)
-        return forms.contains { candidate in
-            globMatch(pattern: pattern, candidate: candidate)
-        }
-    }
-
     fileprivate static func imageMatchesContainer(
         _ container: DockerRuntimeContainer, image: DockerRuntimeImage
     ) -> Bool {
@@ -3016,195 +3026,8 @@ struct DockerRuntimeRoutes: RouteCollection {
         return containerID == imageID
     }
 
-    private static let imageFilterKeys: Set<String> = [
-        "before", "dangling", "label", "reference", "since", "until",
-    ]
-
-    private static func imageFilters(_ raw: String?) throws -> [String: [String]] {
-        guard let raw, !raw.isEmpty, let data = raw.data(using: .utf8) else {
-            return [:]
-        }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw Abort(.badRequest, reason: "invalid filter")
-        }
-        var filters: [String: [String]] = [:]
-        for (key, value) in object {
-            guard imageFilterKeys.contains(key) else {
-                throw Abort(.badRequest, reason: "invalid filter '\(key)'")
-            }
-            if let values = value as? [String: Any] {
-                guard values.values.allSatisfy(isJSONBool) else {
-                    throw Abort(.badRequest, reason: "invalid filter")
-                }
-                filters[key] = values.compactMap { key, value in
-                    guard (value as? Bool) == true else { return nil }
-                    return key
-                }
-            } else if let values = value as? [Any] {
-                guard values.allSatisfy({ $0 is String }) else {
-                    throw Abort(.badRequest, reason: "invalid filter")
-                }
-                filters[key] = values.compactMap { $0 as? String }
-            } else if let value = value as? String {
-                filters[key] = [value]
-            } else {
-                throw Abort(.badRequest, reason: "invalid filter")
-            }
-        }
-        return filters
-    }
-
-    private static func isJSONBool(_ value: Any) -> Bool {
-        guard let number = value as? NSNumber else { return false }
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    }
-
-    private static func applyImageFilters(
-        _ images: [DockerRuntimeImage],
-        filters: [String: [String]]
-    ) throws -> [DockerRuntimeImage] {
-        var result = images
-        if let values = filters["dangling"] {
-            let isTrue = try Self.danglingFilterValue(values)
-            result = result.filter { Self.isDangling($0) == isTrue }
-        }
-        if let patterns = filters["reference"] {
-            result = result.filter { image in
-                image.references.contains { reference in
-                    patterns.contains { Self.matchesReference(reference, pattern: $0) }
-                }
-            }
-        }
-        if let values = filters["label"] {
-            result = result.filter { image in
-                values.contains { Self.matchesImageLabel($0, labels: image.labels) }
-            }
-        }
-        if let values = filters["before"] {
-            guard let boundary = Self.imageFilterDate(values, images: images) else {
-                throw Abort(.badRequest, reason: "invalid filter 'before'")
-            }
-            result = result.filter { $0.createdAt < boundary }
-        }
-        if let values = filters["since"] {
-            guard let boundary = Self.imageFilterDate(values, images: images) else {
-                throw Abort(.badRequest, reason: "invalid filter 'since'")
-            }
-            result = result.filter { $0.createdAt > boundary }
-        }
-        if let values = filters["until"] {
-            guard let raw = values.first, let boundary = parseDate(raw) else {
-                throw Abort(.badRequest, reason: "invalid filter 'until'")
-            }
-            result = result.filter { $0.createdAt < boundary }
-        }
-        return result
-    }
-
-    private static func validateImageFilters(_ filters: [String: [String]]) throws {
-        if let values = filters["dangling"] {
-            _ = try danglingFilterValue(values)
-        }
-    }
-
-    private static func danglingFilterValue(_ values: [String]) throws -> Bool {
-        guard !values.isEmpty else {
-            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
-        }
-        let isTrue = values.contains { $0 == "1" || $0 == "true" }
-        let isFalse = values.contains { $0 == "0" || $0 == "false" }
-        guard isTrue != isFalse else {
-            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
-        }
-        return isTrue
-    }
-
-    private static func isDangling(_ image: DockerRuntimeImage) -> Bool {
-        image.references.allSatisfy {
-            $0 == "<none>:<none>" || $0.hasPrefix("sha256:") || $0.contains("@sha256:")
-        }
-    }
-
-    private static func matchesImageLabel(_ expression: String, labels: [String: String]) -> Bool {
-        let parts = expression.split(separator: "=", maxSplits: 1).map(String.init)
-        guard let key = parts.first, !key.isEmpty, let value = labels[key] else { return false }
-        return parts.count == 1 || value == parts[1]
-    }
-
-    private static func imageFilterDate(
-        _ values: [String],
-        images: [DockerRuntimeImage]
-    ) -> Date? {
-        guard let value = values.first, !value.isEmpty else { return nil }
-        if let image = images.first(where: {
-            $0.digest == value || $0.reference == value || $0.references.contains(value)
-        }) {
-            return image.createdAt
-        }
-        return parseDate(value)
-    }
-
-    private static func familiarReferenceForms(_ reference: String) -> [String] {
-        let familiar = familiarizeReference(reference)
-        var name = familiar
-        if let at = name.firstIndex(of: "@") {
-            name = String(name[..<at])
-        }
-        if let colon = name.lastIndex(of: ":"),
-            !name[name.index(after: colon)...].contains("/")
-        {
-            name = String(name[..<colon])
-        }
-        return name == familiar ? [familiar] : [familiar, name]
-    }
-
-    private static func familiarizeReference(_ reference: String) -> String {
-        for prefix in ["docker.io/library/", "docker.io/"] where reference.hasPrefix(prefix) {
-            return String(reference.dropFirst(prefix.count))
-        }
-        return reference
-    }
-
-    private static func globMatch(pattern: String, candidate: String) -> Bool {
-        let patternSegments = pattern.split(separator: "/", omittingEmptySubsequences: false)
-        let candidateSegments = candidate.split(separator: "/", omittingEmptySubsequences: false)
-        guard patternSegments.count == candidateSegments.count else { return false }
-        return zip(patternSegments, candidateSegments).allSatisfy {
-            wildcardMatch(pattern: Array($0), candidate: Array($1))
-        }
-    }
-
-    private static func wildcardMatch(pattern: [Character], candidate: [Character]) -> Bool {
-        var patternIndex = 0
-        var candidateIndex = 0
-        var starIndex = -1
-        var starCandidateIndex = 0
-        while candidateIndex < candidate.count {
-            if patternIndex < pattern.count,
-                pattern[patternIndex] == "?" || pattern[patternIndex] == candidate[candidateIndex]
-            {
-                patternIndex += 1
-                candidateIndex += 1
-            } else if patternIndex < pattern.count, pattern[patternIndex] == "*" {
-                starIndex = patternIndex
-                starCandidateIndex = candidateIndex
-                patternIndex += 1
-            } else if starIndex >= 0 {
-                patternIndex = starIndex + 1
-                starCandidateIndex += 1
-                candidateIndex = starCandidateIndex
-            } else {
-                return false
-            }
-        }
-        while patternIndex < pattern.count, pattern[patternIndex] == "*" {
-            patternIndex += 1
-        }
-        return patternIndex == pattern.count
-    }
-
     private static let systemDataUsageTypes: Set<String> = [
-        "container", "image", "volume", "buildcache",
+        "container", "image", "volume", "build-cache",
     ]
 
     private static func validateSystemDataUsageTypes(_ types: [String]) throws {
@@ -4331,7 +4154,7 @@ private struct InspectResponse: Content {
             }, PortBindings: ports, NetworkMode: container.networkMode,
             StopTimeout: container.stopTimeout,
             RestartPolicy: .init(container.restartPolicy), AutoRemove: container.autoRemove,
-            ReadonlyRootfs: container.readonlyRootfs, Privileged: false, Init: nil,
+            ReadonlyRootfs: container.readonlyRootfs, Privileged: container.privileged, Init: nil,
             Dns: container.dns, DnsSearch: container.dnsSearch, ExtraHosts: container.extraHosts,
             Memory: container.resources.memory, MemorySwap: container.resources.memorySwap,
             MemoryReservation: container.resources.memoryReservation,
