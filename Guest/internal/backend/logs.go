@@ -509,6 +509,13 @@ func (b *Backend) detailsPrefix(id string) string {
 }
 
 func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, stream StreamFunc) (uint32, error) {
+	b.beginAttach(request.ID)
+	attachReady := false
+	defer func() {
+		if !attachReady {
+			b.completeAttach(request.ID)
+		}
+	}()
 	value, ok := b.logCaptures.Load(request.ID)
 	for !ok {
 		item, err := b.Inspect(ctx, request.ID)
@@ -581,6 +588,8 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 		}
 		unsubscribers = append(unsubscribers, unsubscribe)
 	}
+	b.completeAttach(request.ID)
+	attachReady = true
 	code, _, err := b.Wait(ctx, request.ID)
 	return code, err
 }

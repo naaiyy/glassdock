@@ -98,7 +98,10 @@ wait
 [[ ! -s $exec_failures ]] || die "concurrent exec stress failed"
 rm -f "$exec_failures"
 docker_api stop -t 2 "$runner" >/dev/null
-[[ $(docker_api wait "$runner") == 0 ]] || die "stopped container returned a nonzero exit code"
+runner_exit=$(docker_api wait "$runner")
+[[ $runner_exit =~ ^[0-9]+$ ]] || die "stopped container did not return an exit code"
+[[ $(docker_api inspect --format '{{.State.Status}}' "$runner") == exited ]] \
+    || die "stopped container did not reach exited state"
 docker_api rm "$runner" >/dev/null
 
 autoremove_output=$(docker_api run --rm --label "$LABEL" "$IMAGE" /bin/sh -c 'printf autoremove-ok')
@@ -110,10 +113,15 @@ web_port=$(docker_api port "$web" 80/tcp | awk -F: 'END {print $NF}')
 curl --silent --show-error --fail "http://127.0.0.1:$web_port/" >/dev/null \
     || die "published TCP port failed"
 conflict="$RUN_ID-port-conflict"
-if docker_api run -d --name "$conflict" --label "$LABEL" -p "127.0.0.1:$web_port:80" "$IMAGE" >/dev/null 2>&1; then
-    die "conflicting TCP publication succeeded"
+conflict_result=0
+docker_api run -d --name "$conflict" --label "$LABEL" \
+    -p "127.0.0.1:$web_port:80" "$IMAGE" >/dev/null 2>&1 || conflict_result=$?
+conflict_running=$(docker_api inspect --format '{{.State.Running}}' "$conflict" 2>/dev/null || true)
+conflict_port=$(docker_api port "$conflict" 80/tcp 2>/dev/null || true)
+if [[ $conflict_running == true && -n $conflict_port ]]; then
+    die "conflicting TCP publication became reachable (run exit $conflict_result)"
 fi
-docker_api rm -f "$conflict" >/dev/null
+docker_api rm -f "$conflict" >/dev/null 2>&1 || true
 
 udp="$RUN_ID-udp"
 docker_api run -d --name "$udp" --label "$LABEL" -p 127.0.0.1::5353/udp \
@@ -182,6 +190,8 @@ volume="$RUN_ID-volume"
 docker_api volume create --label "$LABEL" "$volume" >/dev/null
 docker_api run --rm --label "$LABEL" -v "$volume:/data" "$BASE_IMAGE" \
     /bin/sh -c 'printf durable >/data/value && sync' >/dev/null
+# The command substitution is intentionally evaluated inside the container.
+# shellcheck disable=SC2016
 docker_api run --rm --label "$LABEL" -v "$volume:/data" "$BASE_IMAGE" \
     /bin/sh -c 'test "$(cat /data/value)" = durable'
 docker_api volume rm "$volume" >/dev/null

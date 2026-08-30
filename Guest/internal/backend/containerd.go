@@ -52,6 +52,7 @@ const execCleanupAttempts = 5
 const execCleanupAttemptTimeout = 2 * time.Second
 const networkCleanupAttempts = 5
 const daemonLostExitCode uint32 = 255
+const buildkitStateVolumeRoot = "/var/lib/containerd/io.glassdock.buildkit"
 
 func encodeRuntimeMetadata(metadata api.ContainerMetadata) (string, error) {
 	data, err := json.Marshal(metadata)
@@ -77,6 +78,8 @@ type Backend struct {
 	runtimeBinary       string
 	logsDir             string
 	logCaptures         sync.Map
+	attachMu            sync.Mutex
+	attachWaits         map[string]*attachWait
 	containers          sync.Map
 	networks            sync.Map // map[string]*networkPreparation
 	createMu            sync.Mutex
@@ -94,6 +97,87 @@ type Backend struct {
 	bindMount           bindMountConfiguration
 	buildCacheUsage     func(ctx context.Context) ([]api.BuildCacheRecord, error)
 	buildCachePrune     func(ctx context.Context, all bool) (api.BuilderPruneResponse, error)
+}
+
+// attachWait coordinates Docker's attach-before-start handshake. The Docker
+// CLI opens the attach stream before it asks the daemon to start a foreground
+// container. Starting the task before Attach has subscribed loses output from
+// fast processes because attach streams intentionally do not replay logs.
+type attachWait struct {
+	pending   int
+	unclaimed int
+	ready     chan struct{}
+}
+
+// PrepareAttach records an attach request before its handler is scheduled.
+// The server calls this synchronously while it is reading the guest protocol
+// frame, which preserves attach-before-start ordering across request goroutines.
+func (b *Backend) PrepareAttach(id string) {
+	if id == "" {
+		return
+	}
+	b.attachMu.Lock()
+	defer b.attachMu.Unlock()
+	if b.attachWaits == nil {
+		b.attachWaits = make(map[string]*attachWait)
+	}
+	wait := b.attachWaits[id]
+	if wait == nil {
+		wait = &attachWait{ready: make(chan struct{})}
+		b.attachWaits[id] = wait
+	}
+	wait.pending++
+	wait.unclaimed++
+}
+
+func (b *Backend) beginAttach(id string) {
+	b.attachMu.Lock()
+	defer b.attachMu.Unlock()
+	if b.attachWaits == nil {
+		b.attachWaits = make(map[string]*attachWait)
+	}
+	wait := b.attachWaits[id]
+	if wait == nil {
+		b.attachWaits[id] = &attachWait{pending: 1, ready: make(chan struct{})}
+		return
+	}
+	if wait.unclaimed > 0 {
+		wait.unclaimed--
+		return
+	}
+	wait.pending++
+}
+
+func (b *Backend) completeAttach(id string) {
+	b.attachMu.Lock()
+	defer b.attachMu.Unlock()
+	wait := b.attachWaits[id]
+	if wait == nil || wait.pending == 0 {
+		return
+	}
+	wait.pending--
+	if wait.pending != 0 {
+		return
+	}
+	close(wait.ready)
+	delete(b.attachWaits, id)
+}
+
+func (b *Backend) waitForAttach(ctx context.Context, id string) error {
+	b.attachMu.Lock()
+	wait := b.attachWaits[id]
+	if wait == nil {
+		b.attachMu.Unlock()
+		return nil
+	}
+	ready := wait.ready
+	b.attachMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-ready:
+		return nil
+	}
 }
 
 type bindMountConfiguration struct {
@@ -318,14 +402,20 @@ func New(address, namespace, snapshotter, runtimeName, runtimeBinary string) (*B
 	}, nil
 }
 
-func (b *Backend) beginNetworkPreparation(id string) *networkPreparation {
+func (b *Backend) beginNetworkPreparation(id string, network api.Network) *networkPreparation {
 	preparation := &networkPreparation{done: make(chan struct{})}
 	actual, loaded := b.networks.LoadOrStore(id, preparation)
 	if loaded {
 		return actual.(*networkPreparation)
 	}
 	go func() {
-		_, preparation.err = b.network.Create(id)
+		if network.Mode == "" || network.Mode == "private" {
+			_, preparation.err = b.network.CreateWithAddresses(
+				id, network.IPv4Address, network.IPv6Address,
+			)
+		} else {
+			_, preparation.err = b.network.Create(id)
+		}
 		close(preparation.done)
 	}()
 	return preparation
@@ -352,11 +442,17 @@ func (b *Backend) Networks(ctx context.Context) ([]api.NetworkResource, error) {
 	if err := b.network.Initialize(); err != nil {
 		return nil, err
 	}
+	if err := b.restoreAllNetworkState(ctx); err != nil {
+		return nil, err
+	}
 	return b.network.ListNetworks(), nil
 }
 
 func (b *Backend) Network(ctx context.Context, id string) (api.NetworkResource, error) {
 	if err := b.network.Initialize(); err != nil {
+		return api.NetworkResource{}, err
+	}
+	if err := b.restoreAllNetworkState(ctx); err != nil {
 		return api.NetworkResource{}, err
 	}
 	return b.network.InspectNetwork(id)
@@ -375,6 +471,9 @@ func (b *Backend) PruneNetworks(ctx context.Context, request api.NetworkPruneReq
 }
 
 func (b *Backend) ConnectNetwork(ctx context.Context, request api.NetworkConnectRequest) (api.NetworkResource, error) {
+	if err := b.restoreAllNetworkState(ctx); err != nil {
+		return api.NetworkResource{}, err
+	}
 	resource, err := b.network.ConnectNetwork(request)
 	if err != nil {
 		return api.NetworkResource{}, err
@@ -382,10 +481,31 @@ func (b *Backend) ConnectNetwork(ctx context.Context, request api.NetworkConnect
 	if err := b.syncNetworkFiles(ctx, request.ContainerID); err != nil {
 		return api.NetworkResource{}, err
 	}
+	endpoint, ok := resource.Containers[request.ContainerID]
+	if !ok {
+		return api.NetworkResource{}, fmt.Errorf("network %s has no endpoint for container %s", resource.Name, request.ContainerID)
+	}
+	if err := b.addNetworkAttachment(ctx, request.ContainerID, api.ContainerNetworkAttachment{
+		NetworkID: resource.ID, IPv4Address: endpoint.IPv4Address,
+		IPv6Address: endpoint.IPv6Address, Aliases: endpoint.Aliases,
+	}); err != nil {
+		_, _ = b.network.DisconnectNetwork(api.NetworkDisconnectRequest{
+			NetworkID: resource.ID, ContainerID: request.ContainerID, Force: true,
+		})
+		_ = b.syncNetworkFiles(ctx, request.ContainerID)
+		return api.NetworkResource{}, err
+	}
 	return resource, nil
 }
 
 func (b *Backend) DisconnectNetwork(ctx context.Context, request api.NetworkDisconnectRequest) (api.NetworkResource, error) {
+	if err := b.restoreAllNetworkState(ctx); err != nil {
+		return api.NetworkResource{}, err
+	}
+	network, err := b.network.InspectNetwork(request.NetworkID)
+	if err != nil {
+		return api.NetworkResource{}, err
+	}
 	resource, err := b.network.DisconnectNetwork(request)
 	if err != nil {
 		return api.NetworkResource{}, err
@@ -393,7 +513,41 @@ func (b *Backend) DisconnectNetwork(ctx context.Context, request api.NetworkDisc
 	if err := b.syncNetworkFiles(ctx, request.ContainerID); err != nil {
 		return api.NetworkResource{}, err
 	}
+	if err := b.removeNetworkAttachment(ctx, request.ContainerID, network.ID); err != nil {
+		return api.NetworkResource{}, err
+	}
 	return resource, nil
+}
+
+func (b *Backend) addNetworkAttachment(ctx context.Context, id string, attachment api.ContainerNetworkAttachment) error {
+	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	if err != nil {
+		return err
+	}
+	return b.updateRuntimeMetadata(ctx, container, func(metadata *api.ContainerMetadata) {
+		for _, existing := range metadata.NetworkAttachments {
+			if existing.NetworkID == attachment.NetworkID {
+				return
+			}
+		}
+		metadata.NetworkAttachments = append(metadata.NetworkAttachments, attachment)
+	})
+}
+
+func (b *Backend) removeNetworkAttachment(ctx context.Context, id, networkID string) error {
+	container, err := b.client.LoadContainer(b.ctx(ctx), id)
+	if err != nil {
+		return err
+	}
+	return b.updateRuntimeMetadata(ctx, container, func(metadata *api.ContainerMetadata) {
+		attachments := metadata.NetworkAttachments[:0]
+		for _, attachment := range metadata.NetworkAttachments {
+			if attachment.NetworkID != networkID {
+				attachments = append(attachments, attachment)
+			}
+		}
+		metadata.NetworkAttachments = attachments
+	})
 }
 
 func (b *Backend) syncNetworkFiles(ctx context.Context, id string) error {
@@ -815,7 +969,9 @@ func (b *Backend) DeleteImage(ctx context.Context, request api.ImageDeleteReques
 		}
 	}
 	name := request.Reference
-	if !contains(image.References, name) {
+	if matched := matchingImageReference(request.Reference, image.References); matched != "" {
+		name = matched
+	} else {
 		if len(image.References) != 1 {
 			return api.ImageDeleteResponse{}, fmt.Errorf("image ID is referenced by multiple tags")
 		}
@@ -964,6 +1120,9 @@ func (b *Backend) List(ctx context.Context) ([]api.Container, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := b.restoreNetworkState(ctx, containers); err != nil {
+		return nil, err
+	}
 	out := make([]api.Container, 0, len(containers))
 	for _, container := range containers {
 		item, err := b.inspect(ctx, container)
@@ -980,7 +1139,50 @@ func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error)
 	if err != nil {
 		return api.Container{}, err
 	}
+	if err := b.restoreNetworkState(ctx, []containerd.Container{container}); err != nil {
+		return api.Container{}, err
+	}
 	return b.inspect(ctx, container)
+}
+
+func (b *Backend) restoreAllNetworkState(ctx context.Context) error {
+	containers, err := b.client.Containers(b.ctx(ctx))
+	if err != nil {
+		return err
+	}
+	return b.restoreNetworkState(ctx, containers)
+}
+
+func (b *Backend) restoreNetworkState(ctx context.Context, containers []containerd.Container) error {
+	created := make([]string, 0)
+	for _, container := range containers {
+		info, err := container.Info(b.ctx(ctx))
+		if err != nil {
+			return err
+		}
+		metadata := decodeRuntimeMetadata(info.Labels)
+		if !usesPrivateNetworkNamespace(metadata.NetworkMode) {
+			continue
+		}
+		wasCreated, err := b.network.RestoreContainer(
+			container.ID(), metadata.Name, metadata.Hostname, metadata.NetworkMode,
+			metadata.NetworkAttachments,
+		)
+		if err != nil {
+			return err
+		}
+		if wasCreated {
+			created = append(created, container.ID())
+		}
+	}
+	// Populate hosts/resolver files after every endpoint exists so a restored
+	// stopped container sees all of its peers when it starts later.
+	for _, id := range created {
+		if err := b.syncNetworkFiles(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b *Backend) inspect(ctx context.Context, container containerd.Container) (api.Container, error) {
@@ -1046,6 +1248,18 @@ func applyPersistedLifecycle(result *api.Container, metadata api.ContainerMetada
 	result.ExitCode = &code
 }
 
+func usesPrivateNetworkNamespace(mode string) bool {
+	switch mode {
+	case "host", "none", "path", "container":
+		return false
+	}
+	return !strings.HasPrefix(mode, "container:")
+}
+
+func isCustomNetworkMode(mode string) bool {
+	return usesPrivateNetworkNamespace(mode) && mode != "" && mode != "private"
+}
+
 func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest) (api.Container, error) {
 	if request.ID == "" || request.Image == "" {
 		return api.Container{}, errors.New("id and image are required")
@@ -1054,6 +1268,7 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		return api.Container{}, fmt.Errorf("wait for private network cleanup: %w", err)
 	}
 	var privateNetwork bool
+	customNetwork := false
 	sharedNetworkPath := ""
 	switch request.Network.Mode {
 	case "host":
@@ -1088,13 +1303,17 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 			}
 			sharedNetworkPath = filepath.Join("/proc", strconv.FormatUint(uint64(task.Pid()), 10), "ns", "net")
 		} else {
-			return api.Container{}, fmt.Errorf("unsupported network mode %q", request.Network.Mode)
+			if _, err := b.network.InspectNetwork(request.Network.Mode); err != nil {
+				return api.Container{}, fmt.Errorf("network %q not found: %w", request.Network.Mode, err)
+			}
+			privateNetwork = true
+			customNetwork = true
 		}
 	}
 	var networkReady *networkPreparation
 	keepNetwork := false
 	if privateNetwork {
-		networkReady = b.beginNetworkPreparation(request.ID)
+		networkReady = b.beginNetworkPreparation(request.ID, request.Network)
 		defer func() {
 			if keepNetwork || networkReady == nil {
 				return
@@ -1163,6 +1382,19 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	}
 	if privilegedOpt := privilegedSpecOpt(request.Privileged); privilegedOpt != nil {
 		specOpts = append(specOpts, privilegedOpt)
+		// Buildx's docker-container driver creates its BuildKit worker with
+		// Docker's privileged flag. The privilege is scoped to the guest
+		// container namespace and does not expose the macOS host.
+		specOpts = append(specOpts, oci.WithPrivileged)
+		// BuildKit invokes runc for its own build steps. Those nested
+		// containers need the guest cgroup hierarchy to create their cgroup
+		// paths; the default OCI spec does not include that mount.
+		specOpts = append(specOpts, oci.WithMounts([]specs.Mount{{
+			Destination: "/sys/fs/cgroup",
+			Type:        "cgroup",
+			Source:      "cgroup",
+			Options:     []string{"nosuid", "noexec", "nodev", "relatime", "rw"},
+		}}))
 	}
 	if resourceOpt := initialResourceOpt(request.Resources); resourceOpt != nil {
 		specOpts = append(specOpts, resourceOpt)
@@ -1171,8 +1403,23 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if err != nil {
 		return api.Container{}, err
 	}
-	for index := range mounts {
+	for index, input := range request.Mounts {
 		if mounts[index].Type != "bind" {
+			continue
+		}
+		if isBuildkitStateVolume(input) {
+			source, err := buildkitStateVolumePath(input.VolumeName)
+			if err != nil {
+				return api.Container{}, err
+			}
+			if err := os.MkdirAll(source, 0o700); err != nil {
+				return api.Container{}, fmt.Errorf("prepare BuildKit state volume: %w", err)
+			}
+			// Docker's docker-container Buildx driver uses a named volume for
+			// /var/lib/buildkit. Keep the Docker-facing volume identity, but
+			// place its data on the guest ext4 disk instead of virtiofs. BuildKit
+			// needs native filesystem operations for its worker state.
+			mounts[index].Source = source
 			continue
 		}
 		if b.bindMount.hostSource == "" || b.bindMount.guestRoot == "" || b.bindMount.excludedHostSource == "" {
@@ -1197,7 +1444,10 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	case "none":
 		// Leave the runtime's isolated network namespace without a bridge.
 	default:
-		if sharedNetworkPath != "" {
+		if customNetwork {
+			networkPath := b.network.Path(request.ID)
+			specOpts = append(specOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: networkPath}))
+		} else if sharedNetworkPath != "" {
 			specOpts = append(specOpts, oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: sharedNetworkPath}))
 		}
 	}
@@ -1252,10 +1502,44 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		metadata.RestartPolicy.Name = "no"
 	}
 	metadata.NetworkMode = request.Network.Mode
+	metadata.NetworkIPv4Address = request.Network.IPv4Address
+	metadata.NetworkIPv6Address = request.Network.IPv6Address
+	metadata.NetworkAliases = append([]string(nil), request.Network.Aliases...)
 	if privateNetwork {
 		// Docker create stores network intent. The network namespace is
 		// allocated when start realizes that intent.
 		metadata.PublishedPorts = append([]api.PublishedPort(nil), request.PublishedPorts...)
+	}
+	if customNetwork {
+		if err := b.waitNetworkPreparation(ctx, request.ID); err != nil {
+			return api.Container{}, err
+		}
+		b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
+		if err := b.network.ConfigureContainerNetworkWithAddresses(
+			request.ID, request.Network.Mode, metadata.Name,
+			request.Network.IPv4Address, request.Network.IPv6Address, request.Network.Aliases,
+		); err != nil {
+			return api.Container{}, err
+		}
+		resource, err := b.network.InspectNetwork(request.Network.Mode)
+		if err != nil {
+			return api.Container{}, fmt.Errorf("inspect configured network %q: %w", request.Network.Mode, err)
+		}
+		if endpoint, ok := resource.Containers[request.ID]; ok {
+			attached := false
+			for _, existing := range metadata.NetworkAttachments {
+				if existing.NetworkID == resource.ID {
+					attached = true
+					break
+				}
+			}
+			if !attached {
+				metadata.NetworkAttachments = append(metadata.NetworkAttachments, api.ContainerNetworkAttachment{
+					NetworkID: resource.ID, IPv4Address: endpoint.IPv4Address,
+					IPv6Address: endpoint.IPv6Address, Aliases: endpoint.Aliases,
+				})
+			}
+		}
 	}
 	encodedMetadata, err := encodeRuntimeMetadata(metadata)
 	if err != nil {
@@ -1464,7 +1748,13 @@ func (b *Backend) updateRuntimeMetadata(ctx context.Context, container container
 }
 
 func (b *Backend) prepareNetwork(id string, publishedPorts []api.PublishedPort) ([]api.PublishedPort, error) {
-	if _, err := b.network.Create(id); err != nil {
+	return b.prepareNetworkWithAddresses(id, publishedPorts, "", "")
+}
+
+func (b *Backend) prepareNetworkWithAddresses(
+	id string, publishedPorts []api.PublishedPort, ipv4Address, ipv6Address string,
+) ([]api.PublishedPort, error) {
+	if _, err := b.network.CreateWithAddresses(id, ipv4Address, ipv6Address); err != nil {
 		return nil, err
 	}
 	published, err := b.network.Publish(id, publishedPorts)
@@ -1839,6 +2129,21 @@ func toOCIMounts(input []api.Mount) ([]specs.Mount, error) {
 	return result, nil
 }
 
+func isBuildkitStateVolume(mount api.Mount) bool {
+	return mount.Type == "bind" && mount.Target == "/var/lib/buildkit" &&
+		strings.HasPrefix(mount.VolumeName, "buildx_buildkit_") &&
+		strings.HasSuffix(mount.VolumeName, "_state")
+}
+
+func buildkitStateVolumePath(name string) (string, error) {
+	if !isBuildkitStateVolume(api.Mount{
+		Type: "bind", Target: "/var/lib/buildkit", VolumeName: name,
+	}) || name == "." || name == ".." || filepath.Base(name) != name {
+		return "", errors.New("invalid BuildKit state volume name")
+	}
+	return filepath.Join(buildkitStateVolumeRoot, name), nil
+}
+
 func (b *Backend) AutoRemove(ctx context.Context, id string) bool {
 	container, err := b.client.LoadContainer(b.ctx(ctx), id)
 	if err != nil {
@@ -1875,18 +2180,77 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		return api.Container{}, err
 	}
 	metadata := decodeRuntimeMetadata(info.Labels)
-	privateNetwork := metadata.NetworkMode == "" || metadata.NetworkMode == "private"
+	privateNetwork := usesPrivateNetworkNamespace(metadata.NetworkMode)
 	published := append([]api.PublishedPort(nil), request.PublishedPorts...)
 	rollbackNetwork := func() {}
+	b.network.SetContainerIdentity(id, metadata.Name, metadata.Hostname)
 	if privateNetwork {
 		if err := b.waitNetworkPreparation(ctx, id); err != nil {
 			return api.Container{}, err
 		}
-		published, err = b.prepareNetwork(id, published)
-		if err != nil {
-			return api.Container{}, err
+		if isCustomNetworkMode(metadata.NetworkMode) {
+			if _, err := b.network.Create(id); err != nil {
+				return api.Container{}, err
+			}
+			b.network.SetContainerIdentity(id, metadata.Name, metadata.Hostname)
+			rollbackNetwork = func() { _ = b.network.Delete(id) }
+			network, err := b.network.InspectNetwork(metadata.NetworkMode)
+			if err == nil {
+				var primary *api.ContainerNetworkAttachment
+				for _, attachment := range metadata.NetworkAttachments {
+					if attachment.NetworkID == network.ID {
+						attachmentCopy := attachment
+						primary = &attachmentCopy
+						break
+					}
+				}
+				if primary != nil {
+					if err := b.network.ConfigureContainerNetworkWithAddresses(
+						id, metadata.NetworkMode, metadata.Name,
+						primary.IPv4Address, primary.IPv6Address, primary.Aliases,
+					); err != nil {
+						rollbackNetwork()
+						return api.Container{}, err
+					}
+				} else if err := b.network.RemoveDefaultNetwork(id); err != nil {
+					rollbackNetwork()
+					return api.Container{}, err
+				}
+			} else if len(metadata.NetworkAttachments) > 0 {
+				rollbackNetwork()
+				return api.Container{}, err
+			} else if err := b.network.RemoveDefaultNetwork(id); err != nil {
+				rollbackNetwork()
+				return api.Container{}, err
+			}
+			if err == nil {
+				attached := false
+				for _, attachment := range metadata.NetworkAttachments {
+					if attachment.NetworkID == network.ID {
+						attached = true
+						break
+					}
+				}
+				if attached {
+					published, err = b.network.Publish(id, published)
+					if err != nil {
+						rollbackNetwork()
+						return api.Container{}, err
+					}
+				} else {
+					published = nil
+				}
+			}
+		} else {
+			published, err = b.prepareNetworkWithAddresses(
+				id, published, metadata.NetworkIPv4Address, metadata.NetworkIPv6Address,
+			)
+			if err != nil {
+				return api.Container{}, err
+			}
+			b.network.SetContainerIdentity(id, metadata.Name, metadata.Hostname)
+			rollbackNetwork = func() { _ = b.network.Delete(id) }
 		}
-		rollbackNetwork = func() { _ = b.network.Delete(id) }
 	}
 	task, reaped, reaping := record.taskState()
 	if reaping != nil {
@@ -1920,6 +2284,14 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 	if err := b.clearExitState(ctx, record); err != nil {
 		rollbackNetwork()
 		return api.Container{}, err
+	}
+	if privateNetwork {
+		// Populate the network files before the task starts. A short-lived
+		// process can otherwise execute before its peer entries are present.
+		if err := b.syncNetworkFiles(ctx, id); err != nil {
+			rollbackNetwork()
+			return api.Container{}, err
+		}
 	}
 	if task == nil {
 		if err := b.acquireTaskCreation(ctx); err != nil {
@@ -1956,6 +2328,15 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		}
 		b.logCaptures.Store(id, capture)
 	}
+	if err := b.waitForAttach(ctx, id); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(b.ctx(context.Background()), 30*time.Second)
+		_, _ = task.Delete(cleanupCtx, containerd.WithProcessKill)
+		cancel()
+		record.setTask(nil)
+		b.removeLogs(id)
+		rollbackNetwork()
+		return api.Container{}, err
+	}
 	if err := task.Start(ctx); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(b.ctx(context.Background()), 30*time.Second)
 		_, _ = task.Delete(cleanupCtx, containerd.WithProcessKill)
@@ -1972,15 +2353,6 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		record.setTask(nil)
 		rollbackNetwork()
 		return api.Container{}, err
-	}
-	if privateNetwork {
-		if err := b.syncNetworkFiles(ctx, id); err != nil {
-			_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
-			_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
-			record.setTask(nil)
-			rollbackNetwork()
-			return api.Container{}, err
-		}
 	}
 	b.startHealthMonitor(id, container)
 	info, _ = container.Info(ctx)
@@ -2589,7 +2961,7 @@ func (b *Backend) ArchiveInfo(ctx context.Context, request api.ContainerArchiveR
 		}
 	}
 	return api.ContainerArchivePath{
-		Name: relative, Size: info.Size(), Mode: int64(info.Mode()),
+		Name: archiveRootName(relative), Size: info.Size(), Mode: int64(info.Mode()),
 		ModifiedAt: info.ModTime(), LinkTarget: linkTarget,
 	}, nil
 }
@@ -2797,6 +3169,7 @@ func validateExistingContainerPath(root, target string) error {
 func writeArchivePath(ctx context.Context, target, relative string, writer io.Writer) error {
 	tarWriter := tar.NewWriter(writer)
 	defer tarWriter.Close()
+	rootName := archiveRootName(relative)
 	return filepath.Walk(target, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -2804,13 +3177,13 @@ func writeArchivePath(ctx context.Context, target, relative string, writer io.Wr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		relativePath := relative
+		relativePath := rootName
 		if path != target {
 			child, err := filepath.Rel(target, path)
 			if err != nil {
 				return err
 			}
-			relativePath = filepath.Join(relative, child)
+			relativePath = filepath.Join(rootName, child)
 		}
 		linkTarget := ""
 		if info.Mode()&os.ModeSymlink != 0 {
@@ -2840,6 +3213,13 @@ func writeArchivePath(ctx context.Context, target, relative string, writer io.Wr
 		_, err = io.Copy(tarWriter, file)
 		return err
 	})
+}
+
+func archiveRootName(relative string) string {
+	if relative == "." {
+		return "."
+	}
+	return filepath.Base(relative)
 }
 
 func parseContainerChanges(parentRoot string, diff io.Reader) ([]api.ContainerChange, error) {
@@ -3367,18 +3747,45 @@ func (b *Backend) LookupImage(ctx context.Context, reference string) (containerd
 }
 
 // equivalentImageReferences lists alternative names for the same image
-// reference: the familiar docker.io form and the bare repository form.
+// reference: Docker's normalized form, the short repository form, and the
+// legacy untagged spelling emitted by older BuildKit image exporters.
 func equivalentImageReferences(reference string) []string {
-	candidates := make([]string, 0, 3)
-	if qualified, err := registryreference.ParseDockerRef(reference); err == nil {
-		candidates = append(candidates, qualified.String())
+	candidates := make([]string, 0, 6)
+	seen := make(map[string]struct{}, cap(candidates))
+	add := func(value string) {
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		candidates = append(candidates, value)
 	}
-	bare := strings.TrimPrefix(reference, "docker.io/")
-	bare = strings.TrimPrefix(bare, "library/")
-	if bare != reference {
-		candidates = append(candidates, bare)
+	add(reference)
+	if qualified, err := registryreference.ParseDockerRef(reference); err == nil {
+		qualifiedReference := qualified.String()
+		add(qualifiedReference)
+		if strings.HasSuffix(qualifiedReference, ":latest") {
+			add(strings.TrimSuffix(qualifiedReference, ":latest"))
+		}
+		bare := strings.TrimPrefix(qualifiedReference, "docker.io/")
+		bare = strings.TrimPrefix(bare, "library/")
+		add(bare)
+		if strings.HasSuffix(bare, ":latest") {
+			add(strings.TrimSuffix(bare, ":latest"))
+		}
 	}
 	return candidates
+}
+
+func matchingImageReference(requested string, references []string) string {
+	for _, candidate := range equivalentImageReferences(requested) {
+		if contains(references, candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // SystemDataUsage computes Docker system-df inputs that only the guest can

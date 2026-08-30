@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,34 @@ import (
 
 	"github.com/glassdock/glassdock/guest/internal/api"
 )
+
+func TestAttachBarrierWaitsForPreparedAttach(t *testing.T) {
+	t.Parallel()
+	backend := &Backend{}
+	backend.PrepareAttach("demo")
+
+	started := make(chan struct{})
+	go func() {
+		if err := backend.waitForAttach(context.Background(), "demo"); err != nil {
+			t.Errorf("waitForAttach() error = %v", err)
+			return
+		}
+		close(started)
+	}()
+
+	select {
+	case <-started:
+		t.Fatal("start barrier completed before attach became ready")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	backend.completeAttach("demo")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("start barrier did not complete after attach became ready")
+	}
+}
 
 func TestBoundedLogWriterConsumesWithoutExceedingLimit(t *testing.T) {
 	t.Parallel()
