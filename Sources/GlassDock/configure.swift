@@ -82,7 +82,8 @@ func configure(
     let runtime = GuestRuntime(
         engine: engine,
         portPublisher: portPublisher,
-        broadcaster: broadcaster
+        broadcaster: broadcaster,
+        volumeService: volumeClient
     )
     await volumeClient.setReferenceValidator { id in
         (try? await runtime.inspectContainer(id: id)) != nil

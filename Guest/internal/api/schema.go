@@ -203,6 +203,7 @@ type ContainerCreateRequest struct {
 	Labels         map[string]string `json:"labels,omitempty"`
 	Hostname       string            `json:"hostname,omitempty"`
 	ReadonlyRootfs bool              `json:"readonlyRootfs,omitempty"`
+	Privileged     bool              `json:"privileged,omitempty"`
 	Mounts         []Mount           `json:"mounts,omitempty"`
 	Network        Network           `json:"network,omitempty"`
 	PublishedPorts []PublishedPort   `json:"publishedPorts,omitempty"`
@@ -238,36 +239,48 @@ type DockerPortBinding struct {
 }
 
 type ContainerMetadata struct {
-	Name           string              `json:"name,omitempty"`
-	Args           []string            `json:"args,omitempty"`
-	Entrypoint     []string            `json:"entrypoint,omitempty"`
-	Cmd            []string            `json:"cmd,omitempty"`
-	Env            []string            `json:"env,omitempty"`
-	Cwd            string              `json:"cwd,omitempty"`
-	User           string              `json:"user,omitempty"`
-	Hostname       string              `json:"hostname,omitempty"`
-	Labels         map[string]string   `json:"labels,omitempty"`
-	Terminal       bool                `json:"terminal,omitempty"`
-	AttachStdin    bool                `json:"attachStdin,omitempty"`
-	OpenStdin      bool                `json:"openStdin,omitempty"`
-	StdinOnce      bool                `json:"stdinOnce,omitempty"`
-	AutoRemove     bool                `json:"autoRemove,omitempty"`
-	Mounts         []Mount             `json:"mounts,omitempty"`
-	ReadonlyRootfs bool                `json:"readonlyRootfs,omitempty"`
-	DNS            []string            `json:"dns,omitempty"`
-	DNSSearch      []string            `json:"dnsSearch,omitempty"`
-	ExtraHosts     []string            `json:"extraHosts,omitempty"`
-	PortBindings   []DockerPortBinding `json:"portBindings,omitempty"`
-	PublishedPorts []PublishedPort     `json:"publishedPorts,omitempty"`
-	LifecycleState string              `json:"lifecycleState,omitempty"`
-	LastExitCode   *uint32             `json:"lastExitCode,omitempty"`
-	Healthcheck    *HealthConfig       `json:"healthcheck,omitempty"`
-	Health         *Health             `json:"health,omitempty"`
-	RestartPolicy  RestartPolicy       `json:"restartPolicy,omitempty"`
-	RestartCount   int                 `json:"restartCount,omitempty"`
-	Resources      Resources           `json:"resources,omitempty"`
-	NetworkMode    string              `json:"networkMode,omitempty"`
-	StopSignal     string              `json:"stopSignal,omitempty"`
+	Name               string                       `json:"name,omitempty"`
+	Args               []string                     `json:"args,omitempty"`
+	Entrypoint         []string                     `json:"entrypoint,omitempty"`
+	Cmd                []string                     `json:"cmd,omitempty"`
+	Env                []string                     `json:"env,omitempty"`
+	Cwd                string                       `json:"cwd,omitempty"`
+	User               string                       `json:"user,omitempty"`
+	Hostname           string                       `json:"hostname,omitempty"`
+	Labels             map[string]string            `json:"labels,omitempty"`
+	Terminal           bool                         `json:"terminal,omitempty"`
+	AttachStdin        bool                         `json:"attachStdin,omitempty"`
+	OpenStdin          bool                         `json:"openStdin,omitempty"`
+	StdinOnce          bool                         `json:"stdinOnce,omitempty"`
+	AutoRemove         bool                         `json:"autoRemove,omitempty"`
+	Mounts             []Mount                      `json:"mounts,omitempty"`
+	ReadonlyRootfs     bool                         `json:"readonlyRootfs,omitempty"`
+	Privileged         bool                         `json:"privileged,omitempty"`
+	DNS                []string                     `json:"dns,omitempty"`
+	DNSSearch          []string                     `json:"dnsSearch,omitempty"`
+	ExtraHosts         []string                     `json:"extraHosts,omitempty"`
+	PortBindings       []DockerPortBinding          `json:"portBindings,omitempty"`
+	PublishedPorts     []PublishedPort              `json:"publishedPorts,omitempty"`
+	LifecycleState     string                       `json:"lifecycleState,omitempty"`
+	LastExitCode       *uint32                      `json:"lastExitCode,omitempty"`
+	Healthcheck        *HealthConfig                `json:"healthcheck,omitempty"`
+	Health             *Health                      `json:"health,omitempty"`
+	RestartPolicy      RestartPolicy                `json:"restartPolicy,omitempty"`
+	RestartCount       int                          `json:"restartCount,omitempty"`
+	Resources          Resources                    `json:"resources,omitempty"`
+	NetworkMode        string                       `json:"networkMode,omitempty"`
+	NetworkIPv4Address string                       `json:"networkIpv4Address,omitempty"`
+	NetworkIPv6Address string                       `json:"networkIpv6Address,omitempty"`
+	NetworkAliases     []string                     `json:"networkAliases,omitempty"`
+	NetworkAttachments []ContainerNetworkAttachment `json:"networkAttachments,omitempty"`
+	StopSignal         string                       `json:"stopSignal,omitempty"`
+}
+
+type ContainerNetworkAttachment struct {
+	NetworkID   string   `json:"networkId"`
+	IPv4Address string   `json:"ipv4Address,omitempty"`
+	IPv6Address string   `json:"ipv6Address,omitempty"`
+	Aliases     []string `json:"aliases,omitempty"`
 }
 type ContainerMetadataUpdateRequest struct {
 	ID           string              `json:"id"`
@@ -303,6 +316,9 @@ type Mount struct {
 	Type     string   `json:"type"`
 	Readonly bool     `json:"readonly,omitempty"`
 	Options  []string `json:"options,omitempty"`
+	// VolumeName is host-side identity metadata for a Docker named volume.
+	// The guest still realizes the mount as a bind mount at Source.
+	VolumeName string `json:"volumeName,omitempty"`
 }
 
 type HealthConfig struct {
@@ -348,8 +364,11 @@ type Resources struct {
 // Network selects the network namespace. Mode is host, private, or path.
 // The path field is required only for path mode.
 type Network struct {
-	Mode string `json:"mode,omitempty"`
-	Path string `json:"path,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	Path        string   `json:"path,omitempty"`
+	IPv4Address string   `json:"ipv4Address,omitempty"`
+	IPv6Address string   `json:"ipv6Address,omitempty"`
+	Aliases     []string `json:"aliases,omitempty"`
 }
 type NetworkIPAMConfig struct {
 	Subnet             string            `json:"subnet,omitempty"`
@@ -425,6 +444,7 @@ type NetworkEndpoint struct {
 	IPv4Address string   `json:"ipv4Address"`
 	IPv6Address string   `json:"ipv6Address,omitempty"`
 	Gateway     string   `json:"gateway"`
+	IPv6Gateway string   `json:"ipv6Gateway,omitempty"`
 	Aliases     []string `json:"aliases,omitempty"`
 }
 

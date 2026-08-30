@@ -45,6 +45,28 @@ func startServeListener(t *testing.T, b *Builder) string {
 	return address
 }
 
+func TestCanonicalMobyImageNamesUsesDockerTagSemantics(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "alpine", want: "docker.io/library/alpine:latest"},
+		{input: "example/app", want: "docker.io/example/app:latest"},
+		{input: "example/app:dev", want: "docker.io/example/app:dev"},
+		{
+			input: "example/app,localhost/app:dev",
+			want:  "docker.io/example/app:latest,localhost/app:dev",
+		},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			if got := canonicalMobyImageNames(test.input); got != test.want {
+				t.Fatalf("canonicalMobyImageNames(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+}
+
 func TestServeSessionUpgradeRegistersSession(t *testing.T) {
 	b := newServeTestBuilder(t)
 	address := startServeListener(t, b)

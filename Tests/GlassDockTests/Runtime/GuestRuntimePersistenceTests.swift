@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import GlassDock
@@ -50,6 +51,21 @@ struct GuestRuntimePersistenceTests {
         #expect(
             GuestRuntime.lowestAvailableGuestPorts(count: 0, range: range, excluding: Set(range)) == []
         )
+    }
+
+    @Test("named volume identity is retained in guest mount metadata")
+    func namedVolumeMountMetadata() throws {
+        let mount = DockerRuntimeMount(
+            source: "/private/tmp/glassdock-volume/data", target: "/data", readOnly: false,
+            type: "bind", volumeName: "cache"
+        )
+        let value =
+            try JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(GuestRuntime.mountJSON(mount))
+            ) as? [String: Any]
+
+        #expect(value?["type"] as? String == "bind")
+        #expect(value?["volumeName"] as? String == "cache")
     }
 
     @Test("event monitoring reconnects after the first stream ends")

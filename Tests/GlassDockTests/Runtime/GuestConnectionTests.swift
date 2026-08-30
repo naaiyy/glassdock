@@ -5,6 +5,23 @@ import Testing
 
 @Suite("Multiplexed guest connection")
 struct GuestConnectionTests {
+    @Test("attach readiness waits until the guest request is written")
+    func attachReadinessWaitsForWrite() async throws {
+        let gate = GuestRequestWriteGate()
+        let completed = LockedFlag()
+        let waiter = Task {
+            try await gate.wait()
+            completed.set()
+        }
+
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(!completed.value)
+
+        gate.markWritten()
+        try await waiter.value
+        #expect(completed.value)
+    }
+
     @Test("readability callbacks stop before a closed descriptor is reused")
     func readGateStopsAfterClose() throws {
         let pair = try SocketPair.make()
@@ -251,6 +268,15 @@ private final class LockedFrames: @unchecked Sendable {
     func append(_ frame: GuestFrame) {
         lock.withLock { frames.append(frame) }
     }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state = false
+
+    var value: Bool { lock.withLock { state } }
+
+    func set() { lock.withLock { state = true } }
 }
 
 private struct SocketPair {

@@ -14,11 +14,11 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
-	registryreference "github.com/distribution/reference"
 	"github.com/containerd/containerd/v2/core/content"
 	containerimages "github.com/containerd/containerd/v2/core/images"
 	rootfsarchive "github.com/containerd/containerd/v2/pkg/archive"
 	"github.com/containerd/errdefs"
+	registryreference "github.com/distribution/reference"
 	digest "github.com/opencontainers/go-digest"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -51,17 +51,28 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 	if err != nil {
 		return api.ImageResponse{}, err
 	}
-	manifest, err := containerimages.Manifest(ctx, source.ContentStore(), source.Target(), nil)
-	if err != nil {
-		return api.ImageResponse{}, err
+	target := source.Target()
+	// Pulls commonly leave the image record pointing at a multi-platform
+	// index while only the guest platform's manifest and blobs are present.
+	// Resolve the index before reading the manifest, otherwise containerd
+	// follows unavailable sibling manifests during commit.
+	if containerimages.IsIndexType(target.MediaType) {
+		target, err = selectPlatformManifest(ctx, source.ContentStore(), target)
+		if err != nil {
+			return api.ImageResponse{}, fmt.Errorf("select source image platform: %w", err)
+		}
 	}
-	configDescriptor, err := source.Config(ctx)
+	manifest, err := containerimages.Manifest(ctx, source.ContentStore(), target, nil)
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("read source image manifest: %w", err)
+	}
+	configDescriptor, err := containerimages.Config(ctx, source.ContentStore(), target, nil)
+	if err != nil {
+		return api.ImageResponse{}, fmt.Errorf("read source image config descriptor: %w", err)
 	}
 	configData, err := content.ReadBlob(ctx, source.ContentStore(), configDescriptor)
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("read source image config: %w", err)
 	}
 	var imageConfig imagespec.Image
 	if err := json.Unmarshal(configData, &imageConfig); err != nil {
@@ -81,24 +92,24 @@ func (b *Backend) CommitImage(ctx context.Context, request api.ImageCommitReques
 
 	resume, err := pauseCommitTask(ctx, container, request.Pause)
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("pause source container: %w", err)
 	}
 	defer resume()
 
 	currentRoot, currentCleanup, err := b.mountContainerRoot(ctx, request.Container, "glassdock-commit-current-")
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("mount current container root: %w", err)
 	}
 	defer currentCleanup()
 
 	service := b.client.SnapshotService(info.Snapshotter)
 	snapshotInfo, err := service.Stat(ctx, info.SnapshotKey)
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("inspect container snapshot: %w", err)
 	}
 	parentRoot, parentCleanup, err := b.mountSnapshotParent(ctx, service, snapshotInfo.Parent)
 	if err != nil {
-		return api.ImageResponse{}, err
+		return api.ImageResponse{}, fmt.Errorf("mount parent snapshot: %w", err)
 	}
 	defer parentCleanup()
 

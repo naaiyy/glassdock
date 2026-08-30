@@ -17,6 +17,7 @@ enum DockerRuntimeGuestLimits {
     static let maximumImportArchiveBytes = 64 * 1024 * 1024
     static let maximumBuildContextBytes = 64 * 1024 * 1024
     static let maximumContainerArchiveBytes = 64 * 1024 * 1024
+    static let maximumImageVolumeCopyUpBytes = 64 * 1024 * 1024 * 1024
 }
 
 /// The Docker-facing operations needed by the runtime benchmark and its live
@@ -497,6 +498,7 @@ struct DockerRuntimeStats: Sendable, Equatable, Codable {
     }
 
     let id: String
+    var name: String = ""
     let read: String
     let preread: String
     let cpu_stats: CPUStats
@@ -542,9 +544,10 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let type: String
     let options: [String]
     var volumeName: String? = nil
+    var noCopy: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case source, target, readOnly, type, options, volumeName
+        case source, target, readOnly, type, options, volumeName, noCopy
     }
 
     init(
@@ -553,7 +556,8 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         readOnly: Bool,
         type: String = "bind",
         options: [String] = [],
-        volumeName: String? = nil
+        volumeName: String? = nil,
+        noCopy: Bool = false
     ) {
         self.source = source
         self.target = target
@@ -561,6 +565,7 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         self.type = type
         self.options = options
         self.volumeName = volumeName
+        self.noCopy = noCopy
     }
 
     /// The guest serializes mounts with `omitempty`; absent `readOnly`,
@@ -573,6 +578,7 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         type = try values.decodeIfPresent(String.self, forKey: .type) ?? "bind"
         options = try values.decodeIfPresent([String].self, forKey: .options) ?? []
         volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName)
+        noCopy = try values.decodeIfPresent(Bool.self, forKey: .noCopy) ?? false
     }
 }
 
@@ -775,7 +781,11 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
     let openStdin: Bool
     let stdinOnce: Bool
     let networkMode: String
+    let networkIPv4Address: String?
+    let networkIPv6Address: String?
+    let networkAliases: [String]
     let readonlyRootfs: Bool
+    let privileged: Bool
     let healthcheck: DockerRuntimeHealthcheck?
     let restartPolicy: DockerRuntimeRestartPolicy
     let restartCount: Int
@@ -791,7 +801,9 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
         labels: [String: String], tty: Bool, autoRemove: Bool, stopTimeout: Int?,
         mounts: [DockerRuntimeMount], ports: [DockerRuntimePortBinding],
         attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
-        networkMode: String = "default", readonlyRootfs: Bool = false,
+        networkMode: String = "default", readonlyRootfs: Bool = false, privileged: Bool = false,
+        networkIPv4Address: String? = nil, networkIPv6Address: String? = nil,
+        networkAliases: [String] = [],
         healthcheck: DockerRuntimeHealthcheck? = nil,
         restartPolicy: DockerRuntimeRestartPolicy = .init(),
         restartCount: Int = 0, resources: DockerRuntimeResources = .init(), stopSignal: String? = nil,
@@ -816,7 +828,11 @@ struct DockerRuntimeContainerCreate: Sendable, Equatable {
         self.openStdin = openStdin
         self.stdinOnce = stdinOnce
         self.networkMode = networkMode
+        self.networkIPv4Address = networkIPv4Address
+        self.networkIPv6Address = networkIPv6Address
+        self.networkAliases = networkAliases
         self.readonlyRootfs = readonlyRootfs
+        self.privileged = privileged
         self.healthcheck = healthcheck
         self.restartPolicy = restartPolicy
         self.restartCount = restartCount
@@ -861,6 +877,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
     let stdinOnce: Bool
     let mounts: [DockerRuntimeMount]
     let readonlyRootfs: Bool
+    let privileged: Bool
     let dns: [String]
     let dnsSearch: [String]
     let extraHosts: [String]
@@ -888,7 +905,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         entrypoint: [String]? = nil, cmd: [String]? = nil, environment: [String] = [],
         workingDirectory: String = "", user: String = "", hostname: String = "",
         attachStdin: Bool = false, openStdin: Bool = false, stdinOnce: Bool = false,
-        mounts: [DockerRuntimeMount] = [], readonlyRootfs: Bool = false,
+        mounts: [DockerRuntimeMount] = [], readonlyRootfs: Bool = false, privileged: Bool = false,
         dns: [String] = [], dnsSearch: [String] = [], extraHosts: [String] = []
     ) {
         self.id = id
@@ -923,6 +940,7 @@ struct DockerRuntimeContainer: Sendable, Equatable {
         self.stdinOnce = stdinOnce
         self.mounts = mounts
         self.readonlyRootfs = readonlyRootfs
+        self.privileged = privileged
         self.dns = dns
         self.dnsSearch = dnsSearch
         self.extraHosts = extraHosts
@@ -1002,6 +1020,7 @@ struct DockerRuntimeNetworkContainer: Sendable {
     let macAddress: String?
     let ipv4Address: String
     let ipv6Address: String?
+    let aliases: [String]?
 }
 
 struct DockerRuntimeNetwork: Sendable {
@@ -1227,6 +1246,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
             let result = try await call { try await cacheBackend.pruneBuildCache(all: true) }
+            await broadcastBuilderPrune(req, reclaimed: result.spaceReclaimed ?? 0)
             return try jsonResponse(
                 .ok,
                 BuildCachePruneResponse(
@@ -1235,7 +1255,18 @@ struct DockerRuntimeRoutes: RouteCollection {
                 )
             )
         }
+        await broadcastBuilderPrune(req, reclaimed: 0)
         return try jsonResponse(.ok, BuildCachePruneResponse(CachesDeleted: [], SpaceReclaimed: 0))
+    }
+
+    private func broadcastBuilderPrune(_ req: Request, reclaimed: Int64) async {
+        guard let broadcaster = req.application.storage[EventBroadcasterKey.self] else { return }
+        await broadcaster.broadcast(
+            DockerEvent.make(
+                type: "builder", action: "prune", actorID: "",
+                attributes: ["reclaimed": String(reclaimed)]
+            )
+        )
     }
 
     private func pullImage(_ req: Request) async throws -> Response {
@@ -1448,10 +1479,10 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func listImages(_ req: Request) async throws -> Response {
-        let filters = try Self.imageFilters(req.query[String.self, at: "filters"])
-        try Self.validateImageFilters(filters)
+        let filters = try ImageListFilter.parse(req.query[String.self, at: "filters"])
+        try ImageListFilter.validate(filters)
         let images = try await call { try await backend.listImages() }
-        let filtered = try Self.applyImageFilters(images, filters: filters)
+        let filtered = try ImageListFilter.apply(images, filters: filters)
         let containers = try await call { try await backend.listContainers(showAll: true) }
         let includeSharedSize = Self.mobyBool(req.query[String.self, at: "shared-size"])
         let includeDigests = Self.mobyBool(req.query[String.self, at: "digests"])
@@ -1568,6 +1599,7 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func commitImage(_ req: Request) async throws -> Response {
         let container = try requiredQuery("container", request: req)
+        let changes = (try? req.query.get([String].self, at: "changes"))?.joined(separator: "\n")
         let image = try await call {
             try await backend.commitImage(
                 container: container,
@@ -1576,7 +1608,7 @@ struct DockerRuntimeRoutes: RouteCollection {
                 comment: req.query[String.self, at: "comment"],
                 author: req.query[String.self, at: "author"],
                 pause: req.query[String.self, at: "pause"].map(Self.mobyBool) ?? true,
-                changes: req.query[String.self, at: "changes"]
+                changes: changes
             )
         }
         struct CommitResponse: Encodable {
@@ -1679,7 +1711,44 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid container create request: \(error)")
         }
         guard !body.Image.isEmpty else { throw Abort(.badRequest, reason: "No image specified") }
-        let mounts = try await mounts(from: body.HostConfig)
+        let image = try await call { try await backend.inspectImage(reference: body.Image) }
+        let resolvedMounts = try await mounts(from: body.HostConfig)
+        var mounts = resolvedMounts.mounts
+        let imageVolumeTargets = try Self.imageVolumeTargets(image.config.volumes)
+        var autoCreatedVolumes = resolvedMounts.autoCreatedVolumes
+        var anonymousVolumeNames = resolvedMounts.anonymousVolumeNames
+        let stopSignal = body.StopSignal.flatMap { $0.isEmpty ? nil : $0 } ?? image.config.stopSignal
+        do {
+            if let volumeClient {
+                let explicitTargets = Set(mounts.map { Self.normalizedContainerPath($0.target) })
+                for target in imageVolumeTargets.sorted() where !explicitTargets.contains(target) {
+                    let volume = try await volumeClient.create(
+                        request: RESTVolumeCreate(
+                            Name: "",
+                            Driver: "local",
+                            Options: [:],
+                            Labels: [ClientVolumeService.anonymousVolumeLabel: "true"]
+                        )
+                    )
+                    autoCreatedVolumes.append(volume)
+                    anonymousVolumeNames.insert(volume.Name)
+                    mounts.append(
+                        DockerRuntimeMount(
+                            source: volume.Mountpoint,
+                            target: target,
+                            readOnly: false,
+                            type: "bind",
+                            volumeName: volume.Name
+                        )
+                    )
+                }
+            }
+        } catch {
+            await deleteAutoCreatedVolumes(autoCreatedVolumes)
+            throw error
+        }
+        let networkMode = Self.networkMode(body: body)
+        let endpointConfig = Self.endpointConfig(body: body, networkMode: networkMode)
         let request = DockerRuntimeContainerCreate(
             name: req.query[String.self, at: "name"],
             image: body.Image,
@@ -1699,29 +1768,51 @@ struct DockerRuntimeRoutes: RouteCollection {
             attachStdin: body.AttachStdin ?? false,
             openStdin: body.OpenStdin ?? false,
             stdinOnce: body.StdinOnce ?? false,
-            networkMode: Self.networkMode(body: body),
+            networkMode: networkMode,
             readonlyRootfs: body.HostConfig?.ReadonlyRootfs ?? false,
+            privileged: body.HostConfig?.Privileged ?? false,
+            networkIPv4Address: endpointConfig?.IPAMConfig?.IPv4Address,
+            networkIPv6Address: endpointConfig?.IPAMConfig?.IPv6Address,
+            networkAliases: Self.endpointAliases(endpointConfig) ?? [],
             healthcheck: body.Healthcheck.flatMap(Self.healthcheck),
             restartPolicy: Self.restartPolicy(body.HostConfig?.RestartPolicy),
             resources: Self.resources(body.HostConfig),
-            stopSignal: body.StopSignal,
+            stopSignal: stopSignal,
             dns: body.HostConfig?.Dns ?? [],
             dnsSearch: body.HostConfig?.DnsSearch ?? [],
             extraHosts: body.HostConfig?.ExtraHosts ?? []
         )
         try Self.validateCreateRequest(request)
-        let container = try await call { try await backend.createContainer(request) }
-        if let volumes = volumeClient as? RuntimeVolumeService {
-            let volumeNames = Set(mounts.compactMap(\.volumeName))
-            if !volumeNames.isEmpty {
-                do {
-                    try await volumes.retain(names: volumeNames, containerID: container.id)
-                } catch {
-                    try? await backend.deleteContainer(
-                        id: container.id, force: true, removeVolumes: false)
-                    throw error
-                }
+        let container: DockerRuntimeContainer
+        do {
+            container = try await call { try await backend.createContainer(request) }
+        } catch {
+            await deleteAutoCreatedVolumes(autoCreatedVolumes)
+            throw error
+        }
+        do {
+            for mount in mounts
+            where
+                mount.volumeName != nil
+                && !mount.noCopy
+                && imageVolumeTargets.contains(Self.normalizedContainerPath(mount.target))
+            {
+                try await copyUpImageVolume(
+                    containerID: container.id,
+                    imagePath: Self.normalizedContainerPath(mount.target),
+                    volumePath: mount.source
+                )
             }
+            if let volumes = volumeClient as? RuntimeVolumeService {
+                try await volumes.retain(
+                    names: Set(mounts.compactMap(\.volumeName)), containerID: container.id,
+                    anonymousNames: anonymousVolumeNames)
+            }
+        } catch {
+            try? await backend.deleteContainer(
+                id: container.id, force: true, removeVolumes: false)
+            await deleteAutoCreatedVolumes(autoCreatedVolumes)
+            throw error
         }
         return try jsonResponse(.created, RESTContainerCreate(Id: container.id, Warnings: []))
     }
@@ -2107,17 +2198,15 @@ struct DockerRuntimeRoutes: RouteCollection {
         let stream = req.query[String.self, at: "stream"].map(Self.mobyBool) ?? true
         let oneShot = req.query[String.self, at: "one-shot"].map(Self.mobyBool) ?? false
         let backend = self.backend
+        let container = try await call { try await backend.inspectContainer(id: id) }
+        let name = container.name.hasPrefix("/") ? container.name : "/\(container.name)"
         return try await streamingResponse(
             logger: req.logger,
             contentType: .json,
-            resolve: {
-                // Resolve before headers are sent so a missing container is a
-                // clean 404.
-                _ = try await backend.inspectContainer(id: id)
-            }
         ) { writer in
             repeat {
-                let stats = try await backend.statsContainer(id: id)
+                var stats = try await backend.statsContainer(id: id)
+                stats.name = name
                 var data = try JSONEncoder().encode(stats)
                 if stream { data.append(0x0A) }
                 try await writer.writeBuffer(ByteBuffer(data: data))
@@ -2396,7 +2485,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         if let cacheBackend = backend as? any DockerRuntimeBuildCacheBackend {
             let usage = try await call { try await cacheBackend.systemDataUsage() }
             layersSize = usage.layersSize
-            if includeAll || types.contains("buildcache") {
+            if includeAll || types.contains("build-cache") {
                 buildCache = usage.buildCache.map(Self.buildCacheUsage)
             }
         }
@@ -2919,6 +3008,32 @@ struct DockerRuntimeRoutes: RouteCollection {
         return result.isEmpty ? nil : result
     }
 
+    private static func endpointConfig(
+        body: CreateRequest, networkMode: String
+    ) -> DockerNetworkEndpointConfig? {
+        guard let endpoints = body.NetworkingConfig?.EndpointsConfig, !endpoints.isEmpty else {
+            return nil
+        }
+        let rawMode = body.HostConfig?.NetworkMode ?? ""
+        let normalizedMode = rawMode.lowercased()
+        if networkMode == "host" || networkMode == "none"
+            || normalizedMode == "path" || normalizedMode.hasPrefix("container:")
+        {
+            return nil
+        }
+        if let exact = endpoints[rawMode] {
+            return exact
+        }
+        if let normalized = endpoints[normalizedMode] {
+            return normalized
+        }
+        if networkMode == "private" {
+            if let bridge = endpoints["bridge"] { return bridge }
+            if let `default` = endpoints["default"] { return `default` }
+        }
+        return endpoints.count == 1 ? endpoints.values.first : nil
+    }
+
     private static func logOptions(_ req: Request) throws -> DockerRuntimeLogOptions {
         func parse(_ name: String) throws -> Int64? {
             guard let raw = req.query[String.self, at: name], !raw.isEmpty, raw != "0" else {
@@ -2963,7 +3078,8 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private static func networkSummary(_ network: DockerRuntimeNetwork) -> RESTNetworkSummary {
-        let ipamConfig = network.ipam.Config.first
+        let ipamConfig = ipv4IPAMConfig(network) ?? network.ipam.Config.first
+        let ipv6Config = ipv6IPAMConfig(network)
         return RESTNetworkSummary(
             Name: network.name,
             Id: network.id,
@@ -2982,8 +3098,12 @@ struct DockerRuntimeRoutes: RouteCollection {
                     Name: $0.name,
                     EndpointID: $0.endpointID,
                     MacAddress: $0.macAddress,
-                    IPv4Address: $0.ipv4Address,
-                    IPv6Address: $0.ipv6Address
+                    IPv4Address: Self.networkEndpointAddress(
+                        $0.ipv4Address, subnet: ipamConfig?.Subnet
+                    ),
+                    IPv6Address: Self.networkEndpointAddress(
+                        $0.ipv6Address, subnet: ipv6Config?.Subnet
+                    )
                 )
             },
             ConfigFrom: nil,
@@ -2991,6 +3111,32 @@ struct DockerRuntimeRoutes: RouteCollection {
             Subnet: ipamConfig?.Subnet,
             Gateway: ipamConfig?.Gateway
         )
+    }
+
+    private static func networkEndpointAddress(_ address: String?, subnet: String?) -> String {
+        guard let address else { return "" }
+        guard !address.isEmpty, !address.contains("/"), let subnet,
+            let slash = subnet.lastIndex(of: "/"), Int(subnet[subnet.index(after: slash)...]) != nil
+        else { return address }
+        return "\(address)/\(subnet[subnet.index(after: slash)...])"
+    }
+
+    private static func ipv4IPAMConfig(_ network: DockerRuntimeNetwork) -> NetworkIPAMConfig? {
+        network.ipam.Config.first { config in
+            guard let subnet = config.Subnet, let slash = subnet.firstIndex(of: "/") else {
+                return false
+            }
+            return !String(subnet[..<slash]).contains(":")
+        }
+    }
+
+    private static func ipv6IPAMConfig(_ network: DockerRuntimeNetwork) -> NetworkIPAMConfig? {
+        network.ipam.Config.first { config in
+            guard let subnet = config.Subnet, let slash = subnet.firstIndex(of: "/") else {
+                return false
+            }
+            return String(subnet[..<slash]).contains(":")
+        }
     }
 
     private static func isProtectedGuestNetwork(_ network: DockerRuntimeNetwork) -> Bool {
@@ -3056,13 +3202,6 @@ struct DockerRuntimeRoutes: RouteCollection {
         return auth
     }
 
-    private static func matchesReference(_ reference: String, pattern: String) -> Bool {
-        let forms = familiarReferenceForms(reference)
-        return forms.contains { candidate in
-            globMatch(pattern: pattern, candidate: candidate)
-        }
-    }
-
     fileprivate static func imageMatchesContainer(
         _ container: DockerRuntimeContainer, image: DockerRuntimeImage
     ) -> Bool {
@@ -3078,195 +3217,8 @@ struct DockerRuntimeRoutes: RouteCollection {
         return containerID == imageID
     }
 
-    private static let imageFilterKeys: Set<String> = [
-        "before", "dangling", "label", "reference", "since", "until",
-    ]
-
-    private static func imageFilters(_ raw: String?) throws -> [String: [String]] {
-        guard let raw, !raw.isEmpty, let data = raw.data(using: .utf8) else {
-            return [:]
-        }
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw Abort(.badRequest, reason: "invalid filter")
-        }
-        var filters: [String: [String]] = [:]
-        for (key, value) in object {
-            guard imageFilterKeys.contains(key) else {
-                throw Abort(.badRequest, reason: "invalid filter '\(key)'")
-            }
-            if let values = value as? [String: Any] {
-                guard values.values.allSatisfy(isJSONBool) else {
-                    throw Abort(.badRequest, reason: "invalid filter")
-                }
-                filters[key] = values.compactMap { key, value in
-                    guard (value as? Bool) == true else { return nil }
-                    return key
-                }
-            } else if let values = value as? [Any] {
-                guard values.allSatisfy({ $0 is String }) else {
-                    throw Abort(.badRequest, reason: "invalid filter")
-                }
-                filters[key] = values.compactMap { $0 as? String }
-            } else if let value = value as? String {
-                filters[key] = [value]
-            } else {
-                throw Abort(.badRequest, reason: "invalid filter")
-            }
-        }
-        return filters
-    }
-
-    private static func isJSONBool(_ value: Any) -> Bool {
-        guard let number = value as? NSNumber else { return false }
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    }
-
-    private static func applyImageFilters(
-        _ images: [DockerRuntimeImage],
-        filters: [String: [String]]
-    ) throws -> [DockerRuntimeImage] {
-        var result = images
-        if let values = filters["dangling"] {
-            let isTrue = try Self.danglingFilterValue(values)
-            result = result.filter { Self.isDangling($0) == isTrue }
-        }
-        if let patterns = filters["reference"] {
-            result = result.filter { image in
-                image.references.contains { reference in
-                    patterns.contains { Self.matchesReference(reference, pattern: $0) }
-                }
-            }
-        }
-        if let values = filters["label"] {
-            result = result.filter { image in
-                values.contains { Self.matchesImageLabel($0, labels: image.labels) }
-            }
-        }
-        if let values = filters["before"] {
-            guard let boundary = Self.imageFilterDate(values, images: images) else {
-                throw Abort(.badRequest, reason: "invalid filter 'before'")
-            }
-            result = result.filter { $0.createdAt < boundary }
-        }
-        if let values = filters["since"] {
-            guard let boundary = Self.imageFilterDate(values, images: images) else {
-                throw Abort(.badRequest, reason: "invalid filter 'since'")
-            }
-            result = result.filter { $0.createdAt > boundary }
-        }
-        if let values = filters["until"] {
-            guard let raw = values.first, let boundary = parseDate(raw) else {
-                throw Abort(.badRequest, reason: "invalid filter 'until'")
-            }
-            result = result.filter { $0.createdAt < boundary }
-        }
-        return result
-    }
-
-    private static func validateImageFilters(_ filters: [String: [String]]) throws {
-        if let values = filters["dangling"] {
-            _ = try danglingFilterValue(values)
-        }
-    }
-
-    private static func danglingFilterValue(_ values: [String]) throws -> Bool {
-        guard !values.isEmpty else {
-            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
-        }
-        let isTrue = values.contains { $0 == "1" || $0 == "true" }
-        let isFalse = values.contains { $0 == "0" || $0 == "false" }
-        guard isTrue != isFalse else {
-            throw Abort(.badRequest, reason: "invalid filter 'dangling'")
-        }
-        return isTrue
-    }
-
-    private static func isDangling(_ image: DockerRuntimeImage) -> Bool {
-        image.references.allSatisfy {
-            $0 == "<none>:<none>" || $0.hasPrefix("sha256:") || $0.contains("@sha256:")
-        }
-    }
-
-    private static func matchesImageLabel(_ expression: String, labels: [String: String]) -> Bool {
-        let parts = expression.split(separator: "=", maxSplits: 1).map(String.init)
-        guard let key = parts.first, !key.isEmpty, let value = labels[key] else { return false }
-        return parts.count == 1 || value == parts[1]
-    }
-
-    private static func imageFilterDate(
-        _ values: [String],
-        images: [DockerRuntimeImage]
-    ) -> Date? {
-        guard let value = values.first, !value.isEmpty else { return nil }
-        if let image = images.first(where: {
-            $0.digest == value || $0.reference == value || $0.references.contains(value)
-        }) {
-            return image.createdAt
-        }
-        return parseDate(value)
-    }
-
-    private static func familiarReferenceForms(_ reference: String) -> [String] {
-        let familiar = familiarizeReference(reference)
-        var name = familiar
-        if let at = name.firstIndex(of: "@") {
-            name = String(name[..<at])
-        }
-        if let colon = name.lastIndex(of: ":"),
-            !name[name.index(after: colon)...].contains("/")
-        {
-            name = String(name[..<colon])
-        }
-        return name == familiar ? [familiar] : [familiar, name]
-    }
-
-    private static func familiarizeReference(_ reference: String) -> String {
-        for prefix in ["docker.io/library/", "docker.io/"] where reference.hasPrefix(prefix) {
-            return String(reference.dropFirst(prefix.count))
-        }
-        return reference
-    }
-
-    private static func globMatch(pattern: String, candidate: String) -> Bool {
-        let patternSegments = pattern.split(separator: "/", omittingEmptySubsequences: false)
-        let candidateSegments = candidate.split(separator: "/", omittingEmptySubsequences: false)
-        guard patternSegments.count == candidateSegments.count else { return false }
-        return zip(patternSegments, candidateSegments).allSatisfy {
-            wildcardMatch(pattern: Array($0), candidate: Array($1))
-        }
-    }
-
-    private static func wildcardMatch(pattern: [Character], candidate: [Character]) -> Bool {
-        var patternIndex = 0
-        var candidateIndex = 0
-        var starIndex = -1
-        var starCandidateIndex = 0
-        while candidateIndex < candidate.count {
-            if patternIndex < pattern.count,
-                pattern[patternIndex] == "?" || pattern[patternIndex] == candidate[candidateIndex]
-            {
-                patternIndex += 1
-                candidateIndex += 1
-            } else if patternIndex < pattern.count, pattern[patternIndex] == "*" {
-                starIndex = patternIndex
-                starCandidateIndex = candidateIndex
-                patternIndex += 1
-            } else if starIndex >= 0 {
-                patternIndex = starIndex + 1
-                starCandidateIndex += 1
-                candidateIndex = starCandidateIndex
-            } else {
-                return false
-            }
-        }
-        while patternIndex < pattern.count, pattern[patternIndex] == "*" {
-            patternIndex += 1
-        }
-        return patternIndex == pattern.count
-    }
-
     private static let systemDataUsageTypes: Set<String> = [
-        "container", "image", "volume", "buildcache",
+        "container", "image", "volume", "build-cache",
     ]
 
     private static func validateSystemDataUsageTypes(_ types: [String]) throws {
@@ -3508,17 +3460,32 @@ struct DockerRuntimeRoutes: RouteCollection {
             + result.deleted.map { ImageDeleteItem(Deleted: $0, Untagged: nil) }
     }
 
-    private func mounts(from host: CreateHostConfig?) async throws -> [DockerRuntimeMount] {
+    private func mounts(from host: CreateHostConfig?) async throws -> (
+        mounts: [DockerRuntimeMount], autoCreatedVolumes: [Volume], anonymousVolumeNames: Set<String>
+    ) {
         var result: [DockerRuntimeMount] = []
+        var autoCreatedVolumes: [Volume] = []
+        var anonymousVolumeNames: Set<String> = []
         for bind in host?.Binds ?? [] {
             let components = bind.split(separator: ":", maxSplits: 2).map(String.init)
             guard components.count >= 2, components[1].hasPrefix("/") else {
                 throw Abort(.badRequest, reason: "Invalid bind mount: \(bind)")
             }
             let source = try await resolveMountSource(components[0])
+            if source.isAnonymous {
+                anonymousVolumeNames.insert(try requireVolumeName(source))
+            }
+            if let created = source.createdVolume, source.isAnonymous {
+                autoCreatedVolumes.append(created)
+            }
+            let flags = components.count == 3 ? components[2].split(separator: ",").map(String.init) : []
             result.append(
                 DockerRuntimeMount(
-                    source: source.path, target: components[1], readOnly: components.count == 3 && components[2].split(separator: ",").contains("ro"), volumeName: source.volumeName
+                    source: source.path,
+                    target: components[1],
+                    readOnly: flags.contains("ro"),
+                    volumeName: source.volumeName,
+                    noCopy: flags.contains("nocopy")
                 ))
         }
         for mount in host?.Mounts ?? [] {
@@ -3526,16 +3493,52 @@ struct DockerRuntimeRoutes: RouteCollection {
                 throw Abort(.badRequest, reason: "Invalid mount target")
             }
             switch mount.`Type`.lowercased() {
-            case "bind", "volume":
-                guard let source = mount.Source else {
+            case "bind":
+                guard let source = mount.Source, source.hasPrefix("/") else {
                     throw Abort(.badRequest, reason: "Mount source is required")
                 }
                 let resolved = try await resolveMountSource(source)
+                if resolved.isAnonymous {
+                    anonymousVolumeNames.insert(try requireVolumeName(resolved))
+                }
+                if let created = resolved.createdVolume, resolved.isAnonymous {
+                    autoCreatedVolumes.append(created)
+                }
                 result.append(
                     DockerRuntimeMount(
                         source: resolved.path, target: mount.Target,
-                        readOnly: mount.ReadOnly ?? false, type: mount.`Type`.lowercased(),
-                        volumeName: resolved.volumeName
+                        // RuntimeVolumeService exposes the volume data through
+                        // the shared host directory. The guest therefore
+                        // receives a bind mount, while volumeName preserves
+                        // Docker's volume identity for inspect and refcounts.
+                        readOnly: mount.ReadOnly ?? false, type: "bind",
+                        volumeName: resolved.volumeName,
+                        noCopy: false
+                    )
+                )
+            case "volume":
+                if let source = mount.Source, source.hasPrefix("/") {
+                    throw Abort(.badRequest, reason: "Volume source must be a volume name")
+                }
+                let resolved = try await resolveMountSource(mount.Source ?? "")
+                if resolved.isAnonymous {
+                    anonymousVolumeNames.insert(try requireVolumeName(resolved))
+                }
+                if let created = resolved.createdVolume, resolved.isAnonymous {
+                    autoCreatedVolumes.append(created)
+                }
+                result.append(
+                    DockerRuntimeMount(
+                        source: resolved.path,
+                        target: mount.Target,
+                        // RuntimeVolumeService exposes the volume data through
+                        // the shared host directory. The guest therefore
+                        // receives a bind mount, while volumeName preserves
+                        // Docker's volume identity for inspect and refcounts.
+                        readOnly: mount.ReadOnly ?? false,
+                        type: "bind",
+                        volumeName: resolved.volumeName,
+                        noCopy: mount.VolumeOptions?.NoCopy ?? false
                     )
                 )
             case "tmpfs":
@@ -3565,18 +3568,148 @@ struct DockerRuntimeRoutes: RouteCollection {
                 )
             )
         }
-        return result
+        return (result, autoCreatedVolumes, anonymousVolumeNames)
     }
 
-    private func resolveMountSource(_ source: String) async throws -> (path: String, volumeName: String?) {
+    private struct ResolvedMountSource {
+        let path: String
+        let volumeName: String?
+        let isAnonymous: Bool
+        let createdVolume: Volume?
+    }
+
+    private func requireVolumeName(_ source: ResolvedMountSource) throws -> String {
+        guard let volumeName = source.volumeName, !volumeName.isEmpty else {
+            throw Abort(.internalServerError, reason: "Anonymous volume did not return a name")
+        }
+        return volumeName
+    }
+
+    private func resolveMountSource(_ source: String) async throws -> ResolvedMountSource {
         if source.hasPrefix("/") {
             let canonicalSource = canonicalFileURL(URL(fileURLWithPath: source)).path
-            return (canonicalSource, nil)
+            return .init(path: canonicalSource, volumeName: nil, isAnonymous: false, createdVolume: nil)
         }
         guard let volumeClient else {
             throw Abort(.serviceUnavailable, reason: "Named volume mounts are not configured")
         }
-        return (try await volumeClient.inspect(name: source).Mountpoint, source)
+        if !source.isEmpty {
+            do {
+                return .init(
+                    path: try await volumeClient.inspect(name: source).Mountpoint,
+                    volumeName: source, isAnonymous: false, createdVolume: nil)
+            } catch {
+                guard VolumeNotFound.matches(error) else { throw error }
+            }
+        }
+        let volume = try await volumeClient.create(
+            request: RESTVolumeCreate(
+                Name: source,
+                Driver: "local",
+                Options: [:],
+                Labels: source.isEmpty
+                    ? [ClientVolumeService.anonymousVolumeLabel: ""]
+                    : nil
+            )
+        )
+        return .init(
+            path: volume.Mountpoint, volumeName: volume.Name, isAnonymous: source.isEmpty,
+            createdVolume: source.isEmpty ? volume : nil)
+    }
+
+    private static func normalizedContainerPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private static func imageVolumeTargets(_ volumes: Set<String>) throws -> Set<String> {
+        var targets = Set<String>()
+        for volume in volumes {
+            guard volume.hasPrefix("/") else {
+                throw Abort(.internalServerError, reason: "Image has an invalid VOLUME target: \(volume)")
+            }
+            let target = normalizedContainerPath(volume)
+            guard target != "/" else {
+                throw Abort(.internalServerError, reason: "Image VOLUME target cannot be the root filesystem")
+            }
+            targets.insert(target)
+        }
+        return targets
+    }
+
+    private func deleteAutoCreatedVolumes(_ volumes: [Volume]) async {
+        guard let volumeClient else { return }
+        for volume in volumes {
+            try? await volumeClient.delete(name: volume.Name)
+        }
+    }
+
+    private func copyUpImageVolume(
+        containerID: String,
+        imagePath: String,
+        volumePath: String
+    ) async throws {
+        let volumeURL = URL(fileURLWithPath: volumePath, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: volumeURL.path) else {
+            throw Abort(.internalServerError, reason: "Volume mountpoint is missing: \(volumePath)")
+        }
+        guard
+            try FileManager.default.contentsOfDirectory(
+                at: volumeURL,
+                includingPropertiesForKeys: nil,
+                options: []
+            ).isEmpty
+        else {
+            return
+        }
+
+        let temporaryDirectory = try RequestBodyFileWriter.createSecureTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let archivePath = temporaryDirectory.appendingPathComponent("volume.tar", isDirectory: false)
+        do {
+            _ = try await backend.archiveContainerInfo(id: containerID, path: imagePath)
+        } catch let error as DockerRuntimeRouteError {
+            if case .notFound = error { return }
+            throw error
+        }
+        let stream = try await backend.archiveContainer(id: containerID, path: imagePath)
+        _ = try await RequestBodyFileWriter.writeData(
+            stream,
+            to: archivePath,
+            maxBytes: DockerRuntimeGuestLimits.maximumImageVolumeCopyUpBytes,
+            kind: "image volume copy-up archive"
+        )
+
+        let extractionDirectory = temporaryDirectory.appendingPathComponent("extract", isDirectory: true)
+        try ArchiveUtility.extract(
+            tarPath: archivePath,
+            to: extractionDirectory,
+            limits: .volumeCopyUp
+        )
+        let rootName = URL(fileURLWithPath: imagePath).lastPathComponent
+        let extractedRoot = extractionDirectory.appendingPathComponent(rootName, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: extractedRoot.path, isDirectory: &isDirectory),
+            isDirectory.boolValue
+        else {
+            throw Abort(.internalServerError, reason: "Image VOLUME archive has no directory root")
+        }
+        guard
+            try FileManager.default.contentsOfDirectory(
+                at: volumeURL,
+                includingPropertiesForKeys: nil,
+                options: []
+            ).isEmpty
+        else {
+            return
+        }
+        for child in try FileManager.default.contentsOfDirectory(
+            at: extractedRoot,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) {
+            let destination = volumeURL.appendingPathComponent(child.lastPathComponent, isDirectory: false)
+            try FileManager.default.moveItem(at: child, to: destination)
+        }
     }
 
     private static func ports(from host: CreateHostConfig?) -> [DockerRuntimePortBinding] {
@@ -3597,13 +3730,14 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private static func networkMode(body: CreateRequest) -> String {
         if body.NetworkDisabled == true { return "none" }
-        switch body.HostConfig?.NetworkMode?.lowercased() {
-        case nil, "", "default", "bridge": return "private"
+        guard let raw = body.HostConfig?.NetworkMode, !raw.isEmpty else { return "private" }
+        switch raw.lowercased() {
+        case "default", "bridge": return "private"
         case "host": return "host"
         case "none": return "none"
-        case let value? where value.hasPrefix("container:"):
-            return value
-        case let value?: return value
+        case let value where value.hasPrefix("container:"):
+            return raw
+        default: return raw
         }
     }
 
@@ -4016,6 +4150,10 @@ private struct DockerNetworkEndpointConfig: Content {
     let Links: [String]?
 }
 
+private struct DockerNetworkingConfig: Content {
+    let EndpointsConfig: [String: DockerNetworkEndpointConfig]?
+}
+
 private struct CreateRequest: Content {
     let Image: String
     let Cmd: [String]?
@@ -4031,6 +4169,7 @@ private struct CreateRequest: Content {
     let OpenStdin: Bool?
     let StdinOnce: Bool?
     let NetworkDisabled: Bool?
+    let NetworkingConfig: DockerNetworkingConfig?
     let StopSignal: String?
     let Healthcheck: CreateHealthcheck?
     let HostConfig: CreateHostConfig?
@@ -4073,7 +4212,12 @@ private struct CreateMount: Content {
     let Source: String?
     let Target: String
     let ReadOnly: Bool?
+    let VolumeOptions: CreateVolumeOptions?
     let TmpfsOptions: CreateTmpfsOptions?
+}
+
+private struct CreateVolumeOptions: Content {
+    let NoCopy: Bool?
 }
 
 private struct CreateTmpfsOptions: Content {
@@ -4229,6 +4373,8 @@ private struct InspectResponse: Content {
     }
 
     struct NetworkEndpointPayload: Content {
+        let NetworkID: String
+        let EndpointID: String
         let IPAddress: String
         let IPPrefixLen: Int
         let MacAddress: String
@@ -4302,11 +4448,12 @@ private struct InspectResponse: Content {
         let Propagation: String
 
         init(_ mount: DockerRuntimeMount) {
-            `Type` = mount.type
+            let isVolume = mount.volumeName != nil
+            `Type` = isVolume ? "volume" : mount.type
             Name = mount.volumeName
             Source = mount.source
             Destination = mount.target
-            Driver = mount.type == "volume" ? "local" : ""
+            Driver = isVolume ? "local" : ""
             Mode = mount.readOnly ? "ro" : "rw"
             RW = !mount.readOnly
             Propagation = ""
@@ -4370,7 +4517,9 @@ private struct InspectResponse: Content {
                     ("\($0.containerPort)/\($0.proto)", EmptyObject())
                 }),
             Volumes: Dictionary(
-                uniqueKeysWithValues: container.mounts.filter { $0.type == "volume" }.map {
+                uniqueKeysWithValues: container.mounts.filter {
+                    $0.volumeName != nil || $0.type == "volume"
+                }.map {
                     ($0.target, EmptyObject())
                 }),
             WorkingDir: container.workingDirectory, User: container.user,
@@ -4389,11 +4538,13 @@ private struct InspectResponse: Content {
         }
         HostConfig = .init(
             Binds: container.mounts.filter { $0.type == "bind" }.map {
-                "\($0.source):\($0.target):\($0.readOnly ? "ro" : "rw")"
+                let mode = $0.readOnly ? "ro" : "rw"
+                let noCopy = $0.noCopy ? ",nocopy" : ""
+                return "\($0.volumeName ?? $0.source):\($0.target):\(mode)\(noCopy)"
             }, PortBindings: ports, NetworkMode: container.networkMode,
             StopTimeout: container.stopTimeout,
             RestartPolicy: .init(container.restartPolicy), AutoRemove: container.autoRemove,
-            ReadonlyRootfs: container.readonlyRootfs, Privileged: false, Init: nil,
+            ReadonlyRootfs: container.readonlyRootfs, Privileged: container.privileged, Init: nil,
             Dns: container.dns, DnsSearch: container.dnsSearch, ExtraHosts: container.extraHosts,
             Memory: container.resources.memory, MemorySwap: container.resources.memorySwap,
             MemoryReservation: container.resources.memoryReservation,
@@ -4404,17 +4555,22 @@ private struct InspectResponse: Content {
         )
         let endpoints = networks.compactMap { network -> (String, NetworkEndpointPayload)? in
             guard let endpoint = network.containers[container.id] else { return nil }
+            let ipv4Config = Self.ipv4IPAMConfig(network)
+            let ipv6Config = Self.ipv6IPAMConfig(network)
             let (ipv4, ipv4Prefix) = Self.addressAndPrefix(
-                endpoint.ipv4Address, fallback: network.ipam.Config.first?.Subnet
+                endpoint.ipv4Address, fallback: ipv4Config?.Subnet
             )
-            let (ipv6, ipv6Prefix) = Self.addressAndPrefix(endpoint.ipv6Address, fallback: nil)
+            let (ipv6, ipv6Prefix) = Self.addressAndPrefix(
+                endpoint.ipv6Address, fallback: ipv6Config?.Subnet
+            )
             return (
                 network.name,
                 NetworkEndpointPayload(
+                    NetworkID: network.id, EndpointID: endpoint.endpointID ?? "",
                     IPAddress: ipv4, IPPrefixLen: ipv4Prefix,
-                    MacAddress: endpoint.macAddress ?? "", Gateway: Self.gateway(network),
+                    MacAddress: endpoint.macAddress ?? "", Gateway: ipv4Config?.Gateway ?? "",
                     GlobalIPv6Address: ipv6, GlobalIPv6PrefixLen: ipv6Prefix,
-                    IPv6Gateway: "", Links: nil, Aliases: nil
+                    IPv6Gateway: ipv6Config?.Gateway ?? "", Links: nil, Aliases: endpoint.aliases
                 )
             )
         }
@@ -4424,7 +4580,7 @@ private struct InspectResponse: Content {
             Bridge: endpoints.first?.0 ?? "", SandboxID: "", HairpinMode: false,
             LinkLocalIPv6Address: "", LinkLocalIPv6PrefixLen: 0, Ports: ports,
             SandboxKey: "", SecondaryIPAddresses: [], SecondaryIPv6Addresses: [],
-            EndpointID: "", Gateway: primary?.Gateway ?? "",
+            EndpointID: primary?.EndpointID ?? "", Gateway: primary?.Gateway ?? "",
             GlobalIPv6Address: primary?.GlobalIPv6Address ?? "",
             GlobalIPv6PrefixLen: primary?.GlobalIPv6PrefixLen ?? 0,
             IPAddress: primary?.IPAddress ?? "", IPPrefixLen: primary?.IPPrefixLen ?? 0,
@@ -4450,9 +4606,24 @@ private struct InspectResponse: Content {
         return (value, 0)
     }
 
-    private static func gateway(_ network: DockerRuntimeNetwork) -> String {
-        network.ipam.Config.first?.Gateway ?? ""
+    private static func ipv4IPAMConfig(_ network: DockerRuntimeNetwork) -> NetworkIPAMConfig? {
+        network.ipam.Config.first { config in
+            guard let subnet = config.Subnet, let slash = subnet.firstIndex(of: "/") else {
+                return false
+            }
+            return !String(subnet[..<slash]).contains(":")
+        }
     }
+
+    private static func ipv6IPAMConfig(_ network: DockerRuntimeNetwork) -> NetworkIPAMConfig? {
+        network.ipam.Config.first { config in
+            guard let subnet = config.Subnet, let slash = subnet.firstIndex(of: "/") else {
+                return false
+            }
+            return String(subnet[..<slash]).contains(":")
+        }
+    }
+
 }
 
 private struct ListResponse: Content {

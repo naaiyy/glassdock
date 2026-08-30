@@ -74,7 +74,6 @@ func isRootfsTarball(data []byte) bool {
 		case "index.json", "manifest.json", "oci-layout":
 			return false
 		}
-		return true
 	}
 }
 

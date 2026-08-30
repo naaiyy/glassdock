@@ -3,9 +3,17 @@ set -eu
 
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mount -t tmpfs -o mode=1777 tmpfs /tmp
+# crun's live resource update reads its JSON from /dev/stdin. devtmpfs does
+# not provide the conventional stdio links, so restore them before starting
+# containerd and its runtime shims.
+ln -sf /proc/self/fd/0 /dev/stdin
+ln -sf /proc/self/fd/1 /dev/stdout
+ln -sf /proc/self/fd/2 /dev/stderr
 
 : "${GLASSDOCK_GUEST_ADDRESS:?GLASSDOCK_GUEST_ADDRESS is required}"
 : "${GLASSDOCK_GUEST_GATEWAY:?GLASSDOCK_GUEST_GATEWAY is required}"

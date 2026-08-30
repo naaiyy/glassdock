@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	registryreference "github.com/distribution/reference"
 	"github.com/glassdock/glassdock/guest/internal/api"
 	bkclient "github.com/moby/buildkit/client"
 
@@ -159,10 +161,49 @@ type mobyWorkerAlias struct {
 }
 
 func (w *mobyWorkerAlias) Exporter(name string, sm *session.Manager) (exporter.Exporter, error) {
+	mobyAlias := name == "moby"
 	if name == "moby" {
 		name = "image"
 	}
-	return w.Worker.Exporter(name, sm)
+	imageExporter, err := w.Worker.Exporter(name, sm)
+	if err != nil {
+		return nil, err
+	}
+	if mobyAlias {
+		return &mobyImageExporter{Exporter: imageExporter}, nil
+	}
+	return imageExporter, nil
+}
+
+// mobyImageExporter preserves the Docker driver's tag behavior while using
+// BuildKit's containerd image exporter. Docker's Moby exporter canonicalizes a
+// short tag such as "example" to "docker.io/library/example:latest" before
+// storing it; the upstream image exporter stores the literal name instead.
+type mobyImageExporter struct {
+	exporter.Exporter
+}
+
+func (e *mobyImageExporter) Resolve(
+	ctx context.Context, id int, attrs map[string]string,
+) (exporter.ExporterInstance, error) {
+	cloned := make(map[string]string, len(attrs))
+	for key, value := range attrs {
+		cloned[key] = value
+	}
+	if name := cloned["name"]; name != "" {
+		cloned["name"] = canonicalMobyImageNames(name)
+	}
+	return e.Exporter.Resolve(ctx, id, cloned)
+}
+
+func canonicalMobyImageNames(value string) string {
+	names := strings.Split(value, ",")
+	for index, name := range names {
+		if canonical, err := registryreference.ParseDockerRef(name); err == nil {
+			names[index] = canonical.String()
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 // DiskUsage reports BuildKit cache records for /system/df.

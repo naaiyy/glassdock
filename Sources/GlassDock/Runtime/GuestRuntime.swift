@@ -155,6 +155,7 @@ struct GuestContainerMetadata: Decodable {
     let stopTimeout: Int?
     let mounts: [DockerRuntimeMount]?
     let readonlyRootfs: Bool?
+    let privileged: Bool?
     let dns: [String]?
     let dnsSearch: [String]?
     let extraHosts: [String]?
@@ -674,11 +675,12 @@ struct GuestNetworkContainerPayload: Decodable {
     let macAddress: String?
     let ipv4Address: String
     let ipv6Address: String?
+    let aliases: [String]?
 
     enum CodingKeys: String, CodingKey {
         case name
         case endpointID = "endpointId"
-        case macAddress, ipv4Address, ipv6Address
+        case macAddress, ipv4Address, ipv6Address, aliases
     }
 }
 
@@ -990,6 +992,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         let stopTimeout: Int?
         let mounts: [DockerRuntimeMount]
         let readonlyRootfs: Bool
+        let privileged: Bool
         let dns: [String]
         let dnsSearch: [String]
         let extraHosts: [String]
@@ -1011,6 +1014,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     private let engine: PersistentEngine
     private let portPublisher: GuestPortPublicationManager
     private let broadcaster: EventBroadcaster?
+    private let volumeService: RuntimeVolumeService?
     private var metadata: [String: Metadata] = [:]
     private var manuallyStopped: Set<String> = []
     private var execs: [String: DockerRuntimeExecCreate] = [:]
@@ -1027,11 +1031,13 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     init(
         engine: PersistentEngine,
         portPublisher: GuestPortPublicationManager,
-        broadcaster: EventBroadcaster? = nil
+        broadcaster: EventBroadcaster? = nil,
+        volumeService: RuntimeVolumeService? = nil
     ) {
         self.engine = engine
         self.portPublisher = portPublisher
         self.broadcaster = broadcaster
+        self.volumeService = volumeService
     }
 
     func startEventMonitor() async throws {
@@ -1267,6 +1273,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "labels": .object(request.labels.mapValues(JSONValue.string)),
             "hostname": request.hostname.map(JSONValue.string) ?? .string(id.prefix(12).description),
             "readonlyRootfs": .bool(request.readonlyRootfs),
+            "privileged": .bool(request.privileged),
             "attachStdin": .bool(request.attachStdin),
             "openStdin": .bool(request.openStdin),
             "stdinOnce": .bool(request.stdinOnce),
@@ -1274,17 +1281,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "snapshotter": .string("overlayfs"),
             "runtime": .string("io.containerd.runc.v2"),
             "runtimeBinary": .string("/usr/bin/crun"),
-            "network": .object(["mode": .string(request.networkMode)]),
+            "network": .object([
+                "mode": .string(request.networkMode),
+                "ipv4Address": request.networkIPv4Address.map(JSONValue.string) ?? .null,
+                "ipv6Address": request.networkIPv6Address.map(JSONValue.string) ?? .null,
+                "aliases": .array(request.networkAliases.map(JSONValue.string)),
+            ]),
             "publishedPorts": .array(requestedPorts),
-            "mounts": .array(
-                request.mounts.map {
-                    .object([
-                        "source": .string($0.source), "target": .string($0.target),
-                        "type": .string($0.type), "readonly": .bool($0.readOnly),
-                        "options": .array($0.options.map(JSONValue.string)),
-                    ])
-                }
-            ),
+            "mounts": .array(request.mounts.map(Self.mountJSON)),
             "metadata": .object([
                 "name": .string(containerName),
                 "args": .array(request.command.map(JSONValue.string)),
@@ -1300,16 +1304,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 "openStdin": .bool(request.openStdin),
                 "stdinOnce": .bool(request.stdinOnce),
                 "autoRemove": .bool(request.autoRemove),
-                "mounts": .array(
-                    request.mounts.map {
-                        .object([
-                            "source": .string($0.source), "target": .string($0.target),
-                            "type": .string($0.type), "readonly": .bool($0.readOnly),
-                            "options": .array($0.options.map(JSONValue.string)),
-                        ])
-                    }
-                ),
+                "mounts": .array(request.mounts.map(Self.mountJSON)),
                 "readonlyRootfs": .bool(request.readonlyRootfs),
+                "privileged": .bool(request.privileged),
                 "dns": .array(request.dns.map(JSONValue.string)),
                 "dnsSearch": .array(request.dnsSearch.map(JSONValue.string)),
                 "extraHosts": .array(request.extraHosts.map(JSONValue.string)),
@@ -1374,6 +1371,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stopTimeout: request.stopTimeout,
             mounts: request.mounts,
             readonlyRootfs: request.readonlyRootfs,
+            privileged: request.privileged,
             dns: request.dns,
             dnsSearch: request.dnsSearch,
             extraHosts: request.extraHosts,
@@ -1763,14 +1761,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         releaseGuestPorts(containerID: resolved)
         pendingPublications.remove(resolved)
         manuallyStopped.remove(resolved)
+        // Keep the metadata until the destroy event is shaped. Moby includes the
+        // image, name, and container labels on destroy, so image- and label-filtered
+        // event consumers must see the same attributes as create/start/die.
+        await broadcastContainer("destroy", id: resolved)
         metadata.removeValue(forKey: resolved)
+        try? await volumeService?.release(
+            containerID: resolved, removeAnonymous: removeVolumes)
         await removals.signal(id: resolved, exitCode: exitCode)
-        await broadcaster?.broadcast(
-            DockerEvent.simpleEvent(
-                id: resolved, type: "container", status: "destroy",
-                image: "", name: resolved
-            )
-        )
     }
 
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer {
@@ -1936,22 +1934,20 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         let resolved = try await resolve(id)
         let response = try await request("container.stats", ["id": .string(resolved)])
         let payload = try decode(response, as: GuestStatsPayload.self)
-        let cpuUsage = DockerRuntimeStats.CPUUsage(
-            total_usage: payload.cpuStats.cpuUsage.totalUsage,
-            usage_in_kernelmode: payload.cpuStats.cpuUsage.inKernelMode,
-            usage_in_usermode: payload.cpuStats.cpuUsage.inUserMode
-        )
-        let throttling = DockerRuntimeStats.ThrottlingData(
-            throttled_periods: payload.cpuStats.throttlingData.throttledPeriods,
-            throttled_time: payload.cpuStats.throttlingData.throttledTime,
-            throttling_periods: payload.cpuStats.throttlingData.throttlingPeriods
-        )
         func cpu(_ stats: GuestStatsPayload.CPUStats) -> DockerRuntimeStats.CPUStats {
             DockerRuntimeStats.CPUStats(
-                cpu_usage: cpuUsage,
+                cpu_usage: DockerRuntimeStats.CPUUsage(
+                    total_usage: stats.cpuUsage.totalUsage,
+                    usage_in_kernelmode: stats.cpuUsage.inKernelMode,
+                    usage_in_usermode: stats.cpuUsage.inUserMode
+                ),
                 system_cpu_usage: stats.systemCPUUsage,
                 online_cpus: stats.onlineCPUs,
-                throttling_data: throttling
+                throttling_data: DockerRuntimeStats.ThrottlingData(
+                    throttled_periods: stats.throttlingData.throttledPeriods,
+                    throttled_time: stats.throttlingData.throttledTime,
+                    throttling_periods: stats.throttlingData.throttlingPeriods
+                )
             )
         }
         var networks: [String: DockerRuntimeStats.NetworkStats]?
@@ -2263,8 +2259,11 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             ]
             Self.addLogOptions(options, to: &payload)
             let requestPayload = JSONValue.object(payload)
-            return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
-                let control = GuestStreamRequestControl()
+            let writeGate = GuestRequestWriteGate()
+            let control = GuestStreamRequestControl()
+            let stream = AsyncThrowingStream<DockerRuntimeProcessFrame, Error>(
+                bufferingPolicy: .bufferingOldest(64)
+            ) { continuation in
                 let relay = onInput
                 let request = Task { [weak self] in
                     do {
@@ -2285,6 +2284,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                                 }
                             },
                             onRequestID: { requestID in
+                                writeGate.markWritten()
                                 relay?.set(connection: connection, requestID: requestID)
                             })
                         continuation.yield(
@@ -2292,6 +2292,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                         )
                         continuation.finish()
                     } catch {
+                        writeGate.fail(error)
                         continuation.finish(throwing: error)
                     }
                     await runtimeEngine.finishedWork()
@@ -2306,6 +2307,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     }
                 }
             }
+            do {
+                try await withTaskCancellationHandler {
+                    try await writeGate.wait()
+                } onCancel: {
+                    control.cancel()
+                }
+            } catch {
+                control.cancel()
+                throw error
+            }
+            return stream
         } catch {
             await finishAttachment(id: resolved, token: attachmentToken)
             throw error
@@ -2544,7 +2556,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     private static func routeError(for error: GuestProtocolError) -> DockerRuntimeRouteError? {
         let message = error.message
         let lowercased = message.lowercased()
-        if error.code.contains("not_found") || lowercased.contains("not found") {
+        if error.code.contains("not_found") || lowercased.contains("not found")
+            || lowercased.contains("no such file")
+        {
             return .notFound(message)
         }
         if lowercased.contains("image must already exist") {
@@ -2709,6 +2723,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stdinOnce: meta?.stdinOnce ?? guest.metadata?.stdinOnce ?? false,
             mounts: meta?.mounts ?? guest.metadata?.mounts ?? [],
             readonlyRootfs: meta?.readonlyRootfs ?? guest.metadata?.readonlyRootfs ?? false,
+            privileged: meta?.privileged ?? guest.metadata?.privileged ?? false,
             dns: meta?.dns ?? guest.metadata?.dns ?? [],
             dnsSearch: meta?.dnsSearch ?? guest.metadata?.dnsSearch ?? [],
             extraHosts: meta?.extraHosts ?? guest.metadata?.extraHosts ?? []
@@ -2745,7 +2760,8 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     endpointID: $0.endpointID,
                     macAddress: $0.macAddress,
                     ipv4Address: $0.ipv4Address,
-                    ipv6Address: $0.ipv6Address
+                    ipv6Address: $0.ipv6Address,
+                    aliases: $0.aliases
                 )
             },
             labels: guest.labels
@@ -2772,6 +2788,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stopTimeout: stored.stopTimeout,
             mounts: stored.mounts ?? [],
             readonlyRootfs: stored.readonlyRootfs ?? false,
+            privileged: stored.privileged ?? false,
             dns: stored.dns ?? [],
             dnsSearch: stored.dnsSearch ?? [],
             extraHosts: stored.extraHosts ?? [],
@@ -2816,6 +2833,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             workingDirectory: meta.workingDirectory, user: meta.user, hostname: meta.hostname,
             attachStdin: meta.attachStdin, openStdin: meta.openStdin, stdinOnce: meta.stdinOnce,
             mounts: meta.mounts, readonlyRootfs: meta.readonlyRootfs,
+            privileged: meta.privileged,
             dns: meta.dns, dnsSearch: meta.dnsSearch, extraHosts: meta.extraHosts
         )
     }
@@ -2920,6 +2938,18 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "hostIP": .string(binding.hostIP),
         ]
         if let hostPort = binding.hostPort { object["hostPort"] = .number(Double(hostPort)) }
+        return .object(object)
+    }
+
+    static func mountJSON(_ mount: DockerRuntimeMount) -> JSONValue {
+        var object: [String: JSONValue] = [
+            "source": .string(mount.source), "target": .string(mount.target),
+            "type": .string(mount.type), "readonly": .bool(mount.readOnly),
+            "options": .array(mount.options.map(JSONValue.string)),
+        ]
+        if let volumeName = mount.volumeName {
+            object["volumeName"] = .string(volumeName)
+        }
         return .object(object)
     }
 
@@ -3144,6 +3174,51 @@ private final class GuestFirstChunkGate: @unchecked Sendable {
         } onCancel: {
             // Cancellation propagates through the guest request failing, which
             // calls fail(_:); nothing extra to resume here.
+        }
+    }
+}
+
+/// Keeps an attach HTTP upgrade from completing before the guest has received
+/// the attach request frame. Docker sends container.start after the upgrade;
+/// the guest must see attach first so fast processes cannot exit before their
+/// live output subscriber is installed.
+final class GuestRequestWriteGate: @unchecked Sendable {
+    private enum Outcome {
+        case written
+        case failed(Error)
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiting: [CheckedContinuation<Void, Error>] = []
+
+    func markWritten() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard outcome == nil else { return }
+        outcome = .written
+        waiting.forEach { $0.resume() }
+        waiting = []
+    }
+
+    func fail(_ error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard outcome == nil else { return }
+        outcome = .failed(error)
+        waiting.forEach { $0.resume(throwing: error) }
+        waiting = []
+    }
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            defer { lock.unlock() }
+            switch outcome {
+            case .some(.written): continuation.resume()
+            case .some(.failed(let error)): continuation.resume(throwing: error)
+            case nil: waiting.append(continuation)
+            }
         }
     }
 }

@@ -178,6 +178,15 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 			_ = writeError(w, request.ID, "too_many_requests", errors.New("connection request limit reached"))
 			continue
 		}
+		if request.Method == api.MethodContainerAttach {
+			body, err := decode[api.ContainerLogsRequest](request)
+			if err != nil {
+				<-inFlight
+				_ = writeError(w, request.ID, "invalid_argument", err)
+				continue
+			}
+			s.backend.PrepareAttach(body.ID)
+		}
 		requestCtx, requestCancel := context.WithCancel(ctx)
 		requestMu.Lock()
 		requestCancels[request.ID] = requestCancel

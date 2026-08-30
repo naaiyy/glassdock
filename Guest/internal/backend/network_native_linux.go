@@ -9,12 +9,17 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 type nativeNetworkNamespaceOperations struct{}
 
 func (nativeNetworkNamespaceOperations) Attach(
-	namespace, bridge, hostVeth, containerVeth, address string, prefix int, interfaceName string,
+	namespace, bridge, hostVeth, containerVeth string,
+	ipv4Address string, ipv4Prefix int,
+	ipv6Address string, ipv6Prefix int,
+	ipv4Gateway string, ipv6Gateway string,
+	interfaceName string,
 ) (err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -69,17 +74,44 @@ func (nativeNetworkNamespaceOperations) Attach(
 	if err := handle.LinkSetName(ethernet, interfaceName); err != nil {
 		return fmt.Errorf("name attached namespace veth: %w", err)
 	}
-	if address != "" {
-		parsedAddress, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", address, prefix))
+	if ipv4Address != "" {
+		parsedAddress, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", ipv4Address, ipv4Prefix))
 		if err != nil {
-			return fmt.Errorf("parse attached namespace address: %w", err)
+			return fmt.Errorf("parse attached namespace IPv4 address: %w", err)
 		}
 		if err := handle.AddrAdd(ethernet, parsedAddress); err != nil {
-			return fmt.Errorf("assign attached namespace address: %w", err)
+			return fmt.Errorf("assign attached namespace IPv4 address: %w", err)
+		}
+	}
+	if ipv6Address != "" {
+		parsedAddress, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", ipv6Address, ipv6Prefix))
+		if err != nil {
+			return fmt.Errorf("parse attached namespace IPv6 address: %w", err)
+		}
+		// Addresses in a private Docker bridge are allocated by Glass Dock's
+		// IPAM. Skip kernel DAD so the first application connection cannot race
+		// the address's transition out of the tentative state.
+		parsedAddress.Flags = unix.IFA_F_NODAD
+		if err := handle.AddrAdd(ethernet, parsedAddress); err != nil {
+			return fmt.Errorf("assign attached namespace IPv6 address: %w", err)
 		}
 	}
 	if err := handle.LinkSetUp(ethernet); err != nil {
 		return fmt.Errorf("bring attached namespace veth up: %w", err)
+	}
+	if ipv4Gateway != "" {
+		if err := handle.RouteAdd(&netlink.Route{
+			LinkIndex: ethernet.Attrs().Index, Gw: net.ParseIP(ipv4Gateway),
+		}); err != nil {
+			return fmt.Errorf("add attached namespace IPv4 default route: %w", err)
+		}
+	}
+	if ipv6Gateway != "" {
+		if err := handle.RouteAdd(&netlink.Route{
+			LinkIndex: ethernet.Attrs().Index, Gw: net.ParseIP(ipv6Gateway),
+		}); err != nil {
+			return fmt.Errorf("add attached namespace IPv6 default route: %w", err)
+		}
 	}
 	removePair = false
 	return nil

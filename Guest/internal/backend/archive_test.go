@@ -3,6 +3,7 @@ package backend
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,6 +71,30 @@ func TestValidateNoOverwriteDirNonDirAllowsMatchingTypes(t *testing.T) {
 
 	if err := validateNoOverwriteDirNonDir(root, data.Bytes()); err != nil {
 		t.Fatalf("matching file types should be allowed: %v", err)
+	}
+}
+
+func TestWriteArchivePathUsesBasenameForContainerPath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tmp", "fixture")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var data bytes.Buffer
+	if err := writeArchivePath(context.Background(), path, "tmp/fixture", &data); err != nil {
+		t.Fatal(err)
+	}
+	reader := tar.NewReader(&data)
+	header, err := reader.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Name != "fixture" {
+		t.Fatalf("archive root name = %q, want %q", header.Name, "fixture")
 	}
 }
 

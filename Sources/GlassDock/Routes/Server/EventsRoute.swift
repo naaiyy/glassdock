@@ -67,7 +67,7 @@ struct DockerEventFilter: Sendable {
                 return event.Type == "container" && Self.matchesResource(event, expected: expected)
             case "image":
                 let image = event.Actor.Attributes["image"] ?? event.from
-                return expected.contains(image)
+                return expected.contains { Self.matchesImage($0, actual: image) }
                     || (event.Type == "image" && Self.matchesResource(event, expected: expected))
             case "network", "volume", "plugin", "daemon":
                 return event.Type == key && Self.matchesResource(event, expected: expected)
@@ -83,6 +83,34 @@ struct DockerEventFilter: Sendable {
             event.Actor.ID == value || event.Actor.ID.hasPrefix(value)
                 || name == value || name == DockerContainerMetadataStore.normalized(value)
         }
+    }
+
+    private static func matchesImage(_ expected: String, actual: String) -> Bool {
+        !Set(referenceForms(expected)).isDisjoint(with: referenceForms(actual))
+    }
+
+    /// Docker clients use both familiar references such as `alpine:latest` and
+    /// fully qualified references such as `docker.io/library/alpine:latest` in
+    /// event filters. Moby accepts those equivalent forms for one image.
+    private static func referenceForms(_ reference: String) -> [String] {
+        let familiar = familiarizeReference(reference)
+        var name = familiar
+        if let at = name.firstIndex(of: "@") {
+            name = String(name[..<at])
+        }
+        if let colon = name.lastIndex(of: ":"),
+            !name[name.index(after: colon)...].contains("/")
+        {
+            name = String(name[..<colon])
+        }
+        return name == familiar ? [reference, familiar, name] : [reference, familiar, name]
+    }
+
+    private static func familiarizeReference(_ reference: String) -> String {
+        for prefix in ["docker.io/library/", "docker.io/"] where reference.hasPrefix(prefix) {
+            return String(reference.dropFirst(prefix.count))
+        }
+        return reference
     }
 
     private static func matchesLabel(_ expression: String, attributes: [String: String]) -> Bool {

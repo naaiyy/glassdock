@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -15,6 +16,23 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
+
+func TestPrivilegedSpecOptGrantsKnownCapabilities(t *testing.T) {
+	if privilegedSpecOpt(false) != nil {
+		t.Fatal("unprivileged containers must not receive a capability spec option")
+	}
+
+	spec := &specs.Spec{Process: &specs.Process{}}
+	if err := privilegedSpecOpt(true)(context.Background(), nil, nil, spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Process.Capabilities == nil {
+		t.Fatal("privileged containers must receive an OCI capability set")
+	}
+	if runtime.GOOS == "linux" && len(spec.Process.Capabilities.Bounding) == 0 {
+		t.Fatal("privileged containers must receive known Linux capabilities")
+	}
+}
 
 func TestContainerUpdateResourcesMapsAndPersistsOCIFields(t *testing.T) {
 	shares := uint64(512)
@@ -120,6 +138,26 @@ func TestInvalidateImageUnpackCacheRemovesDigestAcrossSnapshotters(t *testing.T)
 	if _, ok := backend.imageUnpackCache.Load(imageUnpackCacheKeyForDigest("sha256:other", "overlayfs")); !ok {
 		t.Fatal("unpack cache entry for another image was removed")
 	}
+}
+
+func TestUsesPrivateNetworkNamespaceForDockerManagedNetworks(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "", want: true},
+		{mode: "private", want: true},
+		{mode: "frontend", want: true},
+		{mode: "host", want: false},
+		{mode: "none", want: false},
+		{mode: "path", want: false},
+		{mode: "container:abc", want: false},
+	} {
+		if got := usesPrivateNetworkNamespace(test.mode); got != test.want {
+			t.Errorf("usesPrivateNetworkNamespace(%q) = %v, want %v", test.mode, got, test.want)
+		}
+		}
 }
 
 func TestExecCleanupRetriesUntilSuccess(t *testing.T) {
@@ -329,6 +367,78 @@ func TestToOCIMountsPreservesOptionsAndReadonly(t *testing.T) {
 	}
 	if len(mounts[0].Options) != 2 || mounts[0].Options[0] != "rbind" || mounts[0].Options[1] != "ro" {
 		t.Fatalf("unexpected options: %#v", mounts[0].Options)
+	}
+}
+
+func TestBuildkitStateVolumePathAcceptsOnlyBuildxStateVolumes(t *testing.T) {
+	t.Parallel()
+	valid := "buildx_buildkit_glassdock0_state"
+	path, err := buildkitStateVolumePath(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(buildkitStateVolumeRoot, valid)
+	if path != want {
+		t.Fatalf("buildkitStateVolumePath(%q) = %q, want %q", valid, path, want)
+	}
+
+	for _, name := range []string{
+		"",
+		"buildx_buildkit_glassdock0",
+		"other_buildx_buildkit_glassdock0_state",
+		"buildx_buildkit_../state",
+		"buildx_buildkit_glassdock0_state/child",
+	} {
+		if _, err := buildkitStateVolumePath(name); err == nil {
+			t.Errorf("buildkitStateVolumePath(%q) accepted an invalid name", name)
+		}
+	}
+}
+
+func TestEquivalentImageReferencesIncludesDockerLatestAliases(t *testing.T) {
+	t.Parallel()
+	got := equivalentImageReferences("docker.io/library/demo:latest")
+	want := []string{
+		"docker.io/library/demo:latest",
+		"docker.io/library/demo",
+		"demo:latest",
+		"demo",
+	}
+	for _, reference := range want {
+		if !contains(got, reference) {
+			t.Errorf("equivalentImageReferences omitted %q: %#v", reference, got)
+		}
+	}
+}
+
+func TestMatchingImageReferenceResolvesLegacyBuildkitTag(t *testing.T) {
+	t.Parallel()
+	references := []string{"glassdock-buildx-proof"}
+	if got := matchingImageReference(
+		"docker.io/library/glassdock-buildx-proof:latest", references,
+	); got != references[0] {
+		t.Fatalf("matchingImageReference = %q, want %q", got, references[0])
+	}
+}
+
+func TestIsBuildkitStateVolumeRequiresTheInternalMountShape(t *testing.T) {
+	t.Parallel()
+	valid := api.Mount{
+		Type:       "bind",
+		Target:     "/var/lib/buildkit",
+		VolumeName: "buildx_buildkit_glassdock0_state",
+	}
+	if !isBuildkitStateVolume(valid) {
+		t.Fatal("expected the Buildx state mount to match")
+	}
+	for _, mount := range []api.Mount{
+		{Type: "volume", Target: valid.Target, VolumeName: valid.VolumeName},
+		{Type: valid.Type, Target: "/var/lib/other", VolumeName: valid.VolumeName},
+		{Type: valid.Type, Target: valid.Target, VolumeName: "glassdock-data"},
+	} {
+		if isBuildkitStateVolume(mount) {
+			t.Errorf("mount %#v matched the internal Buildx state shape", mount)
+		}
 	}
 }
 

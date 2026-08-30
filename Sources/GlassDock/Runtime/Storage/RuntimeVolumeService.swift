@@ -12,15 +12,18 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         var labels: [String: String]
         let createdAt: Date
         var referencedContainers: Set<String> = []
+        var anonymousOwners: Set<String> = []
         var version: UInt64 = 1
 
         private enum CodingKeys: String, CodingKey {
-            case name, driver, options, labels, createdAt, referencedContainers, version
+            case name, driver, options, labels, createdAt, referencedContainers, anonymousOwners,
+                version
         }
 
         init(
             name: String, driver: String, options: [String: String], labels: [String: String],
-            createdAt: Date, referencedContainers: Set<String>, version: UInt64 = 1
+            createdAt: Date, referencedContainers: Set<String>, anonymousOwners: Set<String> = [],
+            version: UInt64 = 1
         ) {
             self.name = name
             self.driver = driver
@@ -28,6 +31,7 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             self.labels = labels
             self.createdAt = createdAt
             self.referencedContainers = referencedContainers
+            self.anonymousOwners = anonymousOwners
             self.version = version
         }
 
@@ -40,6 +44,8 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
             createdAt = try values.decode(Date.self, forKey: .createdAt)
             referencedContainers =
                 try values.decodeIfPresent(Set<String>.self, forKey: .referencedContainers) ?? []
+            anonymousOwners =
+                try values.decodeIfPresent(Set<String>.self, forKey: .anonymousOwners) ?? []
             version = try values.decodeIfPresent(UInt64.self, forKey: .version) ?? 1
         }
     }
@@ -50,13 +56,14 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
     private var referenceValidator: (@Sendable (String) async -> Bool)?
 
     init(root: URL? = nil) {
-        self.root =
+        let configuredRoot =
             root
             ?? ProcessInfo.processInfo.environment["GLASSDOCK_VOLUME_DIRECTORY"].map {
                 URL(fileURLWithPath: $0, isDirectory: true)
             }
             ?? GlassDockDirectories.hostHome
             .appendingPathComponent("Library/Application Support/Glass Dock/volumes", isDirectory: true)
+        self.root = canonicalFileURL(configuredRoot)
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
     }
@@ -137,22 +144,48 @@ actor RuntimeVolumeService: ClientVolumeProtocol {
         referenceValidator = validator
     }
 
-    func retain(names: Set<String>, containerID: String) throws {
+    func retain(
+        names: Set<String>, containerID: String, anonymousNames: Set<String> = []
+    ) throws {
         for name in names {
             var metadata = try readMetadata(
                 at: volumeDirectory(name).appendingPathComponent("metadata.json", isDirectory: false)
             )
             metadata.referencedContainers.insert(containerID)
+            if anonymousNames.contains(name),
+                metadata.labels[ClientVolumeService.anonymousVolumeLabel] != nil
+            {
+                metadata.anonymousOwners.insert(containerID)
+            }
             try write(metadata)
         }
     }
 
     func release(containerID: String) throws {
+        try release(containerID: containerID, removeAnonymous: false)
+    }
+
+    /// Releases a container's volume references. Docker's `rm -v` and
+    /// `--rm` also remove anonymous volumes that were created for that
+    /// container, while named volumes remain available for later containers.
+    func release(containerID: String, removeAnonymous: Bool) throws {
+        var anonymousVolumes: [String] = []
         for entry in try metadataEntries() {
             var metadata = try readMetadata(at: entry)
-            if metadata.referencedContainers.remove(containerID) != nil {
+            guard metadata.referencedContainers.remove(containerID) != nil else { continue }
+            let ownsAnonymousVolume = metadata.anonymousOwners.remove(containerID) != nil
+            if removeAnonymous,
+                ownsAnonymousVolume,
+                metadata.referencedContainers.isEmpty,
+                metadata.labels[ClientVolumeService.anonymousVolumeLabel] != nil
+            {
+                anonymousVolumes.append(metadata.name)
+            } else {
                 try write(metadata)
             }
+        }
+        for name in anonymousVolumes {
+            try delete(name: name)
         }
     }
 

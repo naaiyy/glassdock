@@ -55,6 +55,32 @@ struct RequestBodyFileWriterTests {
         #expect(permissions?.intValue == 0o600)
     }
 
+    @Test("streamed Data chunks are written in order without collection")
+    func writesStreamedData() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("archive.tar")
+        let stream = AsyncStream<Data> { continuation in
+            continuation.yield(Data("first-".utf8))
+            continuation.yield(Data("second".utf8))
+            continuation.finish()
+        }
+
+        let count = try await RequestBodyFileWriter.writeData(
+            stream,
+            to: destination,
+            maxBytes: 64,
+            kind: "test archive"
+        )
+
+        #expect(count == 12)
+        #expect(try Data(contentsOf: destination) == Data("first-second".utf8))
+        let permissions =
+            try FileManager.default.attributesOfItem(atPath: destination.path)[.posixPermissions] as? NSNumber
+        #expect(permissions?.intValue == 0o600)
+    }
+
     @Test("the disk-backed writer accepts the exact bound and rejects the next byte")
     func enforcesLimit() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -95,6 +121,46 @@ struct RequestBodyFileWriterTests {
         #expect(try Data(contentsOf: destination) == Data("1234".utf8))
     }
 
+    @Test("the Data writer enforces its exact byte bound")
+    func enforcesDataLimit() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("archive.tar")
+        let stream = AsyncStream<Data> { continuation in
+            continuation.yield(Data("1234".utf8))
+            continuation.yield(Data("5".utf8))
+            continuation.finish()
+        }
+
+        do {
+            _ = try await RequestBodyFileWriter.writeData(
+                stream,
+                to: destination,
+                maxBytes: 4,
+                kind: "test archive"
+            )
+            Issue.record("expected the Data stream size limit to fail")
+        } catch let abort as Abort {
+            #expect(abort.status == .payloadTooLarge)
+            #expect(abort.reason == "test archive exceeds the 4-byte limit")
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+
+        let exactStream = AsyncStream<Data> { continuation in
+            continuation.yield(Data("1234".utf8))
+            continuation.finish()
+        }
+        let exactCount = try await RequestBodyFileWriter.writeData(
+            exactStream,
+            to: destination,
+            maxBytes: 4,
+            kind: "test archive"
+        )
+        #expect(exactCount == 4)
+        #expect(try Data(contentsOf: destination) == Data("1234".utf8))
+    }
+
     @Test("source errors remove the partially written archive")
     func sourceErrorCleansUp() async throws {
         enum SourceFailure: Error { case failed }
@@ -116,6 +182,32 @@ struct RequestBodyFileWriterTests {
                 kind: "test archive"
             )
             Issue.record("expected the source error to propagate")
+        } catch SourceFailure.failed {
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+
+    @Test("Data source errors remove the partially written archive")
+    func dataSourceErrorCleansUp() async throws {
+        enum SourceFailure: Error { case failed }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("archive.tar")
+        let stream = AsyncThrowingStream<Data, Error> { continuation in
+            continuation.yield(Data("partial".utf8))
+            continuation.finish(throwing: SourceFailure.failed)
+        }
+
+        do {
+            _ = try await RequestBodyFileWriter.writeData(
+                stream,
+                to: destination,
+                maxBytes: 64,
+                kind: "test archive"
+            )
+            Issue.record("expected the Data source error to propagate")
         } catch SourceFailure.failed {
             #expect(!FileManager.default.fileExists(atPath: destination.path))
         }
@@ -151,6 +243,41 @@ struct RequestBodyFileWriterTests {
         do {
             _ = try await writeTask.value
             Issue.record("expected cancellation to propagate")
+        } catch is CancellationError {
+            #expect(!FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+
+    @Test("Data stream cancellation removes the partially written archive")
+    func dataCancellationCleansUp() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("archive.tar")
+        var continuation: AsyncStream<Data>.Continuation?
+        let stream = AsyncStream<Data> {
+            continuation = $0
+        }
+        continuation?.yield(Data("partial".utf8))
+
+        let writeTask = Task {
+            try await RequestBodyFileWriter.writeData(
+                stream,
+                to: destination,
+                maxBytes: 64,
+                kind: "test archive"
+            )
+        }
+        for _ in 0..<100 {
+            if (try? Data(contentsOf: destination).count) == 7 { break }
+            await Task.yield()
+        }
+        writeTask.cancel()
+        continuation?.finish()
+
+        do {
+            _ = try await writeTask.value
+            Issue.record("expected Data stream cancellation to propagate")
         } catch is CancellationError {
             #expect(!FileManager.default.fileExists(atPath: destination.path))
         }
