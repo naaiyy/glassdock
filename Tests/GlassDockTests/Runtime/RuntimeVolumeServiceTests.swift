@@ -5,6 +5,22 @@ import Testing
 
 @Suite("Persistent runtime volumes")
 struct RuntimeVolumeServiceTests {
+    @Test("canonicalizes a volume root before exposing its mountpoint")
+    func canonicalizesVolumeRoot() async throws {
+        let root = URL(fileURLWithPath: "/tmp").appendingPathComponent(
+            "glassdock-volume-(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let volume = try await RuntimeVolumeService(root: root).create(
+            request: RESTVolumeCreate(Name: "database", Driver: "local", Options: [:], Labels: nil)
+        )
+
+        #expect(
+            volume.Mountpoint
+                == canonicalFileURL(root.appendingPathComponent("database/data")).path
+        )
+    }
+
     @Test("creates directory-backed data and restores metadata")
     func createsAndRestores() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -77,6 +93,32 @@ struct RuntimeVolumeServiceTests {
         await #expect(throws: (any Error).self) {
             _ = try await service.inspect(name: "database")
         }
+    }
+
+    @Test("releases and removes anonymous volume references on container removal")
+    func removesAnonymousVolumesOnContainerRemoval() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = RuntimeVolumeService(root: root)
+        _ = try await service.create(
+            request: RESTVolumeCreate(
+                Name: "anonymous", Driver: "local", Options: [:],
+                Labels: [ClientVolumeService.anonymousVolumeLabel: ""]
+            )
+        )
+        _ = try await service.create(
+            request: RESTVolumeCreate(Name: "named", Driver: "local", Options: [:], Labels: nil)
+        )
+        try await service.retain(
+            names: ["anonymous", "named"], containerID: "container-1", anonymousNames: ["anonymous"])
+
+        try await service.release(containerID: "container-1", removeAnonymous: true)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await service.inspect(name: "anonymous")
+        }
+        #expect(try await service.inspect(name: "named").UsageData?.RefCount == 0)
     }
 
     @Test("reads metadata from before reference tracking")

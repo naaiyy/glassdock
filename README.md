@@ -174,6 +174,12 @@ build arguments, JSON-form `RUN`, `SHELL`, multi-stage `COPY --from`, local
 archive `ADD`, `.dockerignore`, labels, `CMD`, and healthchecks. Run it with
 `make api-compatibility-build`.
 
+The default Docker Buildx driver and an explicit `docker-container` builder
+are supported through the Docker `/grpc` and `/session` relays. The
+`docker-container` driver's internal `/var/lib/buildkit` state volume is
+stored on the guest ext4 disk because BuildKit requires native Linux
+filesystem operations; Docker still reports the normal volume identity.
+
 ### Image names, IDs, and repeated builds
 
 containerd owns image content and tags. Glass Dock normalizes familiar image names
@@ -398,8 +404,9 @@ rules. Do not compare result values from different machines.
   `Compatibility/moby-v28.5.2-matrix.json`.
 - Pull authentication from Docker's `X-Registry-Auth` header is forwarded only
   to the registry named by the image reference.
-- Privileged containers remain rejected because Glass Dock does not grant host
-  capabilities to workloads.
+- Privileged containers receive OCI capabilities and a guest cgroup mount for
+  nested tools such as BuildKit. The privilege is scoped to the Linux guest;
+  it does not expose macOS host capabilities or devices.
 - Bind-mounting the Docker socket into a container is not implemented.
 - The VMM exports the host home directory to the trusted guest so it can serve
   arbitrary Docker bind requests. Containers receive only their requested bind

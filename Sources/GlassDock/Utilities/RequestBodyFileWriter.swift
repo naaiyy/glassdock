@@ -68,4 +68,53 @@ enum RequestBodyFileWriter {
         completed = true
         return totalBytes
     }
+
+    /// Copies an asynchronous Data stream to a private file without retaining
+    /// the complete stream in memory. Runtime archive responses use Data rather
+    /// than ByteBuffer, so keep this sibling to `write` instead of adapting the
+    /// stream through an unstructured task.
+    @discardableResult
+    static func writeData<Chunks: AsyncSequence>(
+        _ chunks: Chunks,
+        to destination: URL,
+        maxBytes: Int,
+        kind: String
+    ) async throws -> Int where Chunks.Element == Data {
+        guard
+            FileManager.default.createFile(
+                atPath: destination.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
+        else {
+            throw Abort(.internalServerError, reason: "failed to create temporary file for \(kind)")
+        }
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forWritingTo: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+        var completed = false
+        defer {
+            try? handle.close()
+            if !completed {
+                try? FileManager.default.removeItem(at: destination)
+            }
+        }
+
+        var totalBytes = 0
+        for try await data in chunks {
+            try Task.checkCancellation()
+            guard data.count <= maxBytes - totalBytes else {
+                throw Abort(.payloadTooLarge, reason: "\(kind) exceeds the \(maxBytes)-byte limit")
+            }
+            try handle.write(contentsOf: data)
+            totalBytes += data.count
+        }
+        try Task.checkCancellation()
+        completed = true
+        return totalBytes
+    }
 }

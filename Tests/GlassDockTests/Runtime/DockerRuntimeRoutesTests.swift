@@ -1,3 +1,4 @@
+import ContainerizationArchive
 import Foundation
 import NIOCore
 import Testing
@@ -126,7 +127,7 @@ struct DockerRuntimeRoutesTests {
         try await withRuntimeRoutes(backend) { app in
             try await app.testing().test(
                 .POST,
-                "/v1.51/commit?container=container-1&repo=example.test%2Fcopy&tag=snapshot&pause=0&comment=checkpoint%20one&author=tester&changes=CMD%20echo%20ok"
+                "/v1.51/commit?container=container-1&repo=example.test%2Fcopy&tag=snapshot&pause=0&comment=checkpoint%20one&author=tester&changes=CMD%20echo%20ok&changes=ENV%20COMMITTED=yes"
             ) { response async throws in
                 #expect(response.status == .created)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
@@ -140,12 +141,13 @@ struct DockerRuntimeRoutesTests {
         #expect(commit.comment == "checkpoint one")
         #expect(commit.author == "tester")
         #expect(commit.pause == false)
-        #expect(commit.changes == "CMD echo ok")
+        #expect(commit.changes == "CMD echo ok\nENV COMMITTED=yes")
     }
 
     @Test("container lifecycle maps Docker create fields and status codes")
     func containerLifecycle() async throws {
-        let backend = DockerRuntimeBackendMock(stopTimeout: -1)
+        let backend = DockerRuntimeBackendMock(
+            stopTimeout: -1, imageConfig: .init(stopSignal: "SIGQUIT"))
         try await withRuntimeRoutes(backend) { app in
             let createBody = #"""
                 {
@@ -191,6 +193,13 @@ struct DockerRuntimeRoutesTests {
                 let portBindings = hostConfig?["PortBindings"] as? [String: Any]
                 #expect(portBindings?["80/tcp"] != nil)
                 #expect(hostConfig?["StopTimeout"] as? Int == -1)
+                let networkSettings = value?["NetworkSettings"] as? [String: Any]
+                let networks = networkSettings?["Networks"] as? [String: Any]
+                let bridge = networks?["racy"] as? [String: Any]
+                #expect(networkSettings?["EndpointID"] as? String == "endpoint-1")
+                #expect(bridge?["NetworkID"] as? String == "network-racy")
+                #expect(bridge?["EndpointID"] as? String == "endpoint-1")
+                #expect(bridge?["Aliases"] as? [String] == ["container-1", "api"])
             }
             try await app.testing().test(.GET, "/v1.51/containers/json?all=1") { response async throws in
                 #expect(response.status == .ok)
@@ -208,6 +217,7 @@ struct DockerRuntimeRoutesTests {
         #expect(create.name == "bench")
         #expect(create.command == ["/bin/true"])
         #expect(create.stopTimeout == -1)
+        #expect(create.stopSignal == "SIGQUIT")
         #expect(create.environment == ["A=B"])
         #expect(create.autoRemove)
         #expect(create.mounts == [.init(source: "/private/tmp/source", target: "/data", readOnly: true)])
@@ -215,6 +225,34 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastWaitCondition == .nextExit)
         #expect(await backend.lastListShowAll == true)
         #expect(await backend.lastDelete == .init(force: true, volumes: true))
+    }
+
+    @Test("container create inherits the image stop signal unless explicitly overridden")
+    func containerCreateStopSignal() async throws {
+        let backend = DockerRuntimeBackendMock(imageConfig: .init(stopSignal: "SIGQUIT"))
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Image":"fixture@sha256:abc"}"#)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+            #expect(await backend.lastCreate?.stopSignal == "SIGQUIT")
+
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture@sha256:abc","StopSignal":"SIGTERM"}"#
+                )
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+        #expect(await backend.lastCreate?.stopSignal == "SIGTERM")
     }
 
     @Test("container create canonicalizes macOS bind path aliases")
@@ -242,6 +280,235 @@ struct DockerRuntimeRoutesTests {
 
         let create = try #require(await backend.lastCreate)
         #expect(create.mounts == [.init(source: canonicalSource, target: "/data", readOnly: false)])
+    }
+
+    @Test("container create translates named volume mounts to shared bind paths")
+    func containerCreateTranslatesNamedVolumeMount() async throws {
+        let backend = DockerRuntimeBackendMock()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let volumes = RuntimeVolumeService(root: root)
+        let volume = try await volumes.create(
+            request: RESTVolumeCreate(Name: "mounted", Driver: "local", Options: [:], Labels: nil)
+        )
+
+        try await withRuntimeRoutes(backend, volumeClient: volumes) { app in
+            let body = #"{"Image":"fixture@sha256:abc","HostConfig":{"Mounts":[{"Type":"volume","Source":"mounted","Target":"/data"}]}}"#
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: body)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        #expect(
+            create.mounts == [
+                .init(
+                    source: volume.Mountpoint, target: "/data", readOnly: false,
+                    type: "bind", volumeName: "mounted")
+            ]
+        )
+    }
+
+    @Test("container create materializes image volumes and copies image data")
+    func containerCreateMaterializesImageVolume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let archivePath = root.appendingPathComponent("volume.tar")
+        try makeImageVolumeArchive(at: archivePath, contents: "seed-data")
+
+        let backend = DockerRuntimeBackendMock(
+            imageConfig: .init(volumes: ["/data"]),
+            archiveData: try Data(contentsOf: archivePath)
+        )
+        let volumes = RuntimeVolumeService(
+            root: root.appendingPathComponent("volumes", isDirectory: true)
+        )
+
+        try await withRuntimeRoutes(backend, volumeClient: volumes) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Image":"fixture@sha256:abc"}"#)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        let mount = try #require(create.mounts.first)
+        let volumeName = try #require(mount.volumeName)
+        #expect(create.mounts.count == 1)
+        #expect(mount.target == "/data")
+        #expect(mount.type == "bind")
+        #expect(mount.noCopy == false)
+
+        let volume = try await volumes.inspect(name: volumeName)
+        #expect(volume.Labels?[ClientVolumeService.anonymousVolumeLabel] == "true")
+        #expect(
+            try String(
+                contentsOf: URL(fileURLWithPath: volume.Mountpoint).appendingPathComponent("seed"),
+                encoding: .utf8
+            ) == "seed-data"
+        )
+    }
+
+    @Test("container create honors volume nocopy")
+    func containerCreateHonorsVolumeNoCopy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let archivePath = root.appendingPathComponent("volume.tar")
+        try makeImageVolumeArchive(at: archivePath, contents: "should-not-copy")
+
+        let backend = DockerRuntimeBackendMock(
+            imageConfig: .init(volumes: ["/data"]),
+            archiveData: try Data(contentsOf: archivePath)
+        )
+        let volumes = RuntimeVolumeService(
+            root: root.appendingPathComponent("volumes", isDirectory: true)
+        )
+
+        try await withRuntimeRoutes(backend, volumeClient: volumes) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture@sha256:abc","HostConfig":{"Mounts":[{"Type":"volume","Source":"cache","Target":"/data","VolumeOptions":{"NoCopy":true}}]}}"#
+                )
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        let mount = try #require(create.mounts.first)
+        let volumeName = try #require(mount.volumeName)
+        #expect(mount.noCopy)
+        let volume = try await volumes.inspect(name: volumeName)
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: volume.Mountpoint).appendingPathComponent("seed").path
+            )
+        )
+    }
+
+    @Test("container create tolerates a missing image volume directory")
+    func containerCreateToleratesMissingImageVolumeDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let backend = DockerRuntimeBackendMock(
+            imageConfig: .init(volumes: ["/data"]), missingArchivePath: "/data")
+        let volumes = RuntimeVolumeService(
+            root: root.appendingPathComponent("volumes", isDirectory: true)
+        )
+
+        try await withRuntimeRoutes(backend, volumeClient: volumes) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Image":"fixture@sha256:abc"}"#)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        let volumeName = try #require(create.mounts.first?.volumeName)
+        let volume = try await volumes.inspect(name: volumeName)
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: volume.Mountpoint).appendingPathComponent("seed").path
+            )
+        )
+    }
+
+    @Test("container inspect reports named volume fields using Docker names")
+    func containerInspectReportsNamedVolume() async throws {
+        let backend = DockerRuntimeBackendMock(
+            mounts: [
+                .init(
+                    source: "/private/tmp/glassdock-volume-data", target: "/data", readOnly: false,
+                    type: "bind", volumeName: "cache")
+            ]
+        )
+
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/json") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let hostConfig = value?["HostConfig"] as? [String: Any]
+                let binds = hostConfig?["Binds"] as? [String]
+                #expect(binds == ["cache:/data:rw"])
+                let mounts = value?["Mounts"] as? [[String: Any]]
+                #expect(mounts?.first?["Type"] as? String == "volume")
+                #expect(mounts?.first?["Name"] as? String == "cache")
+            }
+        }
+    }
+
+    @Test("container inspect preserves volume nocopy")
+    func containerInspectPreservesVolumeNoCopy() async throws {
+        let backend = DockerRuntimeBackendMock(
+            mounts: [
+                .init(
+                    source: "/private/tmp/glassdock-volume-data", target: "/data", readOnly: false,
+                    type: "bind", volumeName: "cache", noCopy: true)
+            ]
+        )
+
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/json") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let hostConfig = value?["HostConfig"] as? [String: Any]
+                let binds = hostConfig?["Binds"] as? [String]
+                #expect(binds == ["cache:/data:rw,nocopy"])
+            }
+        }
+    }
+
+    @Test("container create forwards endpoint IPAM and aliases")
+    func containerCreateForwardsNetworkEndpoint() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            let body = #"""
+                {
+                "Image":"fixture@sha256:abc",
+                "HostConfig":{"NetworkMode":"frontend"},
+                "NetworkingConfig":{"EndpointsConfig":{"frontend":{
+                    "IPAMConfig":{"IPv4Address":"10.89.0.25","IPv6Address":"fd00:1::25"},
+                    "Aliases":["api","frontend"]
+                }}}
+                }
+                """#
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: body)
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        #expect(create.networkMode == "frontend")
+        #expect(create.networkIPv4Address == "10.89.0.25")
+        #expect(create.networkIPv6Address == "fd00:1::25")
+        #expect(create.networkAliases == ["api", "frontend"])
     }
 
     @Test("container update forwards live resource limits and restart policy")
@@ -423,6 +690,20 @@ struct DockerRuntimeRoutesTests {
             }
             try await app.testing().test(.GET, "/v1.51/networks/missing") { response async in
                 #expect(response.status == .notFound)
+            }
+        }
+    }
+
+    @Test("network inspection renders member IPv4 addresses as CIDRs")
+    func networkInspectionAddsEndpointPrefix() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(.GET, "/v1.51/networks/network-racy") { response async throws in
+                #expect(response.status == .ok)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let containers = value?["Containers"] as? [String: [String: Any]]
+                #expect(containers?["container-1"]?["IPv4Address"] as? String == "10.88.0.2/16")
+                #expect(containers?["container-1"]?["IPv6Address"] as? String == "fd00:1::2/64")
             }
         }
     }
@@ -860,6 +1141,7 @@ struct DockerRuntimeRoutesTests {
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
                 #expect(value?["id"] as? String == "container-1")
+                #expect(value?["name"] as? String == "/bench")
                 #expect(value?["pids_stats"] is [String: Any])
                 #expect(!response.body.string.hasSuffix("\n"))
             }
@@ -1110,6 +1392,10 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
     private let containerSizeRootFs: Int64
     private let stopTimeout: Int?
     private let waitDelayNanoseconds: UInt64
+    private let containerMounts: [DockerRuntimeMount]
+    private let imageConfig: DockerRuntimeImageConfig
+    private let archiveData: Data?
+    private let missingArchivePath: String?
 
     init(
         logOutput: String? = nil,
@@ -1118,7 +1404,11 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
         containerSizeRootFs: Int64 = -1,
         running: Bool = false,
         stopTimeout: Int? = nil,
-        waitDelayNanoseconds: UInt64 = 0
+        waitDelayNanoseconds: UInt64 = 0,
+        mounts: [DockerRuntimeMount] = [],
+        imageConfig: DockerRuntimeImageConfig = .init(),
+        archiveData: Data? = nil,
+        missingArchivePath: String? = nil
     ) {
         self.logOutput = logOutput
         self.imageRows =
@@ -1130,6 +1420,10 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
         self.running = running
         self.stopTimeout = stopTimeout
         self.waitDelayNanoseconds = waitDelayNanoseconds
+        self.containerMounts = mounts
+        self.imageConfig = imageConfig
+        self.archiveData = archiveData
+        self.missingArchivePath = missingArchivePath
     }
 
     func pullImage(
@@ -1148,6 +1442,7 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
         return DockerRuntimeImage(
             reference: reference,
             digest: "sha256:abc",
+            config: imageConfig,
             rootFSLayers: ["sha256:layer"],
             history: [
                 DockerRuntimeImageHistory(
@@ -1297,7 +1592,7 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
     }
 
     func listNetworks() async throws -> [DockerRuntimeNetwork] {
-        [network(), customNetwork(), racyNetwork()]
+        [network(), customNetwork(), attachedNetwork()]
     }
 
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork {
@@ -1430,13 +1725,16 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
     func archiveContainer(id: String, path: String) async throws -> AsyncThrowingStream<Data, Error> {
         try await requireContainer(id)
         return AsyncThrowingStream { continuation in
-            continuation.yield(Data("container-tar".utf8))
+            continuation.yield(archiveData ?? Data("container-tar".utf8))
             continuation.finish()
         }
     }
 
     func archiveContainerInfo(id: String, path: String) async throws -> DockerRuntimeArchivePath {
         try await requireContainer(id)
+        if path == missingArchivePath {
+            throw DockerRuntimeRouteError.notFound("No such file: \(path)")
+        }
         return DockerRuntimeArchivePath(
             name: "etc",
             size: 4,
@@ -1500,7 +1798,8 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
             ports: [.init(containerPort: 80, proto: "tcp", hostIP: "127.0.0.1", hostPort: 18080)],
             sizeRw: containerSizeRw,
             sizeRootFs: containerSizeRootFs,
-            stopTimeout: stopTimeout
+            stopTimeout: stopTimeout,
+            mounts: containerMounts
         )
     }
 
@@ -1576,7 +1875,8 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
         let network = racyNetwork()
         let container = DockerRuntimeNetworkContainer(
             name: "container-1", endpointID: "endpoint-1", macAddress: nil,
-            ipv4Address: "10.88.0.2", ipv6Address: nil
+            ipv4Address: "10.88.0.2", ipv6Address: "fd00:1::2",
+            aliases: ["container-1", "api"]
         )
         return DockerRuntimeNetwork(
             id: network.id,
@@ -1589,10 +1889,40 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend, DockerRuntimeBuildCac
             internalNetwork: network.internalNetwork,
             attachable: network.attachable,
             ingress: network.ingress,
-            ipam: network.ipam,
+            ipam: NetworkIPAM(
+                Driver: network.ipam.Driver,
+                Config: [
+                    NetworkIPAMConfig(
+                        Subnet: "10.88.0.0/16", IPRange: nil, Gateway: "10.88.0.1",
+                        AuxiliaryAddresses: nil
+                    ),
+                    NetworkIPAMConfig(
+                        Subnet: "fd00:1::/64", IPRange: nil, Gateway: "fd00:1::1",
+                        AuxiliaryAddresses: nil
+                    ),
+                ]
+            ),
             options: network.options,
             containers: ["container-1": container],
             labels: network.labels
         )
     }
+}
+
+private func makeImageVolumeArchive(at path: URL, contents: String) throws {
+    let writer = try ArchiveWriter(format: .paxRestricted, filter: .none, file: path)
+    let directory = WriteEntry()
+    directory.path = "data"
+    directory.fileType = .directory
+    directory.permissions = 0o755
+    try writer.writeEntry(entry: directory, data: nil)
+
+    let file = WriteEntry()
+    file.path = "data/seed"
+    file.fileType = .regular
+    file.permissions = 0o644
+    let data = Data(contents.utf8)
+    file.size = Int64(data.count)
+    try writer.writeEntry(entry: file, data: data)
+    try writer.finishEncoding()
 }

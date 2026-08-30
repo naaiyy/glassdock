@@ -39,6 +39,38 @@ struct EventsRouteFilterTests {
         #expect(try DockerEventFilter(#"{"container":["st-opaque-native"]}"#).matches(event) == false)
     }
 
+    @Test("container destroy events retain image, name, and label filters")
+    func destroyEventRetainsContainerAttributes() throws {
+        let event = DockerEvent.simpleEvent(
+            id: String(repeating: "c", count: 64),
+            type: "container",
+            status: "destroy",
+            image: "alpine:3.22.1",
+            name: "project-db-1",
+            labels: ["com.docker.compose.project": "project"]
+        )
+
+        #expect(try DockerEventFilter(#"{"event":["destroy"],"image":["alpine:3.22.1"],"label":["com.docker.compose.project=project"]}"#).matches(event))
+        #expect(event.from == "alpine:3.22.1")
+        #expect(event.Actor.Attributes["name"] == "project-db-1")
+        #expect(event.Actor.Attributes["com.docker.compose.project"] == "project")
+    }
+
+    @Test("image filters accept familiar and fully qualified image references")
+    func imageFilterReferenceForms() throws {
+        let event = DockerEvent.simpleEvent(
+            id: String(repeating: "d", count: 64),
+            type: "container",
+            status: "start",
+            image: "docker.io/library/alpine:3.22.1",
+            name: "worker"
+        )
+
+        #expect(try DockerEventFilter(#"{"image":["alpine:3.22.1"]}"#).matches(event))
+        #expect(try DockerEventFilter(#"{"image":["docker.io/library/alpine:3.22.1"]}"#).matches(event))
+        #expect(try DockerEventFilter(#"{"image":["alpine"]}"#).matches(event))
+    }
+
     @Test("different event filter keys compose with AND semantics")
     func combinedFilters() throws {
         let event = DockerEvent.simpleEvent(

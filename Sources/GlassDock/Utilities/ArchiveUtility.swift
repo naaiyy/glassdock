@@ -59,6 +59,14 @@ struct ArchiveUtility {
             maxEntries: 250_000
         )
 
+        /// Image `VOLUME` copy-up uses a streamed archive from the guest. Keep
+        /// the same expansion and inode ceilings as a build context while
+        /// allowing links that are valid members of an image filesystem.
+        static let volumeCopyUp = ExtractionLimits(
+            maxExpandedBytes: 64 * 1024 * 1024 * 1024,
+            maxEntries: 250_000
+        )
+
         fileprivate static let unbounded = ExtractionLimits(
             maxExpandedBytes: .max,
             maxEntries: .max
