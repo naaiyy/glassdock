@@ -93,6 +93,24 @@ func TestNetworkManagerCreatesConfiguredNamespace(t *testing.T) {
 	}
 }
 
+func TestNetworkManagerCreatesNamespaceWithContainerIdentity(t *testing.T) {
+	runner := &recordingNetworkRunner{}
+	manager := newTestNetworkManager(runner)
+	if _, err := manager.CreateWithIdentity("container-one", "worker", "worker-host"); err != nil {
+		t.Fatal(err)
+	}
+	hosts, _, err := manager.HostsFile("container-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(hosts, "10.88.0.2 worker\n") {
+		t.Fatalf("hosts file omitted container identity:\n%s", hosts)
+	}
+	if !strings.Contains(hosts, "10.88.0.2 worker-host\n") {
+		t.Fatalf("hosts file omitted container hostname:\n%s", hosts)
+	}
+}
+
 func TestNetworkManagerUsesUniqueIngressPortsForSameContainerPort(t *testing.T) {
 	runner := &recordingNetworkRunner{}
 	manager := newTestNetworkManager(runner)

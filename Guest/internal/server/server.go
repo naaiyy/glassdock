@@ -287,7 +287,9 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			fail("containerd", err)
 			return
 		}
-		syscall.Sync()
+		if image.NeedsSync {
+			syscall.Sync()
+		}
 		_ = writePayload(w, request.ID, image)
 	case api.MethodImageList:
 		items, err := s.backend.Images(ctx)
@@ -533,7 +535,7 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 			fail("invalid_argument", err)
 			return
 		}
-		item, err := s.backend.Inspect(ctx, body.ID)
+		item, err := s.backend.InspectWithSize(ctx, body.ID, body.Size)
 		if err != nil {
 			fail("containerd", err)
 			return

@@ -2,10 +2,94 @@ package backend
 
 import (
 	"archive/tar"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestPrepareImageDirectoriesDefersVolumeRepair(t *testing.T) {
+	var backend Backend
+	prepared, err := backend.prepareImageDirectories(
+		context.Background(), "container", nil, map[string]struct{}{"/var/cache/nginx": {}},
+	)
+	if err != nil {
+		t.Fatalf("prepare image directories: %v", err)
+	}
+	if prepared {
+		t.Fatal("volume image directories were prepared during create")
+	}
+}
+
+func TestImageDirectoriesWithChildrenUsesFinalPaths(t *testing.T) {
+	state := map[string]imagePathState{
+		"var":                    {directory: true},
+		"var/cache":              {directory: true},
+		"var/cache/nginx":        {directory: true},
+		"var/cache/nginx/client": {directory: true},
+		"tmp":                    {directory: true},
+		"tmp/file":               {},
+	}
+
+	withChildren := imageDirectoriesWithChildren(state)
+	for _, directory := range []string{"var", "var/cache", "var/cache/nginx", "tmp"} {
+		if _, ok := withChildren[directory]; !ok {
+			t.Fatalf("directory %q was not marked as containing a descendant", directory)
+		}
+	}
+	if _, ok := withChildren["var/cache/nginx/client"]; ok {
+		t.Fatal("leaf directory was incorrectly marked as containing a descendant")
+	}
+}
+
+func TestAddImageVolumeDirectoriesAddsMissingParents(t *testing.T) {
+	directories := []imageDirectory{
+		{path: "etc", mode: 0o755, empty: true},
+		{path: "var", mode: 0o755},
+	}
+	got := addImageVolumeDirectories(directories, map[string]struct{}{
+		"/var/lib/postgresql/data": {},
+		"/":                        {},
+		"relative":                 {},
+	})
+
+	if len(got) != 5 {
+		t.Fatalf("directory count = %d, want 5: %#v", len(got), got)
+	}
+	byPath := make(map[string]imageDirectory, len(got))
+	for _, directory := range got {
+		byPath[directory.path] = directory
+	}
+	for _, directory := range []string{"var", "var/lib", "var/lib/postgresql", "var/lib/postgresql/data"} {
+		entry, ok := byPath[directory]
+		if !ok {
+			t.Fatalf("missing volume directory %q in %#v", directory, got)
+		}
+		if entry.mode != 0o755 || (directory != "var" && !entry.empty) {
+			t.Fatalf("volume directory %q = %#v", directory, entry)
+		}
+	}
+}
+
+func TestImageVolumeDirectoriesSelectsOnlyVolumeAncestors(t *testing.T) {
+	directories := []imageDirectory{
+		{path: "etc", mode: 0o755, empty: true},
+		{path: "var", mode: 0o755},
+		{path: "var/cache", mode: 0o755, empty: true},
+		{path: "var/cache/nginx", mode: 0o755, empty: true},
+		{path: "opt", mode: 0o755, empty: true},
+	}
+
+	got := imageVolumeDirectories(directories, map[string]struct{}{"/var/cache/nginx": {}})
+	if len(got) != 3 {
+		t.Fatalf("directory count = %d, want 3: %#v", len(got), got)
+	}
+	for _, directory := range got {
+		if directory.path == "etc" || directory.path == "opt" {
+			t.Fatalf("unrelated directory was selected: %#v", got)
+		}
+	}
+}
 
 func TestImageDirectoryStateAppliesLayerWhiteouts(t *testing.T) {
 	state := make(map[string]imagePathState)

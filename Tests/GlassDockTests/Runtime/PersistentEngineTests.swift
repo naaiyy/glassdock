@@ -18,8 +18,75 @@ struct PersistentEngineTests {
         #expect(await machine.startCount == 1)
         #expect(await machine.connectCount == 1)
         #expect(await machine.lastPort == 1025)
+        #expect(await machine.memoryTargets == [PersistentEngine.idleMemoryBytes])
         #expect(await engine.address() == "192.168.72.2")
         #expect(await engine.hostGatewayAddress() == "192.168.72.1")
+        await engine.shutdown()
+    }
+
+    @Test("expands the guest for work and reclaims it after the idle delay")
+    func managesMemoryTarget() async throws {
+        let machine = FakeEngineMachineHost()
+        let engine = PersistentEngine(machine: machine)
+
+        _ = try await engine.readyConnection()
+        try await engine.prepareForWork()
+        await engine.finishedWork()
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(
+            await machine.memoryTargets == [
+                PersistentEngine.idleMemoryBytes,
+                PersistentEngine.activeMemoryBytes,
+                PersistentEngine.idleMemoryBytes,
+            ]
+        )
+        #expect(await machine.memoryTargetWaits == [false, false, false])
+        await engine.shutdown()
+    }
+
+    @Test("does not reclaim while expanding the guest for work")
+    func doesNotReclaimDuringExpansion() async throws {
+        let machine = FakeEngineMachineHost(memoryTargetDelay: .milliseconds(100))
+        let engine = PersistentEngine(machine: machine)
+
+        _ = try await engine.readyConnection()
+        await engine.finishedWork()
+        let expansion = Task { try await engine.prepareForWork() }
+        for _ in 0..<100 {
+            if await machine.memoryTargetCallCount == 2 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        try await Task.sleep(for: .milliseconds(60))
+        try await expansion.value
+
+        #expect(
+            await machine.memoryTargets == [
+                PersistentEngine.idleMemoryBytes,
+                PersistentEngine.activeMemoryBytes,
+            ])
+        await engine.shutdown()
+    }
+
+    @Test("retains a larger target for a published network container")
+    func retainsPublishedMemoryTarget() async throws {
+        let machine = FakeEngineMachineHost()
+        let engine = PersistentEngine(machine: machine)
+
+        _ = try await engine.readyConnection()
+        try await engine.retainMemoryTarget(
+            id: "nginx", bytes: PersistentEngine.publishedNetworkMemoryBytes
+        )
+        await engine.releaseMemoryTarget(id: "nginx")
+        try await Task.sleep(for: .milliseconds(300))
+
+        #expect(
+            await machine.memoryTargets == [
+                PersistentEngine.idleMemoryBytes,
+                PersistentEngine.publishedNetworkMemoryBytes,
+                PersistentEngine.idleMemoryBytes,
+            ]
+        )
         await engine.shutdown()
     }
 
@@ -92,6 +159,17 @@ struct PersistentEngineTests {
 
         #expect(await machine.startCount == 1)
         #expect(await machine.connectCount == 3)
+        await engine.shutdown()
+    }
+
+    @Test("bounds a connected guest that has not started answering")
+    func boundsConnectedGuestReadinessAttempt() async throws {
+        let machine = FakeEngineMachineHost(hangingConnections: 1)
+        let engine = PersistentEngine(machine: machine, guestReadinessTimeout: .seconds(1))
+
+        _ = try await engine.readyConnection()
+
+        #expect(await machine.connectCount == 2)
         await engine.shutdown()
     }
 
@@ -203,11 +281,15 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
     private let protocolVersion: String
     private let answersVersion: Bool
     private let startDelay: Duration?
+    private var hangingConnections: Int
     private var failedConnections: Int
     private(set) var startCount = 0
     private(set) var connectCount = 0
     private(set) var stopCount = 0
+    private(set) var memoryTargets: [UInt64] = []
+    private(set) var memoryTargetCallCount = 0
     private(set) var lastPort: UInt32?
+    private(set) var memoryTargetWaits: [Bool] = []
     private var peer: FileHandle?
 
     init(
@@ -215,14 +297,20 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
         protocolVersion: String = PersistentEngine.expectedGuestProtocolVersion,
         answersVersion: Bool = true,
         startDelay: Duration? = nil,
-        failedConnections: Int = 0
+        hangingConnections: Int = 0,
+        failedConnections: Int = 0,
+        memoryTargetDelay: Duration? = nil
     ) {
         self.pingOK = pingOK
         self.protocolVersion = protocolVersion
         self.answersVersion = answersVersion
         self.startDelay = startDelay
+        self.hangingConnections = hangingConnections
         self.failedConnections = failedConnections
+        self.memoryTargetDelay = memoryTargetDelay
     }
+
+    private let memoryTargetDelay: Duration?
 
     func start() async throws -> RuntimeMachineReady {
         startCount += 1
@@ -235,6 +323,13 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
             gvproxyAPI: URL(fileURLWithPath: "/tmp/gvproxy.sock"),
             tcpRelaySocket: URL(fileURLWithPath: "/tmp/tcp-relay.sock")
         )
+    }
+
+    func setMemoryTarget(_ bytes: UInt64, waitForTarget: Bool) async throws {
+        memoryTargetCallCount += 1
+        if let memoryTargetDelay { try await Task.sleep(for: memoryTargetDelay) }
+        memoryTargets.append(bytes)
+        memoryTargetWaits.append(waitForTarget)
     }
 
     func connect(to port: UInt32) throws -> FileHandle {
@@ -252,6 +347,8 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
         let peer = FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
         self.peer = peer
         let pingOK = self.pingOK
+        let shouldHang = hangingConnections > 0
+        if shouldHang { hangingConnections -= 1 }
         Thread.detachNewThread {
             do {
                 var codec = GuestFrameCodec()
@@ -259,6 +356,7 @@ private actor FakeEngineMachineHost: EngineMachineHosting {
                     let bytes = try Self.readAvailable(peer)
                     guard !bytes.isEmpty else { return }
                     for request in try codec.append(bytes) {
+                        if shouldHang { continue }
                         let payload: JSONValue
                         if request.method == "version" {
                             guard self.answersVersion else {

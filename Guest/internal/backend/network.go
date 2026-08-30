@@ -178,19 +178,50 @@ func (m *NetworkManager) Initialize() error {
 }
 
 func (m *NetworkManager) Create(id string) (string, error) {
-	return m.CreateWithAddresses(id, "", "")
+	return m.createWithIdentityAndAddresses(id, "", "", "", "")
+}
+
+// CreateWithIdentity creates the private namespace and records the Docker
+// name and hostname while the manager already owns its lock. Container
+// creation starts this work in parallel with containerd setup, so assigning
+// the identity after Create would contend with the netlink setup and add the
+// full namespace-provisioning time to the Docker create response.
+func (m *NetworkManager) CreateWithIdentity(id, identity, hostname string) (string, error) {
+	return m.createWithIdentityAndAddresses(id, "", "", identity, hostname)
 }
 
 // CreateWithAddresses provisions the default private namespace and honors the
 // IPAM addresses supplied to docker create/run for the default bridge.
 func (m *NetworkManager) CreateWithAddresses(id, ipv4Address, ipv6Address string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.createLocked(id, ipv4Address, ipv6Address)
+	return m.createWithIdentityAndAddresses(id, ipv4Address, ipv6Address, "", "")
 }
 
-func (m *NetworkManager) createLocked(id, requestedIPv4, requestedIPv6 string) (string, error) {
+// CreateWithIdentityAndAddresses combines Docker identity persistence with
+// default-bridge IPAM allocation for the asynchronous create path.
+func (m *NetworkManager) CreateWithIdentityAndAddresses(
+	id, ipv4Address, ipv6Address, identity, hostname string,
+) (string, error) {
+	return m.createWithIdentityAndAddresses(id, ipv4Address, ipv6Address, identity, hostname)
+}
+
+func (m *NetworkManager) createWithIdentityAndAddresses(
+	id, requestedIPv4, requestedIPv6, identity, hostname string,
+) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createLocked(id, requestedIPv4, requestedIPv6, identity, hostname)
+}
+
+func (m *NetworkManager) createLocked(
+	id, requestedIPv4, requestedIPv6, identity, hostname string,
+) (string, error) {
 	if existing := m.containers[id]; existing != nil {
+		if identity != "" {
+			existing.identity = identity
+		}
+		if hostname != "" {
+			existing.hostname = hostname
+		}
 		return "/run/netns/" + existing.name, nil
 	}
 	if err := m.initialize(); err != nil {
@@ -225,7 +256,8 @@ func (m *NetworkManager) createLocked(id, requestedIPv4, requestedIPv6 string) (
 		address: address,
 	}
 	m.containers[id] = &containerNetwork{
-		name: name, address: address, endpoints: map[string]*networkEndpoint{defaultNetwork.id: endpoint},
+		name: name, identity: identity, hostname: hostname, address: address,
+		endpoints: map[string]*networkEndpoint{defaultNetwork.id: endpoint},
 	}
 	defaultNetwork.containers[id] = endpoint
 	return "/run/netns/" + name, nil
@@ -780,7 +812,7 @@ func (m *NetworkManager) RestoreContainer(
 	}
 	created := false
 	if _, exists := m.containers[id]; !exists {
-		if _, err := m.createLocked(id, "", ""); err != nil {
+		if _, err := m.createLocked(id, "", "", name, hostname); err != nil {
 			return false, err
 		}
 		created = true

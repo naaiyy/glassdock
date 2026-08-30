@@ -48,7 +48,7 @@ func configure(
             memoryBytes: memoryBytes
         )
     )
-    let engine = PersistentEngine(machine: machine)
+    let engine = PersistentEngine(machine: machine, configuredMemoryBytes: memoryBytes)
     app.lifecycle.use(PersistentEngineLifecycle(engine: engine))
     // The builder relay serves hijacked /session and /grpc connections. It must
     // start before the public gateway becomes reachable and stop before the

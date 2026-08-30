@@ -17,17 +17,16 @@ struct RuntimeMachineStorageTests {
         try RuntimeMachineStorage.prepareDataDisk(at: disk, size: 64 * 1024 * 1024)
         let first = try FileManager.default.attributesOfItem(atPath: disk.path)[.creationDate] as? Date
         let reader = try EXT4.EXT4Reader(blockDevice: FilePath(disk.path))
-        #expect(reader.superBlock.featureCompat & 0x4 != 0)
-        #expect(reader.superBlock.journalInum == 8)
-        #expect(reader.superBlock.defaultMountOpts == 0x40)
+        #expect(reader.superBlock.featureCompat & 0x4 == 0)
+        #expect(reader.superBlock.blockSize == 4096)
 
         try RuntimeMachineStorage.prepareDataDisk(at: disk, size: 64 * 1024 * 1024)
 
         #expect(try FileManager.default.attributesOfItem(atPath: disk.path)[.creationDate] as? Date == first)
     }
 
-    @Test("replaces a valid data disk that has no ordered journal")
-    func replacesUnjournaledDisk() throws {
+    @Test("preserves a valid unjournaled data disk")
+    func preservesUnjournaledDisk() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("glassdock-vmm-storage-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -38,16 +37,16 @@ struct RuntimeMachineStorageTests {
             minDiskSize: 64 * 1024 * 1024
         )
         try formatter.close()
+        let first = try FileManager.default.attributesOfItem(atPath: disk.path)[.creationDate] as? Date
 
         try RuntimeMachineStorage.prepareDataDisk(at: disk, size: 64 * 1024 * 1024)
 
         let reader = try EXT4.EXT4Reader(blockDevice: FilePath(disk.path))
-        #expect(reader.superBlock.featureCompat & 0x4 != 0)
-        #expect(reader.superBlock.journalInum == 8)
-        #expect(reader.superBlock.defaultMountOpts == 0x40)
+        #expect(reader.superBlock.featureCompat & 0x4 == 0)
+        #expect(try FileManager.default.attributesOfItem(atPath: disk.path)[.creationDate] as? Date == first)
         let quarantined = try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .filter { $0.hasPrefix("data.ext4.incompatible-") }
-        #expect(quarantined.count == 1)
+        #expect(quarantined.isEmpty)
     }
 
     @Test("preserves invalid storage and fails startup")

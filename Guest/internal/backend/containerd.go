@@ -19,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	cgroup1stats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	cgroup2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
@@ -87,6 +88,11 @@ type Backend struct {
 	statsMu             sync.Mutex
 	lastStats           map[string]api.ContainerStatsResponse
 	imageDirectoryCache sync.Map
+	imageDirectoryWork  sync.Map
+	imageConfigCache    sync.Map
+	imageUnpackCache    sync.Map
+	imageUnpackWork     sync.Map
+	storageTrimMu       sync.Mutex
 	healthMu            sync.Mutex
 	healthStops         map[string]chan struct{}
 	execMu              sync.Mutex
@@ -295,17 +301,31 @@ func (b *orderedCleanupBarrier) wait(ctx context.Context) error {
 }
 
 type containerRecord struct {
-	container     containerd.Container
-	snapshotter   string
-	snapshotKey   string
-	mu            sync.Mutex
-	task          containerd.Task
-	taskReaped    bool
-	taskReaping   chan struct{}
-	stdinWriter   io.WriteCloser
-	spec          *specs.Spec
-	persistedExit bool
-	persistedCode uint32
+	container                containerd.Container
+	image                    containerd.Image
+	snapshotter              string
+	snapshotKey              string
+	mu                       sync.Mutex
+	task                     containerd.Task
+	taskReaped               bool
+	taskReaping              chan struct{}
+	stdinWriter              io.WriteCloser
+	spec                     *specs.Spec
+	persistedExit            bool
+	persistedCode            uint32
+	imageDirectoriesPrepared bool
+	waitState                *containerWaitState
+}
+
+type containerWaitResult struct {
+	code     uint32
+	exitedAt time.Time
+	err      error
+}
+
+type containerWaitState struct {
+	done   chan struct{}
+	result containerWaitResult
 }
 
 func (r *containerRecord) setTask(task containerd.Task) {
@@ -388,6 +408,73 @@ func (r *containerRecord) setPersistedExit(value bool, code uint32) {
 	r.mu.Unlock()
 }
 
+func (r *containerRecord) beginWait() (*containerWaitState, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if state := r.waitState; state != nil {
+		select {
+		case <-state.done:
+			if state.result.err != nil {
+				r.waitState = nil
+			} else {
+				return state, false
+			}
+		default:
+			return state, false
+		}
+	}
+	state := &containerWaitState{done: make(chan struct{})}
+	r.waitState = state
+	return state, true
+}
+
+func (r *containerRecord) finishWait(state *containerWaitState, result containerWaitResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.waitState != state {
+		return
+	}
+	state.result = result
+	close(state.done)
+}
+
+func (r *containerRecord) resetWaitState() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.waitState == nil {
+		return
+	}
+	select {
+	case <-r.waitState.done:
+		r.waitState = nil
+	default:
+	}
+}
+
+func (r *containerRecord) imageDirectoriesReady() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.imageDirectoriesPrepared
+}
+
+func (r *containerRecord) getImage() containerd.Image {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.image
+}
+
+func (r *containerRecord) setImage(image containerd.Image) {
+	r.mu.Lock()
+	r.image = image
+	r.mu.Unlock()
+}
+
+func (r *containerRecord) markImageDirectoriesReady() {
+	r.mu.Lock()
+	r.imageDirectoriesPrepared = true
+	r.mu.Unlock()
+}
+
 func New(address, namespace, snapshotter, runtimeName, runtimeBinary string) (*Backend, error) {
 	client, err := containerd.New(address)
 	if err != nil {
@@ -402,7 +489,9 @@ func New(address, namespace, snapshotter, runtimeName, runtimeBinary string) (*B
 	}, nil
 }
 
-func (b *Backend) beginNetworkPreparation(id string, network api.Network) *networkPreparation {
+func (b *Backend) beginNetworkPreparation(
+	id string, network api.Network, identity, hostname string,
+) *networkPreparation {
 	preparation := &networkPreparation{done: make(chan struct{})}
 	actual, loaded := b.networks.LoadOrStore(id, preparation)
 	if loaded {
@@ -410,11 +499,11 @@ func (b *Backend) beginNetworkPreparation(id string, network api.Network) *netwo
 	}
 	go func() {
 		if network.Mode == "" || network.Mode == "private" {
-			_, preparation.err = b.network.CreateWithAddresses(
-				id, network.IPv4Address, network.IPv6Address,
+			_, preparation.err = b.network.CreateWithIdentityAndAddresses(
+				id, network.IPv4Address, network.IPv6Address, identity, hostname,
 			)
 		} else {
-			_, preparation.err = b.network.Create(id)
+			_, preparation.err = b.network.CreateWithIdentity(id, identity, hostname)
 		}
 		close(preparation.done)
 	}()
@@ -555,16 +644,10 @@ func (b *Backend) syncNetworkFiles(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	root, cleanup, err := b.mountContainerRoot(ctx, id, "glassdock-network-")
-	if err != nil {
+	if err := prepareNetworkFileSources(id); err != nil {
 		return err
 	}
-	defer cleanup()
-	etc := filepath.Join(root, "etc")
-	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return err
-	}
-	if err := writeManagedNetworkFile(filepath.Join(etc, "hosts"), hosts, "hosts"); err != nil {
+	if err := writeManagedNetworkFile(networkFileSource(id, "hosts"), hosts, "hosts"); err != nil {
 		return err
 	}
 	if len(nameservers) != 0 {
@@ -576,11 +659,59 @@ func (b *Backend) syncNetworkFiles(ctx context.Context, id string) error {
 			resolver.WriteByte('\n')
 		}
 		resolver.WriteString("# glassdock managed resolv.conf end\n")
-		if err := writeManagedNetworkFile(filepath.Join(etc, "resolv.conf"), resolver.String(), "resolv.conf"); err != nil {
+		if err := writeManagedNetworkFile(
+			networkFileSource(id, "resolv.conf"), resolver.String(), "resolv.conf",
+		); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+const networkFilesDirectory = "/run/glassdock-network"
+
+func networkFileSource(id, name string) string {
+	return filepath.Join(networkFilesDirectory, logKey(id)+"."+name)
+}
+
+func prepareNetworkFileSources(id string) error {
+	if err := os.MkdirAll(networkFilesDirectory, 0o700); err != nil {
+		return err
+	}
+	for _, name := range []string{"hosts", "resolv.conf"} {
+		file, err := os.OpenFile(networkFileSource(id, name), os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeNetworkFileSources(id string) {
+	for _, name := range []string{"hosts", "resolv.conf"} {
+		_ = os.Remove(networkFileSource(id, name))
+	}
+}
+
+func networkFileMounts(id string, mounts []specs.Mount) []specs.Mount {
+	reserved := map[string]struct{}{}
+	for _, mount := range mounts {
+		reserved[mount.Destination] = struct{}{}
+	}
+	for _, name := range []string{"hosts", "resolv.conf"} {
+		destination := "/etc/" + name
+		if _, exists := reserved[destination]; exists {
+			continue
+		}
+		mounts = append(mounts, specs.Mount{
+			Source: networkFileSource(id, name), Destination: destination,
+			Type: "bind", Options: []string{"bind", "rw"},
+		})
+	}
+	return mounts
 }
 
 func writeManagedNetworkFile(path, managed, kind string) error {
@@ -769,6 +900,21 @@ func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.I
 	if err != nil {
 		return api.ImageResponse{}, fmt.Errorf("parse image reference: %w", err)
 	}
+	// A digest is immutable. If the exact digest is already present locally,
+	// do not perform another registry resolve after a daemon restart. Tags
+	// still use the registry path so Docker's update semantics are unchanged.
+	if request.Username == "" && request.Platform == "" {
+		if image, found, needsSync, err := b.localDigestImage(b.ctx(ctx), qualified, snapshotter); found {
+			if err != nil {
+				return api.ImageResponse{}, err
+			}
+			b.markImageUnpacked(image, snapshotter)
+			b.prewarmImageMetadata(image)
+			return api.ImageResponse{
+				Name: image.Name(), Digest: image.Target().Digest.String(), NeedsSync: needsSync,
+			}, nil
+		}
+	}
 	pullOptions := []containerd.RemoteOpt{
 		containerd.WithResolver(docker.NewResolver(resolverOptions)),
 		containerd.WithPullSnapshotter(snapshotter),
@@ -781,7 +927,48 @@ func (b *Backend) Pull(ctx context.Context, request api.ImagePullRequest) (api.I
 	if err != nil {
 		return api.ImageResponse{}, err
 	}
-	return api.ImageResponse{Name: image.Name(), Digest: image.Target().Digest.String()}, nil
+	b.markImageUnpacked(image, snapshotter)
+	b.prewarmImageMetadata(image)
+	return api.ImageResponse{
+		Name: image.Name(), Digest: image.Target().Digest.String(), NeedsSync: true,
+	}, nil
+}
+
+func imageReferenceDigest(reference registryreference.Named) (digest.Digest, bool) {
+	digested, ok := reference.(registryreference.Digested)
+	if !ok {
+		return "", false
+	}
+	return digested.Digest(), true
+}
+
+func (b *Backend) localDigestImage(
+	ctx context.Context, reference registryreference.Named, snapshotter string,
+) (containerd.Image, bool, bool, error) {
+	referenceDigest, ok := imageReferenceDigest(reference)
+	if !ok {
+		return nil, false, false, nil
+	}
+	image, err := b.LookupImage(ctx, reference.String())
+	if err != nil {
+		return nil, false, false, nil
+	}
+	// Pulling an index reference returns the selected platform manifest as the
+	// image target, so its target digest can differ from the requested index
+	// digest. An exact local digest-named record is still authoritative because
+	// the reference itself is content-addressed.
+	if !isLocalDigestImage(image.Name(), image.Target().Digest, reference.String(), referenceDigest) {
+		return nil, false, false, nil
+	}
+	changed, err := b.ensureImageUnpackedWithChange(ctx, image, snapshotter)
+	if err != nil {
+		return nil, true, false, err
+	}
+	return image, true, changed, nil
+}
+
+func isLocalDigestImage(imageName string, targetDigest digest.Digest, referenceName string, referenceDigest digest.Digest) bool {
+	return imageName == referenceName || targetDigest == referenceDigest
 }
 
 func sameRegistryHost(expected, challenged string) bool {
@@ -892,6 +1079,80 @@ type dockerImageConfig struct {
 	Healthcheck *api.HealthConfig
 	OnBuild     []string
 	Shell       []string
+	Volumes     map[string]struct{}
+}
+
+type imageUnpackPreparation struct {
+	done    chan struct{}
+	err     error
+	changed bool
+}
+
+func imageUnpackCacheKeyForDigest(imageDigest, snapshotter string) string {
+	return snapshotter + "\x00" + imageDigest
+}
+
+func imageUnpackCacheKey(image containerd.Image, snapshotter string) string {
+	return imageUnpackCacheKeyForDigest(image.Target().Digest.String(), snapshotter)
+}
+
+func (b *Backend) markImageUnpacked(image containerd.Image, snapshotter string) {
+	b.imageUnpackCache.Store(imageUnpackCacheKey(image, snapshotter), struct{}{})
+}
+
+func (b *Backend) ensureImageUnpacked(ctx context.Context, image containerd.Image, snapshotter string) error {
+	_, err := b.ensureImageUnpackedWithChange(ctx, image, snapshotter)
+	return err
+}
+
+func (b *Backend) ensureImageUnpackedWithChange(
+	ctx context.Context, image containerd.Image, snapshotter string,
+) (bool, error) {
+	cacheKey := imageUnpackCacheKey(image, snapshotter)
+	if _, ok := b.imageUnpackCache.Load(cacheKey); ok {
+		return false, nil
+	}
+	preparation := &imageUnpackPreparation{done: make(chan struct{})}
+	actual, loaded := b.imageUnpackWork.LoadOrStore(cacheKey, preparation)
+	if loaded {
+		preparation = actual.(*imageUnpackPreparation)
+		select {
+		case <-preparation.done:
+			return preparation.changed, preparation.err
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	defer b.imageUnpackWork.Delete(cacheKey)
+
+	unpacked, err := image.IsUnpacked(ctx, snapshotter)
+	if err != nil {
+		preparation.err = err
+	} else if unpacked {
+		// Pull normally unpacks the image before returning. IsUnpacked avoids
+		// reopening a lease and walking every layer through Unpack on the hot
+		// create path, while still allowing images imported by BuildKit to be
+		// unpacked below when their snapshot chain is absent.
+		preparation.err = nil
+	} else {
+		preparation.err = image.Unpack(ctx, snapshotter)
+		preparation.changed = preparation.err == nil
+	}
+	if preparation.err == nil {
+		b.imageUnpackCache.Store(cacheKey, struct{}{})
+	}
+	close(preparation.done)
+	return preparation.changed, preparation.err
+}
+
+func (b *Backend) invalidateImageUnpackCache(imageDigest string) {
+	suffix := "\x00" + imageDigest
+	b.imageUnpackCache.Range(func(key, _ any) bool {
+		if cacheKey, ok := key.(string); ok && strings.HasSuffix(cacheKey, suffix) {
+			b.imageUnpackCache.Delete(cacheKey)
+		}
+		return true
+	})
 }
 
 // OCI image configuration does not define Docker's Healthcheck, OnBuild, or
@@ -908,9 +1169,10 @@ func readDockerImageConfig(ctx context.Context, image containerd.Image) dockerIm
 	}
 	var document struct {
 		Config struct {
-			Healthcheck *api.HealthConfig `json:"Healthcheck"`
-			OnBuild     []string          `json:"OnBuild"`
-			Shell       []string          `json:"Shell"`
+			Healthcheck *api.HealthConfig   `json:"Healthcheck"`
+			OnBuild     []string            `json:"OnBuild"`
+			Shell       []string            `json:"Shell"`
+			Volumes     map[string]struct{} `json:"Volumes"`
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(data, &document); err != nil {
@@ -920,7 +1182,18 @@ func readDockerImageConfig(ctx context.Context, image containerd.Image) dockerIm
 		Healthcheck: document.Config.Healthcheck,
 		OnBuild:     document.Config.OnBuild,
 		Shell:       document.Config.Shell,
+		Volumes:     document.Config.Volumes,
 	}
+}
+
+func (b *Backend) dockerImageConfig(ctx context.Context, image containerd.Image) dockerImageConfig {
+	cacheKey := image.Target().Digest.String()
+	if cached, ok := b.imageConfigCache.Load(cacheKey); ok {
+		return cached.(dockerImageConfig)
+	}
+	config := readDockerImageConfig(ctx, image)
+	b.imageConfigCache.Store(cacheKey, config)
+	return config
 }
 
 func (b *Backend) Image(ctx context.Context, reference string) (api.Image, error) {
@@ -988,6 +1261,7 @@ func (b *Backend) DeleteImage(ctx context.Context, request api.ImageDeleteReques
 			stillPresent = stillPresent || candidate.ID == image.ID
 		}
 		if !stillPresent {
+			b.invalidateImageUnpackCache(image.Digest)
 			result.Deleted = []string{image.ID}
 			result.Reclaimed = image.Size
 		}
@@ -1125,7 +1399,7 @@ func (b *Backend) List(ctx context.Context) ([]api.Container, error) {
 	}
 	out := make([]api.Container, 0, len(containers))
 	for _, container := range containers {
-		item, err := b.inspect(ctx, container)
+		item, err := b.inspect(ctx, container, true)
 		if err != nil {
 			return nil, err
 		}
@@ -1135,6 +1409,17 @@ func (b *Backend) List(ctx context.Context) ([]api.Container, error) {
 }
 
 func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error) {
+	return b.inspectByID(ctx, id, true)
+}
+
+// InspectWithSize keeps the regular inspect path cheap when the Docker API
+// caller did not request filesystem usage. Snapshot and image-size lookups
+// are only needed for ?size=1.
+func (b *Backend) InspectWithSize(ctx context.Context, id string, includeSize bool) (api.Container, error) {
+	return b.inspectByID(ctx, id, includeSize)
+}
+
+func (b *Backend) inspectByID(ctx context.Context, id string, includeSize bool) (api.Container, error) {
 	container, err := b.client.LoadContainer(b.ctx(ctx), id)
 	if err != nil {
 		return api.Container{}, err
@@ -1142,7 +1427,7 @@ func (b *Backend) Inspect(ctx context.Context, id string) (api.Container, error)
 	if err := b.restoreNetworkState(ctx, []containerd.Container{container}); err != nil {
 		return api.Container{}, err
 	}
-	return b.inspect(ctx, container)
+	return b.inspect(ctx, container, includeSize)
 }
 
 func (b *Backend) restoreAllNetworkState(ctx context.Context) error {
@@ -1185,7 +1470,7 @@ func (b *Backend) restoreNetworkState(ctx context.Context, containers []containe
 	return nil
 }
 
-func (b *Backend) inspect(ctx context.Context, container containerd.Container) (api.Container, error) {
+func (b *Backend) inspect(ctx context.Context, container containerd.Container, includeSize bool) (api.Container, error) {
 	ctx = b.ctx(ctx)
 	info, err := container.Info(ctx)
 	if err != nil {
@@ -1194,7 +1479,9 @@ func (b *Backend) inspect(ctx context.Context, container containerd.Container) (
 	metadata := decodeRuntimeMetadata(info.Labels)
 	result := api.Container{ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata}
 	result.Health = metadata.Health
-	result.SizeRw, result.SizeRootFs = b.containerUsage(ctx, info)
+	if includeSize {
+		result.SizeRw, result.SizeRootFs = b.containerUsage(ctx, info)
+	}
 	task, err := container.Task(ctx, nil)
 	if err != nil {
 		applyPersistedLifecycle(&result, metadata)
@@ -1264,9 +1551,9 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if request.ID == "" || request.Image == "" {
 		return api.Container{}, errors.New("id and image are required")
 	}
-	if err := b.cleanups.wait(ctx); err != nil {
-		return api.Container{}, fmt.Errorf("wait for private network cleanup: %w", err)
-	}
+	// Private network cleanup is serialized by NetworkManager and each
+	// container owns a distinct namespace. Keep the previous deletion off the
+	// create critical path so image and snapshot work can start immediately.
 	var privateNetwork bool
 	customNetwork := false
 	sharedNetworkPath := ""
@@ -1313,7 +1600,19 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	var networkReady *networkPreparation
 	keepNetwork := false
 	if privateNetwork {
-		networkReady = b.beginNetworkPreparation(request.ID, request.Network)
+		if err := prepareNetworkFileSources(request.ID); err != nil {
+			return api.Container{}, fmt.Errorf("prepare network file sources: %w", err)
+		}
+		defer func() {
+			if !keepNetwork {
+				removeNetworkFileSources(request.ID)
+			}
+		}()
+		identity := request.Metadata.Name
+		if identity == "" {
+			identity = request.ID
+		}
+		networkReady = b.beginNetworkPreparation(request.ID, request.Network, identity, request.Hostname)
 		defer func() {
 			if keepNetwork || networkReady == nil {
 				return
@@ -1333,12 +1632,13 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	// BuildKit exports tag images into the content store without unpacking.
 	// Snapshot creation below requires the guest-platform layers locally, so
 	// unpack on demand; Unpack short-circuits when chains already exist.
-	if err := image.Unpack(ctx, b.snapshotter); err != nil {
+	if err := b.ensureImageUnpacked(ctx, image, b.snapshotter); err != nil {
 		return api.Container{}, fmt.Errorf("unpack image %q: %w", request.Image, err)
 	}
+	imageConfig := b.dockerImageConfig(ctx, image)
 	effectiveHealthcheck := request.Healthcheck
 	if effectiveHealthcheck == nil {
-		effectiveHealthcheck = readDockerImageConfig(ctx, image).Healthcheck
+		effectiveHealthcheck = imageConfig.Healthcheck
 	}
 	snapshotter := request.Snapshotter
 	if snapshotter == "" {
@@ -1429,6 +1729,9 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		if err != nil {
 			return api.Container{}, err
 		}
+	}
+	if privateNetwork {
+		mounts = networkFileMounts(request.ID, mounts)
 	}
 	if len(mounts) > 0 {
 		specOpts = append(specOpts, oci.WithMounts(mounts))
@@ -1563,6 +1866,10 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		}
 		opts = append(opts, containerd.WithRuntime(runtimeName, runtimeOptions))
 	}
+	// NewContainer has already persisted the complete container record. Keep
+	// the response on the create path local instead of immediately issuing a
+	// second metadata RPC for fields that are already known here.
+	createdAt := time.Now().UTC()
 	container, err := b.client.NewContainer(ctx, request.ID, opts...)
 	if err != nil {
 		if snapshotCreated {
@@ -1571,34 +1878,36 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		return api.Container{}, err
 	}
 	record := &containerRecord{
-		container: container, snapshotter: snapshotter, snapshotKey: request.ID,
+		container: container, image: image, snapshotter: snapshotter, snapshotKey: request.ID,
 	}
 	b.containers.Store(request.ID, record)
-	if err := b.materializeImageDirectories(ctx, request.ID, image); err != nil {
+	fullImageDirectoriesPrepared, err := b.prepareImageDirectories(
+		ctx, request.ID, image, imageConfig.Volumes,
+	)
+	if err != nil {
 		b.containers.Delete(request.ID)
 		if deleteErr := container.Delete(ctx); deleteErr != nil {
 			log.Printf("glassdock: delete failed container %s after image directory repair: %v", request.ID, deleteErr)
 		}
 		return api.Container{}, fmt.Errorf("prepare image filesystem: %w", err)
 	}
-	info, err := container.Info(ctx)
-	if err != nil {
-		return api.Container{}, err
+	if fullImageDirectoriesPrepared {
+		record.markImageDirectoriesReady()
 	}
 	keepNetwork = true
-	// Give the container an /etc/resolv.conf so name resolution works inside.
-	// Images rarely ship one and nothing else provides it, so apk/pip/curl
-	// fail with "bad address" without it. Prefer the user's --dns servers,
-	// otherwise reuse the VM's own resolver configuration. Host-network
-	// containers already see the VM's file.
-	if request.Network.Mode != "host" {
+	// Non-private network modes do not have a NetworkManager attachment that
+	// can prepare the network files at start. Keep the resolver fallback for
+	// those modes; private containers were prepared before task start above.
+	if request.Network.Mode != "host" && !privateNetwork {
 		if err := b.writeResolvConf(ctx, request.ID, metadata.DNS); err != nil {
 			log.Printf("glassdock: write resolv.conf for %s: %v", request.ID, err)
 		}
 	}
-	b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
+	if !privateNetwork {
+		b.network.SetContainerIdentity(request.ID, metadata.Name, request.Hostname)
+	}
 	return api.Container{
-		ID: container.ID(), Image: info.Image, Status: "created", CreatedAt: info.CreatedAt, Metadata: metadata,
+		ID: container.ID(), Image: image.Name(), Status: "created", CreatedAt: createdAt, Metadata: metadata,
 		Health: metadata.Health,
 	}, nil
 }
@@ -1715,12 +2024,28 @@ func privilegedSpecOpt(privileged bool) oci.SpecOpts {
 	return oci.WithAllKnownCapabilities
 }
 
-func (b *Backend) persistRunningState(ctx context.Context, container containerd.Container, published []api.PublishedPort) error {
+func (b *Backend) persistRunningState(
+	ctx context.Context,
+	container containerd.Container,
+	published []api.PublishedPort,
+	portBindings []api.DockerPortBinding,
+) error {
 	return b.updateRuntimeMetadata(ctx, container, func(metadata *api.ContainerMetadata) {
-		metadata.LifecycleState = "running"
-		metadata.LastExitCode = nil
-		metadata.PublishedPorts = published
+		applyRunningState(metadata, published, portBindings)
 	})
+}
+
+func applyRunningState(
+	metadata *api.ContainerMetadata,
+	published []api.PublishedPort,
+	portBindings []api.DockerPortBinding,
+) {
+	metadata.LifecycleState = "running"
+	metadata.LastExitCode = nil
+	metadata.PublishedPorts = published
+	if len(portBindings) > 0 {
+		metadata.PortBindings = append([]api.DockerPortBinding(nil), portBindings...)
+	}
 }
 
 func (b *Backend) updateRuntimeMetadata(ctx context.Context, container containerd.Container, update func(*api.ContainerMetadata)) error {
@@ -2181,6 +2506,23 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 	}
 	metadata := decodeRuntimeMetadata(info.Labels)
 	privateNetwork := usesPrivateNetworkNamespace(metadata.NetworkMode)
+	var image containerd.Image
+	var imageDirectoryMetadataDone chan error
+	if !record.imageDirectoriesReady() {
+		image = record.getImage()
+		if image == nil {
+			image, err = b.LookupImage(ctx, info.Image)
+			if err != nil {
+				return api.Container{}, fmt.Errorf("lookup image %q for filesystem preparation: %w", info.Image, err)
+			}
+			record.setImage(image)
+		}
+		imageDirectoryMetadataDone = make(chan error, 1)
+		go func() {
+			_, preparationErr := b.imageDirectories(ctx, image)
+			imageDirectoryMetadataDone <- preparationErr
+		}()
+	}
 	published := append([]api.PublishedPort(nil), request.PublishedPorts...)
 	rollbackNetwork := func() {}
 	b.network.SetContainerIdentity(id, metadata.Name, metadata.Hostname)
@@ -2251,6 +2593,17 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 			b.network.SetContainerIdentity(id, metadata.Name, metadata.Hostname)
 			rollbackNetwork = func() { _ = b.network.Delete(id) }
 		}
+	}
+	if imageDirectoryMetadataDone != nil {
+		if err := <-imageDirectoryMetadataDone; err != nil {
+			rollbackNetwork()
+			return api.Container{}, fmt.Errorf("read image filesystem metadata: %w", err)
+		}
+		if err := b.repairImageDirectories(ctx, id, image); err != nil {
+			rollbackNetwork()
+			return api.Container{}, fmt.Errorf("prepare image filesystem: %w", err)
+		}
+		record.markImageDirectoriesReady()
 	}
 	task, reaped, reaping := record.taskState()
 	if reaping != nil {
@@ -2328,6 +2681,7 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		}
 		b.logCaptures.Store(id, capture)
 	}
+	record.resetWaitState()
 	if err := b.waitForAttach(ctx, id); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(b.ctx(context.Background()), 30*time.Second)
 		_, _ = task.Delete(cleanupCtx, containerd.WithProcessKill)
@@ -2347,7 +2701,7 @@ func (b *Backend) Start(ctx context.Context, request api.ContainerStartRequest) 
 		return api.Container{}, err
 	}
 	record.setTask(task)
-	if err := b.persistRunningState(ctx, container, published); err != nil {
+	if err := b.persistRunningState(ctx, container, published, request.PortBindings); err != nil {
 		_ = task.Kill(b.ctx(context.Background()), syscall.SIGKILL)
 		_, _ = task.Delete(b.ctx(context.Background()), containerd.WithProcessKill)
 		record.setTask(nil)
@@ -2562,14 +2916,7 @@ func (b *Backend) WaitHealthy(ctx context.Context, id string) (uint32, error) {
 func (b *Backend) Wait(ctx context.Context, id string) (uint32, time.Time, error) {
 	ctx = b.ctx(ctx)
 	record, ok := b.loadRecord(id)
-	var task containerd.Task
-	if ok {
-		if code, exited := record.persistedExitResult(); exited {
-			return code, time.Time{}, nil
-		}
-		task, _, _ = record.taskState()
-	}
-	if task == nil {
+	if !ok {
 		container, err := b.client.LoadContainer(ctx, id)
 		if err != nil {
 			return 0, time.Time{}, err
@@ -2581,24 +2928,46 @@ func (b *Backend) Wait(ctx context.Context, id string) (uint32, time.Time, error
 		if code, exited := record.persistedExitResult(); exited {
 			return code, time.Time{}, nil
 		}
-		task, err = container.Task(ctx, nil)
+	}
+	if code, exited := record.persistedExitResult(); exited {
+		return code, time.Time{}, nil
+	}
+	state, owner := record.beginWait()
+	if !owner {
+		select {
+		case <-ctx.Done():
+			return 0, time.Time{}, ctx.Err()
+		case <-state.done:
+			return state.result.code, state.result.exitedAt, state.result.err
+		}
+	}
+	result := b.waitRecord(ctx, id, record)
+	record.finishWait(state, result)
+	return result.code, result.exitedAt, result.err
+}
+
+func (b *Backend) waitRecord(ctx context.Context, id string, record *containerRecord) containerWaitResult {
+	task, _, _ := record.taskState()
+	if task == nil {
+		var err error
+		task, err = record.container.Task(ctx, nil)
 		if err != nil {
-			info, infoErr := container.Info(ctx)
+			info, infoErr := record.container.Info(ctx)
 			if infoErr == nil && decodeRuntimeMetadata(info.Labels).LifecycleState == "running" {
 				persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				persistErr := b.persistExitState(persistCtx, record, daemonLostExitCode)
 				cancel()
 				if persistErr == nil {
-					return daemonLostExitCode, time.Time{}, nil
+					return containerWaitResult{code: daemonLostExitCode}
 				}
 			}
-			return 0, time.Time{}, err
+			return containerWaitResult{err: err}
 		}
 		record.setTask(task)
 	}
 	status, err := task.Wait(ctx)
 	if err != nil {
-		return 0, time.Time{}, err
+		return containerWaitResult{err: err}
 	}
 	exit := <-status
 	code, exitedAt, err := exit.Result()
@@ -2612,7 +2981,7 @@ func (b *Backend) Wait(ctx context.Context, id string) (uint32, time.Time, error
 			go b.reapTask(record, task)
 		}
 	}
-	return code, exitedAt, err
+	return containerWaitResult{code: code, exitedAt: exitedAt, err: err}
 }
 
 func (b *Backend) reapTask(record *containerRecord, task containerd.Task) {
@@ -3393,6 +3762,7 @@ func (b *Backend) Delete(ctx context.Context, request api.ContainerDeleteRequest
 		return err
 	}
 	b.containers.Delete(request.ID)
+	removeNetworkFileSources(request.ID)
 	if request.Snapshot && record.snapshotKey != "" {
 		go b.removeSnapshot(record.snapshotter, record.snapshotKey)
 	}
@@ -3461,10 +3831,48 @@ func (b *Backend) removeSnapshot(snapshotter, key string) {
 		err := service.Remove(ctx, key)
 		cancel()
 		if err == nil || errdefs.IsNotFound(err) {
+			b.trimContainerStorage()
 			return
 		}
 		time.Sleep(time.Duration(1<<attempt) * 10 * time.Millisecond)
 	}
+}
+
+// removeSnapshot unlinks the overlay upper directory, but ext4 can keep its
+// freed blocks in the sparse data disk until a trim is issued. Run one
+// serialized trim after the asynchronous removal so deleted short-lived
+// containers do not inflate the next storage sample.
+func (b *Backend) trimContainerStorage() {
+	b.storageTrimMu.Lock()
+	defer b.storageTrimMu.Unlock()
+	file, err := os.Open("/var/lib/containerd")
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	if runtime.GOOS == "linux" {
+		// FITRIM only sees free extents after the filesystem has committed the
+		// preceding snapshot unlink. The guest is arm64 Linux, where syncfs is
+		// syscall 267; keep the runtime guard so host-side Go tests still build.
+		if _, _, errno := syscall.Syscall(267, file.Fd(), 0, 0); errno != 0 {
+			return
+		}
+	}
+	if err := file.Sync(); err != nil {
+		return
+	}
+	request := fstrimRange{length: ^uint64(0)}
+	_, _, _ = syscall.Syscall(
+		syscall.SYS_IOCTL, file.Fd(), fitrim, uintptr(unsafe.Pointer(&request)),
+	)
+}
+
+const fitrim = 0xC0185879
+
+type fstrimRange struct {
+	start         uint64
+	length        uint64
+	minimumLength uint64
 }
 
 type StreamFunc func(stream string, data []byte) error

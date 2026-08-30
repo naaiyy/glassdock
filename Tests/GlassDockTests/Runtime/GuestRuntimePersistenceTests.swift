@@ -96,6 +96,21 @@ struct GuestRuntimePersistenceTests {
         #expect(!GuestRuntime.requiresStart(.running))
         #expect(GuestRuntime.requiresStart(.exited))
         #expect(
+            GuestRuntime.cachedWaitExitCode(
+                state: .exited, exitCode: 7, condition: .notRunning
+            ) == 7
+        )
+        #expect(
+            GuestRuntime.cachedWaitExitCode(
+                state: .exited, exitCode: 7, condition: .nextExit
+            ) == nil
+        )
+        #expect(
+            GuestRuntime.cachedWaitExitCode(
+                state: .running, exitCode: nil, condition: .notRunning
+            ) == nil
+        )
+        #expect(
             GuestRuntime.requiresPortPublicationRetry(
                 state: .running, publicationPending: true
             )
@@ -127,6 +142,30 @@ struct GuestRuntimePersistenceTests {
 
         #expect(index.code(for: "auto-remove") == 23)
         #expect(index.code(for: "auto-remove") == 23)
+    }
+
+    @Test("auto-remove waits for active attach streams")
+    func autoRemoveWaitsForAttachments() async {
+        let gate = GuestAttachmentGate()
+        let first = await gate.begin(id: "container")
+        let second = await gate.begin(id: "container")
+
+        #expect(await gate.requestRemoval(id: "container") == .waitForAttachment)
+        #expect(!(await gate.end(id: "container", token: first)))
+        #expect(await gate.activeCount(id: "container") == 1)
+        #expect(await gate.end(id: "container", token: second))
+        #expect(await gate.activeCount(id: "container") == 0)
+        #expect(!(await gate.end(id: "container", token: second)))
+    }
+
+    @Test("auto-remove grants grace only when no attach is active")
+    func autoRemoveGraceIsDeferred() async {
+        let gate = GuestAttachmentGate()
+
+        #expect(await gate.requestRemoval(id: "container") == .waitForGrace)
+        let token = await gate.begin(id: "container")
+        #expect(await gate.requestRemoval(id: "container") == .waitForAttachment)
+        #expect(await gate.end(id: "container", token: token))
     }
 
     @Test("exit result index is bounded")

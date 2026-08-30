@@ -66,6 +66,63 @@ func TestBoundedLogWriterConsumesWithoutExceedingLimit(t *testing.T) {
 	}
 }
 
+func TestBoundedLogWriterCreatesFilesOnFirstWrite(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "stdout")
+	indexPath := filepath.Join(directory, "stdout.timestamps")
+	writer := &boundedLogWriter{path: path, indexPath: indexPath}
+
+	if _, err := writer.Write(nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("log file exists before output: %v", err)
+	}
+	if _, err := os.Stat(indexPath); !os.IsNotExist(err) {
+		t.Fatalf("timestamp file exists before output: %v", err)
+	}
+
+	if _, err := writer.Write([]byte("output\n")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "output\n" {
+		t.Fatalf("log data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("timestamp file was not created: %v", err)
+	}
+	_ = writer.file.Close()
+	_ = writer.index.Close()
+}
+
+func TestLiveAttachReplayRecoversOutputWrittenBeforeSubscribe(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	writer := &boundedLogWriter{file: file}
+	if _, err := writer.Write([]byte("fast-output")); err != nil {
+		t.Fatal(err)
+	}
+	tail := 0
+	liveRequest := api.ContainerLogsRequest{Stdout: true, Tail: &tail}
+	live, err := writer.initialDataLocked(liveRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live-only attach replayed %q", live)
+	}
+	replay, err := writer.initialDataLocked(attachReplayRequest(liveRequest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(replay) != "fast-output" {
+		t.Fatalf("fallback replay=%q", replay)
+	}
+}
+
 func TestLogsReturnsSelectedStreams(t *testing.T) {
 	t.Parallel()
 	backend := &Backend{logsDir: t.TempDir()}
@@ -138,6 +195,35 @@ func TestBoundedLogSubscriberReceivesExistingAndLiveBytes(t *testing.T) {
 	defer receivedMu.Unlock()
 	if string(received) != "before-after" {
 		t.Fatalf("received %q", received)
+	}
+}
+
+func TestBoundedLogSubscriberDeliversReplayBeforeImmediateUnsubscribe(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	writer := &boundedLogWriter{file: file}
+	if _, err := writer.Write([]byte("replay")); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan string, 1)
+	unsubscribe, err := writer.subscribe(api.ContainerLogsRequest{Stdout: true}, func(data []byte) error {
+		received <- string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsubscribe()
+	select {
+	case got := <-received:
+		if got != "replay" {
+			t.Fatalf("received %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscriber lost replay data when unsubscribed immediately")
 	}
 }
 

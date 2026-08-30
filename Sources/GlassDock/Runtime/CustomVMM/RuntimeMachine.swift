@@ -7,6 +7,7 @@ enum RuntimeMachineError: Error, Equatable {
     case helperLaunch(String)
     case invalidReadiness(String)
     case socketConnect(path: String, errno: Int32)
+    case memoryTarget(status: Int32)
 }
 
 struct RuntimeMachineConfiguration: Sendable, Equatable {
@@ -116,6 +117,7 @@ private struct RuntimeMachineNetworkState: Decodable {
 protocol EngineMachineHosting: Sendable {
     func start() async throws -> RuntimeMachineReady
     func connect(to port: UInt32) async throws -> FileHandle
+    func setMemoryTarget(_ bytes: UInt64, waitForTarget: Bool) async throws
     func stop() async throws
 }
 
@@ -229,6 +231,34 @@ actor RuntimeMachine: EngineMachineHosting {
             .appendingPathComponent("vsock", isDirectory: true)
             .appendingPathComponent("\(port).sock", isDirectory: false)
         return try socketConnector.connect(to: path)
+    }
+
+    func setMemoryTarget(_ bytes: UInt64, waitForTarget: Bool = false) async throws {
+        guard let running else {
+            throw RuntimeMachineError.notRunning
+        }
+        let path = running.runtimeDirectory
+            .appendingPathComponent("balloon.sock", isDirectory: false)
+        let socket = try socketConnector.connect(to: path)
+        defer { try? socket.close() }
+        // Idle reclamation stays asynchronous. The first request after idle
+        // asks the helper to wait until the active reserve is available, so a
+        // guest workload cannot race the balloon while it is deflating.
+        var target = bytes | (waitForTarget ? (UInt64(1) << 63) : 0)
+        target = target.littleEndian
+        let request = withUnsafeBytes(of: &target) { Data($0) }
+        try socket.write(contentsOf: request)
+        guard let response = try socket.read(upToCount: MemoryLayout<Int32>.size), response.count == 4
+        else {
+            throw RuntimeMachineError.memoryTarget(status: -1)
+        }
+        let rawStatus = response.enumerated().reduce(UInt32(0)) { result, item in
+            result | (UInt32(item.element) << (UInt32(item.offset) * 8))
+        }
+        let status = Int32(bitPattern: rawStatus)
+        guard status == 0 else {
+            throw RuntimeMachineError.memoryTarget(status: status)
+        }
     }
 
     func stop() async throws {

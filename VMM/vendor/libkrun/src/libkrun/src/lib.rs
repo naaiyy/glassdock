@@ -28,15 +28,19 @@ use std::env;
 use std::ffi::CString;
 use std::ffi::{c_void, CStr};
 use std::fs::File;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::thread;
+#[cfg(not(feature = "tee"))]
+use std::time::{Duration, Instant};
 use utils::eventfd::EventFd;
 use vmm::resources::{
     DefaultVirtioConsoleConfig, PortConfig, SerialConsoleConfig, TsiFlags, VirtioConsoleConfigMode,
@@ -69,6 +73,30 @@ use krun_input::{InputConfigBackend, InputEventProviderBackend};
 
 // Value returned on success. We use libc's errors otherwise.
 const KRUN_SUCCESS: i32 = 0;
+#[cfg(not(feature = "tee"))]
+const BALLOON_WAIT_FOR_TARGET: u64 = 1 << 63;
+#[cfg(not(feature = "tee"))]
+const BALLOON_TARGET_MASK: u64 = !BALLOON_WAIT_FOR_TARGET;
+#[cfg(not(feature = "tee"))]
+const BALLOON_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(feature = "tee"))]
+fn wait_for_balloon_target(vmm: &std::sync::Arc<Mutex<vmm::Vmm>>, target_bytes: u64) -> i32 {
+    let deadline = Instant::now() + BALLOON_TARGET_TIMEOUT;
+    loop {
+        let reached = match vmm.lock() {
+            Ok(vmm) => vmm.balloon_target_reached(target_bytes),
+            Err(_) => return -libc::EIO,
+        };
+        if reached {
+            return KRUN_SUCCESS;
+        }
+        if Instant::now() >= deadline {
+            return -libc::ETIMEDOUT;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
 // Maximum number of arguments/environment variables we allow
 const MAX_ARGS: usize = 4096;
 
@@ -158,6 +186,7 @@ enum LegacyNetworkConfig {
 struct ContextConfig {
     krunfw: Option<KrunfwBindings>,
     vmr: VmResources,
+    balloon_socket: Option<PathBuf>,
     workdir: Option<String>,
     exec_path: Option<String>,
     env: Option<String>,
@@ -193,6 +222,69 @@ struct ContextConfig {
         not(any(feature = "tee", feature = "aws-nitro"))
     ))]
     disable_implicit_init: bool,
+}
+
+#[cfg(not(feature = "tee"))]
+fn serve_balloon_control(
+    listener: UnixListener,
+    vmm: std::sync::Arc<Mutex<vmm::Vmm>>,
+) -> std::io::Result<()> {
+    let mut last_target = None;
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let mut request = [0u8; 8];
+        if let Err(error) = stream.read_exact(&mut request) {
+            debug!("balloon control request ended before its target: {error}");
+            continue;
+        }
+        let request = u64::from_le_bytes(request);
+        let wait_for_target = request & BALLOON_WAIT_FOR_TARGET != 0;
+        let target_bytes = request & BALLOON_TARGET_MASK;
+        let mut status = KRUN_SUCCESS;
+        if wait_for_target
+            && last_target.is_some_and(|previous_target| target_bytes < previous_target)
+        {
+            // Wait only when a request adds more pages to the balloon. An
+            // idle target can be unreachable after a workload has grown the
+            // guest's working set; an active request must be allowed to
+            // supersede that target and deflate the balloon immediately.
+            status = wait_for_balloon_target(&vmm, last_target.unwrap());
+        }
+        if status == KRUN_SUCCESS {
+            status = match vmm.lock() {
+                Ok(vmm) => vmm.set_balloon_target(target_bytes),
+                Err(_) => -libc::EIO,
+            };
+        }
+        if status == KRUN_SUCCESS && wait_for_target {
+            status = wait_for_balloon_target(&vmm, target_bytes);
+        }
+        if status == KRUN_SUCCESS {
+            last_target = Some(target_bytes);
+        }
+        let _ = stream.write_all(&status.to_le_bytes());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "tee"))]
+fn spawn_balloon_control(
+    path: PathBuf,
+    vmm: std::sync::Arc<Mutex<vmm::Vmm>>,
+) -> std::io::Result<()> {
+    let listener = UnixListener::bind(path)?;
+    thread::Builder::new()
+        .name("libkrun-balloon-control".to_string())
+        .spawn(move || {
+            if let Err(error) = serve_balloon_control(listener, vmm) {
+                error!("balloon control stopped: {error}");
+            }
+        })
+        .map(|_| ())
 }
 
 impl ContextConfig {
@@ -601,6 +693,19 @@ pub extern "C" fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -
     }
 
     KRUN_SUCCESS
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub unsafe extern "C" fn krun_set_balloon_socket(ctx_id: u32, c_socket_path: *const c_char) -> i32 {
+    let socket_path = match CStr::from_ptr(c_socket_path).to_str() {
+        Ok(path) if path.starts_with('/') && !path.ends_with('/') => PathBuf::from(path),
+        _ => return -libc::EINVAL,
+    };
+    with_cfg(ctx_id, |cfg| {
+        cfg.balloon_socket = Some(socket_path);
+        KRUN_SUCCESS
+    })
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -3018,6 +3123,14 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             return -libc::EINVAL;
         }
     };
+
+    #[cfg(not(feature = "tee"))]
+    if let Some(balloon_socket) = ctx_cfg.balloon_socket {
+        if let Err(error) = spawn_balloon_control(balloon_socket, _vmm.clone()) {
+            error!("unable to start balloon control: {error}");
+            return -libc::EAGAIN;
+        }
+    }
 
     #[cfg(target_os = "macos")]
     if ctx_cfg.gpu_virgl_flags.is_some() {

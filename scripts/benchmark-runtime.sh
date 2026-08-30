@@ -186,7 +186,7 @@ product_value() {
         START_MODE) printf 'foreground' ;;
         VERSION_CMD) printf '%q --version' "$REPO_ROOT/.build/release/glassdock" ;;
         RUNTIME_CMD) printf "printf 'Docker API v1.51; containerd 2.1.5; runc 1.3.4-r1'" ;;
-        HELPER_PATTERNS) printf 'glassdock-vmm,gvproxy' ;;
+        HELPER_PATTERNS) printf '%s,%s' "$REPO_ROOT/VMM/out/glassdock-vmm" "$REPO_ROOT/VMM/out/gvproxy" ;;
         BIND_ROOT) printf '%s' "$ENGINE_STATE_DIR/glassdock-home" ;;
         STORAGE_PATHS) printf '%s:%s:%s:%s:%s:%s:%s' "$REPO_ROOT/.build/release/glassdock" \
             "$REPO_ROOT/VMM/out/glassdock-vmm" "$REPO_ROOT/VMM/out/libkrun.1.dylib" \

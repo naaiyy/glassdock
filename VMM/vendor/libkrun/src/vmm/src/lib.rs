@@ -223,6 +223,107 @@ impl Vmm {
         self.mmio_device_manager.get_device(device_type, device_id)
     }
 
+    #[cfg(not(feature = "tee"))]
+    pub fn set_balloon_target(&self, target_bytes: u64) -> i32 {
+        let Some(balloon_pages) = self.balloon_pages_for_target(target_bytes) else {
+            return -libc::EINVAL;
+        };
+        let Some(device) = self.get_bus_device(
+            DeviceType::Virtio(devices::virtio::TYPE_BALLOON),
+            "virtio_balloon",
+        ) else {
+            return -libc::ENODEV;
+        };
+        let Ok(mut device) = device.lock() else {
+            return -libc::EIO;
+        };
+        let Some(transport) = device
+            .as_mut_any()
+            .downcast_mut::<devices::virtio::MmioTransport>()
+        else {
+            return -libc::ENODEV;
+        };
+        let balloon = transport.device();
+        let Ok(mut balloon) = balloon.lock() else {
+            return -libc::EIO;
+        };
+        let Some(balloon) = balloon
+            .as_mut_any()
+            .downcast_mut::<devices::virtio::Balloon>()
+        else {
+            return -libc::ENODEV;
+        };
+        if balloon.set_target_pages(balloon_pages) {
+            transport.signal_config_change();
+        }
+        0
+    }
+
+    #[cfg(not(feature = "tee"))]
+    fn guest_memory_bytes(&self) -> Option<u64> {
+        #[cfg(target_arch = "aarch64")]
+        {
+            self.arch_memory_info
+                .ram_last_addr
+                .checked_sub(self.arch_memory_info.ram_start_addr)
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            self.arch_memory_info
+                .ram_last_addr
+                .checked_sub(arch::riscv64::layout::DRAM_MEM_START)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.arch_memory_info
+                .ram_below_gap
+                .checked_add(self.arch_memory_info.ram_above_gap)
+        }
+    }
+
+    #[cfg(not(feature = "tee"))]
+    fn balloon_pages_for_target(&self, target_bytes: u64) -> Option<u32> {
+        const PAGE_SIZE: u64 = 4096;
+        let total_bytes = self.guest_memory_bytes()?;
+        if target_bytes == 0
+            || target_bytes > total_bytes
+            || !target_bytes.is_multiple_of(PAGE_SIZE)
+        {
+            return None;
+        }
+        u32::try_from((total_bytes - target_bytes) / PAGE_SIZE).ok()
+    }
+
+    #[cfg(not(feature = "tee"))]
+    pub fn balloon_target_reached(&self, target_bytes: u64) -> bool {
+        let Some(_balloon_pages) = self.balloon_pages_for_target(target_bytes) else {
+            return false;
+        };
+        let Some(device) = self.get_bus_device(
+            DeviceType::Virtio(devices::virtio::TYPE_BALLOON),
+            "virtio_balloon",
+        ) else {
+            return false;
+        };
+        let Ok(mut device) = device.lock() else {
+            return false;
+        };
+        let Some(transport) = device
+            .as_mut_any()
+            .downcast_mut::<devices::virtio::MmioTransport>()
+        else {
+            return false;
+        };
+        let balloon = transport.device();
+        let Ok(balloon) = balloon.lock() else {
+            return false;
+        };
+        let Some(balloon) = balloon.as_any().downcast_ref::<devices::virtio::Balloon>() else {
+            return false;
+        };
+        balloon.target_reached()
+    }
+
     /// Starts the microVM vcpus.
     pub fn start_vcpus(&mut self, mut vcpus: Vec<Vcpu>) -> Result<()> {
         let vcpu_count = vcpus.len();

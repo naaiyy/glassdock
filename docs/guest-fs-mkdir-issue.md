@@ -26,10 +26,12 @@ create returns `ENOENT`.
 ## Fix
 
 `Guest/internal/backend/image_directories.go` reads the final directory set
-from the image layers. During container creation it repairs missing image
-directories and forces empty lower-layer directories into the writable upper
-layer with a temporary marker file that is removed immediately. The image
-contents remain unchanged.
+from the image layers. During container creation it selects Docker-configured
+`VOLUME` paths and their ancestors, then forces empty lower-layer directories
+in that set into the writable upper layer with a temporary marker file that is
+removed immediately. The image contents remain unchanged. Other empty image
+directories stay in the lower layers, so ordinary idle containers do not pay
+for copy-up entries that their workload does not use.
 
 ## Coverage
 

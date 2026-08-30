@@ -37,6 +37,9 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
         let builderSocket =
             runtimeDirectory
             .appendingPathComponent("vsock/1027.sock", isDirectory: false)
+        let balloonSocket =
+            runtimeDirectory
+            .appendingPathComponent("balloon.sock", isDirectory: false)
         let process = Process()
         process.executableURL = configuration.helperExecutable
         process.arguments = Self.arguments(
@@ -52,7 +55,7 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
         }
         return FoundationRuntimeMachineProcess(
             process: process,
-            readinessSockets: [controlSocket, tcpRelaySocket, builderSocket]
+            readinessSockets: [controlSocket, tcpRelaySocket, builderSocket, balloonSocket]
         )
     }
 
@@ -73,6 +76,8 @@ struct FoundationRuntimeMachineProcessLauncher: RuntimeMachineProcessLaunching {
             runtimeDirectory.appendingPathComponent("vsock/1026.sock").path,
             "--builder-socket",
             runtimeDirectory.appendingPathComponent("vsock/1027.sock").path,
+            "--balloon-socket",
+            runtimeDirectory.appendingPathComponent("balloon.sock").path,
             "--console-log",
             runtimeDirectory.appendingPathComponent("console.log").path,
             "--cpus", String(configuration.cpuCount),

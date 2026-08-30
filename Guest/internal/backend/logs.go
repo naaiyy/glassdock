@@ -23,6 +23,8 @@ import (
 const maxLogBytes int64 = 4 << 20
 
 type boundedLogWriter struct {
+	path        string
+	indexPath   string
 	mu          sync.Mutex
 	file        *os.File
 	index       *os.File
@@ -40,8 +42,14 @@ type logSubscriber struct {
 }
 
 func (w *boundedLogWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.ensureFilesLocked(); err != nil {
+		return 0, err
+	}
 	originalLength := len(p)
 	live := append([]byte(nil), p...)
 	when := time.Now().UTC()
@@ -70,6 +78,36 @@ func (w *boundedLogWriter) Write(p []byte) (int, error) {
 	// Report the full input as consumed. Once the limit is reached, logs must not
 	// apply backpressure to the container process.
 	return originalLength, nil
+}
+
+func (w *boundedLogWriter) ensureFilesLocked() error {
+	if w.file != nil {
+		return nil
+	}
+	if w.path == "" || w.indexPath == "" {
+		return errors.New("log writer has no file paths")
+	}
+	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	index, err := os.OpenFile(w.indexPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	var written int64
+	if info, statErr := file.Stat(); statErr == nil {
+		written = info.Size()
+	}
+	w.file = file
+	w.index = index
+	w.written = written
+	w.truncated = written >= maxLogBytes
+	return nil
 }
 
 func (w *boundedLogWriter) writeRecordLocked(when time.Time, data []byte) error {
@@ -116,14 +154,11 @@ func (w *boundedLogWriter) subscribe(
 	entry := &logSubscriber{
 		chunks: make(chan []byte, 64), stop: make(chan struct{}), options: options,
 	}
-	if len(data) > 0 {
-		entry.chunks <- data
-	}
 	w.subscribers[id] = entry
 	w.mu.Unlock()
-	var once sync.Once
-	unsubscribe := func() {
-		once.Do(func() {
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
 			w.mu.Lock()
 			if w.subscribers[id] == entry {
 				delete(w.subscribers, id)
@@ -132,23 +167,64 @@ func (w *boundedLogWriter) subscribe(
 			w.mu.Unlock()
 		})
 	}
+	initialReplayStarted := make(chan struct{})
+	finished := make(chan struct{})
+	unsubscribe := func() {
+		stop()
+		<-finished
+	}
 	go func() {
+		defer close(finished)
+		deliver := func(data []byte) bool {
+			return subscriber(data) != nil
+		}
+		drain := func() {
+			for {
+				select {
+				case data := <-entry.chunks:
+					if deliver(data) {
+						return
+					}
+				default:
+					return
+				}
+			}
+		}
+		if len(data) > 0 {
+			// Start the replay before selecting on stop. An attach can finish
+			// its wait and unsubscribe immediately after this function returns;
+			// the initial bytes must not be lost in that race.
+			close(initialReplayStarted)
+			if deliver(data) {
+				stop()
+				return
+			}
+		} else {
+			close(initialReplayStarted)
+		}
 		for {
 			select {
 			case data := <-entry.chunks:
-				if subscriber(data) != nil {
-					unsubscribe()
+				if deliver(data) {
+					stop()
 					return
 				}
 			case <-entry.stop:
+				// unsubscribe can race a final live write. Drain queued data so
+				// a fast container does not lose its output when its wait completes.
+				drain()
 				return
 			}
 		}
 	}()
+	<-initialReplayStarted
 	return unsubscribe, nil
 }
 
 func (w *boundedLogWriter) initialDataLocked(options api.ContainerLogsRequest) ([]byte, error) {
+	if w.file == nil {
+		return []byte{}, nil
+	}
 	if options.Timestamps || options.Since != 0 || options.Until != 0 {
 		if w.index != nil {
 			data, err := readFilteredRecords(w.index.Name(), options, w.details)
@@ -181,6 +257,7 @@ type logCapture struct {
 	stderr *boundedLogWriter
 	io     cio.IO
 	once   sync.Once
+	done   chan struct{}
 }
 
 func logKey(id string) string {
@@ -197,41 +274,14 @@ func (b *Backend) logIndexPath(id, stream string) string {
 }
 
 func (b *Backend) createLogCapture(id string) (*logCapture, error) {
-	if err := os.MkdirAll(b.logsDir, 0o700); err != nil {
-		return nil, err
-	}
-	open := func(stream string) (*boundedLogWriter, error) {
-		file, err := os.OpenFile(b.logPath(id, stream), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			return nil, err
-		}
-		index, err := os.OpenFile(b.logIndexPath(id, stream), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		var written int64
-		if info, statErr := file.Stat(); statErr == nil {
-			written = info.Size()
-		}
+	open := func(stream string) *boundedLogWriter {
 		return &boundedLogWriter{
-			file: file, index: index, written: written, truncated: written >= maxLogBytes,
-		}, nil
-	}
-	stdout, err := open("stdout")
-	if err != nil {
-		return nil, err
-	}
-	stderr, err := open("stderr")
-	if err != nil {
-		_ = stdout.file.Close()
-		if stdout.index != nil {
-			_ = stdout.index.Close()
+			path:      b.logPath(id, stream),
+			indexPath: b.logIndexPath(id, stream),
 		}
-		_ = os.Remove(b.logPath(id, "stdout"))
-		_ = os.Remove(b.logIndexPath(id, "stdout"))
-		return nil, err
 	}
+	stdout := open("stdout")
+	stderr := open("stderr")
 	if container, err := b.client.LoadContainer(b.ctx(context.Background()), id); err == nil {
 		if labels, err := container.Labels(b.ctx(context.Background())); err == nil {
 			prefix := detailsPrefix(labels)
@@ -239,17 +289,22 @@ func (b *Backend) createLogCapture(id string) (*logCapture, error) {
 			stderr.details = prefix
 		}
 	}
-	return &logCapture{stdout: stdout, stderr: stderr}, nil
+	return &logCapture{stdout: stdout, stderr: stderr, done: make(chan struct{})}, nil
 }
 
 func (capture *logCapture) close() {
 	capture.once.Do(func() {
+		defer close(capture.done)
 		if capture.io != nil {
 			capture.io.Wait()
 			_ = capture.io.Close()
 		}
-		_ = capture.stdout.file.Close()
-		_ = capture.stderr.file.Close()
+		if capture.stdout.file != nil {
+			_ = capture.stdout.file.Close()
+		}
+		if capture.stderr.file != nil {
+			_ = capture.stderr.file.Close()
+		}
 		if capture.stdout.index != nil {
 			_ = capture.stdout.index.Close()
 		}
@@ -257,6 +312,15 @@ func (capture *logCapture) close() {
 			_ = capture.stderr.index.Close()
 		}
 	})
+}
+
+func (capture *logCapture) wait(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-capture.done:
+		return nil
+	}
 }
 
 func (b *Backend) finishLogCapture(id string) {
@@ -350,6 +414,9 @@ func (b *Backend) readFilteredLog(id, stream string, request api.ContainerLogsRe
 	data, err := readFilteredRecords(b.logIndexPath(id, stream), request, details...)
 	if errors.Is(err, os.ErrNotExist) {
 		data, readErr := os.ReadFile(b.logPath(id, stream))
+		if errors.Is(readErr, os.ErrNotExist) {
+			return []byte{}, nil
+		}
 		if readErr != nil {
 			return nil, readErr
 		}
@@ -432,6 +499,12 @@ func tailLog(data []byte, count int) []byte {
 		result = append(result, '\n')
 	}
 	return result
+}
+
+func attachReplayRequest(request api.ContainerLogsRequest) api.ContainerLogsRequest {
+	request.Logs = true
+	request.Tail = nil
+	return request
 }
 
 func appendTimestamped(output []byte, timestamp time.Time, data []byte, details ...string) []byte {
@@ -523,7 +596,14 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 			return 0, err
 		}
 		if item.Status == "exited" || item.Status == "stopped" {
-			logs, err := b.Logs(request)
+			logsRequest := request
+			if !request.Logs {
+				// The process may have exited before the attach request reached
+				// the guest. In that case there is no live subscriber, so recover
+				// the captured bytes instead of applying live-only tail=0.
+				logsRequest = attachReplayRequest(request)
+			}
+			logs, err := b.Logs(logsRequest)
 			if err != nil {
 				return 0, err
 			}
@@ -549,30 +629,26 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 	}
 	capture := value.(*logCapture)
 	unsubscribers := []func(){}
-	defer func() {
+	stdoutDelivered := false
+	stderrDelivered := false
+	unsubscribeAll := func() {
 		for _, unsubscribe := range unsubscribers {
 			unsubscribe()
 		}
-	}()
-	if request.Logs {
-		logs, err := b.Logs(request)
-		if err != nil {
-			return 0, err
-		}
-		if request.Stdout && len(logs.Stdout) > 0 {
-			if err := stream("stdout", logs.Stdout); err != nil {
-				return 0, err
-			}
-		}
-		if request.Stderr && len(logs.Stderr) > 0 {
-			if err := stream("stderr", logs.Stderr); err != nil {
-				return 0, err
-			}
-		}
+		unsubscribers = nil
 	}
+	defer func() {
+		unsubscribeAll()
+	}()
 	if request.Stdout {
 		unsubscribe, err := capture.stdout.subscribe(
-			request, func(data []byte) error { return stream("stdout", data) },
+			request, func(data []byte) error {
+				if err := stream("stdout", data); err != nil {
+					return err
+				}
+				stdoutDelivered = true
+				return nil
+			},
 		)
 		if err != nil {
 			return 0, err
@@ -581,7 +657,13 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 	}
 	if request.Stderr {
 		unsubscribe, err := capture.stderr.subscribe(
-			request, func(data []byte) error { return stream("stderr", data) },
+			request, func(data []byte) error {
+				if err := stream("stderr", data); err != nil {
+					return err
+				}
+				stderrDelivered = true
+				return nil
+			},
 		)
 		if err != nil {
 			return 0, err
@@ -591,7 +673,35 @@ func (b *Backend) Attach(ctx context.Context, request api.ContainerLogsRequest, 
 	b.completeAttach(request.ID)
 	attachReady = true
 	code, _, err := b.Wait(ctx, request.ID)
-	return code, err
+	if err != nil {
+		return code, err
+	}
+	if err := capture.wait(ctx); err != nil {
+		return code, err
+	}
+	// Docker starts the process and establishes attach on separate client
+	// connections. If a short-lived process exits before the live-only
+	// subscriber is registered, tail=0 intentionally suppresses the initial
+	// replay and the live frame is otherwise lost. Drain the subscribers first,
+	// then replay the captured bytes only for streams that delivered no frame.
+	unsubscribeAll()
+	if !request.Logs && ((!stdoutDelivered && request.Stdout) || (!stderrDelivered && request.Stderr)) {
+		logs, err := b.Logs(attachReplayRequest(request))
+		if err != nil {
+			return code, err
+		}
+		if request.Stdout && !stdoutDelivered && len(logs.Stdout) > 0 {
+			if err := stream("stdout", logs.Stdout); err != nil {
+				return code, err
+			}
+		}
+		if request.Stderr && !stderrDelivered && len(logs.Stderr) > 0 {
+			if err := stream("stderr", logs.Stderr); err != nil {
+				return code, err
+			}
+		}
+	}
+	return code, nil
 }
 
 var _ io.Writer = (*boundedLogWriter)(nil)
