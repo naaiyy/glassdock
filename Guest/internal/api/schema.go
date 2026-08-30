@@ -62,8 +62,9 @@ type ImagePullRequest struct {
 	Secret      string `json:"secret,omitempty"`
 }
 type ImageResponse struct {
-	Name   string `json:"name"`
-	Digest string `json:"digest"`
+	Name      string `json:"name"`
+	Digest    string `json:"digest"`
+	NeedsSync bool   `json:"needsSync,omitempty"`
 }
 type ImageRequest struct {
 	Reference string `json:"reference"`
@@ -172,7 +173,8 @@ type VersionResponse struct {
 	Containerd string `json:"containerd"`
 }
 type IDRequest struct {
-	ID string `json:"id"`
+	ID   string `json:"id"`
+	Size bool   `json:"size,omitempty"`
 }
 type PublishedPort struct {
 	ContainerPort uint16 `json:"containerPort"`
@@ -223,8 +225,9 @@ type ContainerCreateRequest struct {
 }
 
 type ContainerStartRequest struct {
-	ID             string          `json:"id"`
-	PublishedPorts []PublishedPort `json:"publishedPorts,omitempty"`
+	ID             string              `json:"id"`
+	PublishedPorts []PublishedPort     `json:"publishedPorts,omitempty"`
+	PortBindings   []DockerPortBinding `json:"portBindings,omitempty"`
 }
 
 type DockerPortBinding struct {

@@ -130,9 +130,28 @@ func (m *NetworkManager) Initialize() error {
 }
 
 func (m *NetworkManager) Create(id string) (string, error) {
+	return m.create(id, "", "")
+}
+
+// CreateWithIdentity creates the private namespace and records the Docker
+// name and hostname while the manager already owns its lock. Container
+// creation starts this work in parallel with containerd setup, so assigning
+// the identity after Create would contend with the netlink setup and add the
+// full namespace-provisioning time to the Docker create response.
+func (m *NetworkManager) CreateWithIdentity(id, identity, hostname string) (string, error) {
+	return m.create(id, identity, hostname)
+}
+
+func (m *NetworkManager) create(id, identity, hostname string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing := m.containers[id]; existing != nil {
+		if identity != "" {
+			existing.identity = identity
+		}
+		if hostname != "" {
+			existing.hostname = hostname
+		}
 		return "/run/netns/" + existing.name, nil
 	}
 	if err := m.initialize(); err != nil {
@@ -159,7 +178,8 @@ func (m *NetworkManager) Create(id string) (string, error) {
 		address: address,
 	}
 	m.containers[id] = &containerNetwork{
-		name: name, address: address, endpoints: map[string]*networkEndpoint{defaultNetwork.id: endpoint},
+		name: name, identity: identity, hostname: hostname, address: address,
+		endpoints: map[string]*networkEndpoint{defaultNetwork.id: endpoint},
 	}
 	defaultNetwork.containers[id] = endpoint
 	return "/run/netns/" + name, nil

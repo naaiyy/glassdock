@@ -412,10 +412,10 @@ rules. Do not compare result values from different machines.
 - Build cache accounting and pruning use the guest BuildKit cache. The
   compatibility matrix defines full support for the regular Dockerfile workflow
   and does not include Swarm or Docker plugin hosting.
-- Glass Dock replaces a readable data disk only when it identifies the previous
-  unjournaled alpha format. It preserves that disk as
-  `data.ext4.incompatible-<UUID>`. An unreadable or corrupt disk stops startup
-  and remains unchanged.
+- Glass Dock creates a sparse unjournaled data disk for the persistent engine,
+  matching the earlier VZ runtime, and continues to accept existing ordered-
+  journal disks. An unreadable or unsupported disk stops startup and remains
+  unchanged.
 
 ---
 

@@ -149,6 +149,7 @@ struct RuntimeMachineTests {
                 "--control-socket", runtimeDirectory.appendingPathComponent("vsock/1025.sock").path,
                 "--tcp-relay-socket", runtimeDirectory.appendingPathComponent("vsock/1026.sock").path,
                 "--builder-socket", runtimeDirectory.appendingPathComponent("vsock/1027.sock").path,
+                "--balloon-socket", runtimeDirectory.appendingPathComponent("balloon.sock").path,
                 "--console-log", runtimeDirectory.appendingPathComponent("console.log").path,
                 "--cpus", "4",
                 "--memory-mib", "1024",

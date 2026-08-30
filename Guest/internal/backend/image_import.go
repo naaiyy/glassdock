@@ -206,7 +206,7 @@ func (b *Backend) importRootfsTarball(
 	// Unlike pulls, imports do not unpack automatically; without this the
 	// first container creation fails on a missing parent snapshot.
 	if image, err := b.client.GetImage(ctx, name); err == nil {
-		if err := image.Unpack(ctx, b.snapshotter); err != nil {
+		if err := b.ensureImageUnpacked(ctx, image, b.snapshotter); err != nil {
 			return api.ImageImportResponse{}, fmt.Errorf("unpack imported image: %w", err)
 		}
 	}

@@ -438,6 +438,7 @@ struct GuestPublishedPort: Decodable {
 struct GuestImagePayload: Decodable {
     let name: String
     let digest: String
+    let needsSync: Bool?
 }
 
 struct GuestImageDetailPayload: Decodable {
@@ -914,6 +915,55 @@ actor GuestRemovalGate {
     }
 }
 
+/// Keeps an auto-removed container alive until all attach streams have
+/// consumed the exit and log frames. Docker clients can issue attach and
+/// start on separate connections, so the exit event needs a small grace
+/// window before it decides that no attach is coming.
+actor GuestAttachmentGate {
+    enum RemovalDecision: Equatable, Sendable {
+        case waitForAttachment
+        case waitForGrace
+        case removeNow
+    }
+
+    private var active: [String: Set<UUID>] = [:]
+    private var pendingRemoval: Set<String> = []
+
+    func begin(id: String) -> UUID {
+        let token = UUID()
+        active[id, default: []].insert(token)
+        return token
+    }
+
+    func requestRemoval(id: String) -> RemovalDecision {
+        if let tokens = active[id], !tokens.isEmpty {
+            pendingRemoval.insert(id)
+            return .waitForAttachment
+        }
+        if pendingRemoval.insert(id).inserted {
+            return .waitForGrace
+        }
+        return .removeNow
+    }
+
+    func end(id: String, token: UUID) -> Bool {
+        guard var tokens = active[id], tokens.remove(token) != nil else { return false }
+        guard tokens.isEmpty else {
+            active[id] = tokens
+            return false
+        }
+        active.removeValue(forKey: id)
+        return pendingRemoval.remove(id) != nil
+    }
+
+    func cancel(id: String) {
+        active.removeValue(forKey: id)
+        pendingRemoval.remove(id)
+    }
+
+    func activeCount(id: String) -> Int { active[id]?.count ?? 0 }
+}
+
 /// Maps Docker operations to the one multiplexed guest connection. The host
 /// keeps Docker-only metadata; containerd remains the authority for processes,
 /// snapshots, and lifecycle state.
@@ -972,6 +1022,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     private var exitCodes = GuestExitCodeIndex()
     private let waits = GuestWaitSingleFlight()
     private let removals = GuestRemovalGate()
+    private let attachments = GuestAttachmentGate()
 
     init(
         engine: PersistentEngine,
@@ -1297,7 +1348,13 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         ])
         payload["restartCount"] = .number(Double(request.restartCount))
         payload["resources"] = Self.resourcesJSON(request.resources)
-        let response = try await self.request("container.create", payload)
+        let response = try await self.request(
+            "container.create",
+            payload,
+            memoryTarget: request.ports.isEmpty
+                ? nil
+                : PersistentEngine.publishedNetworkMemoryBytes
+        )
         let guest: GuestContainerPayload = try decode(response)
         metadata[id] = Metadata(
             name: containerName,
@@ -1337,15 +1394,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         manuallyStopped.remove(id)
         committedReservation = true
         await broadcastContainer("create", id: id)
-        // Materialize declared image VOLUME directories as a create-time
-        // fallback. Native volume handling is still separate work. Best
-        // effort: a failure here only means the container behaves as it did
-        // before this fix-up existed.
-        if let imageVolumes = try? await inspectImage(reference: request.image).config.volumes,
-            !imageVolumes.isEmpty
-        {
-            let archive = DirectoryArchive.tar(directories: Array(imageVolumes))
-            try? await putContainerArchive(id: id, path: "/", data: archive, noOverwriteDirNonDir: false)
+        if !request.ports.isEmpty {
+            // Keep the published-container reserve across Docker's separate
+            // create and start calls. Without this reservation, the idle
+            // reclaim timer can run between them and make start pay the
+            // memory-restore cost on the readiness path.
+            try? await engine.retainMemoryTarget(
+                id: id, bytes: PersistentEngine.publishedNetworkMemoryBytes
+            )
         }
         return dockerContainer(guest.container)
     }
@@ -1445,6 +1501,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 throw error
             }
             await starts.finish(id: resolved, result: .success(()))
+            try? await engine.retainMemoryTarget(
+                id: resolved, bytes: PersistentEngine.publishedNetworkMemoryBytes
+            )
             return
         }
         let hostSource = try await vmnetHostSource(required: meta?.ports.isEmpty == false)
@@ -1471,25 +1530,32 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             exitCodes.remove(id: resolved)
             metadata[resolved]?.state = .created
             metadata[resolved]?.exitCode = nil
+            var startPayload: [String: JSONValue] = [
+                "id": .string(resolved), "publishedPorts": .array(confirmedPorts),
+            ]
+            if let reservedBindings, !reservedBindings.isEmpty {
+                startPayload["portBindings"] = .array(
+                    reservedBindings.map(Self.portBindingJSON)
+                )
+            }
             let response = try await request(
                 "container.start",
-                ["id": .string(resolved), "publishedPorts": .array(confirmedPorts)]
+                startPayload,
+                memoryTarget: meta?.ports.isEmpty == false
+                    ? PersistentEngine.publishedNetworkMemoryBytes
+                    : nil
             )
             _ = try decode(response, as: GuestContainerPayload.self).container
             if metadata[resolved]?.state != .exited {
                 metadata[resolved]?.state = .running
             }
-            if let reservedBindings, metadata[resolved]?.state == .running {
-                do {
-                    try await persistPortBindings(
-                        containerID: resolved,
-                        bindings: reservedBindings
-                    )
-                    pendingPublications.remove(resolved)
-                } catch {
-                    try await portPublisher.remove(containerID: resolved)
-                    throw error
-                }
+            if reservedBindings != nil, metadata[resolved]?.state == .running {
+                pendingPublications.remove(resolved)
+            }
+            if meta?.ports.isEmpty == false, metadata[resolved]?.state == .running {
+                try? await engine.retainMemoryTarget(
+                    id: resolved, bytes: PersistentEngine.publishedNetworkMemoryBytes
+                )
             }
         } catch {
             if reservedBindings != nil {
@@ -1595,6 +1661,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             return try await removals.wait(id: resolved)
         }
         if condition != .removed, let code = exitCodes.code(for: resolved) { return code }
+        if let code = Self.cachedWaitExitCode(
+            state: metadata[resolved]?.state,
+            exitCode: metadata[resolved]?.exitCode,
+            condition: condition
+        ) {
+            exitCodes.record(id: resolved, code: code)
+            return code
+        }
         if metadata[resolved]?.state == .created {
             try await starts.wait(id: resolved)
         }
@@ -1605,6 +1679,35 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             try await portPublisher.remove(containerID: resolved)
         }
         return exitCode
+    }
+
+    func cachedWaitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32? {
+        guard condition == .notRunning else { return nil }
+        if let code = exitCodes.code(for: id) {
+            return code
+        }
+        let resolved = try await resolve(id)
+        if let code = exitCodes.code(for: resolved) {
+            return code
+        }
+        guard
+            let code = Self.cachedWaitExitCode(
+                state: metadata[resolved]?.state,
+                exitCode: metadata[resolved]?.exitCode,
+                condition: condition
+            )
+        else {
+            return nil
+        }
+        exitCodes.record(id: resolved, code: code)
+        return code
+    }
+
+    // The wait route must validate existence before committing streaming
+    // headers, but a full inspect would resolve the container and issue an
+    // unnecessary guest inspect request before wait resolves it again.
+    func validateContainer(id: String) async throws {
+        _ = try await resolve(id)
     }
 
     private func performGuestWait(id: String, condition: ContainerWaitCondition) async throws -> Int32 {
@@ -1631,6 +1734,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         exitCodes.record(id: id, code: exitCode)
         metadata[id]?.state = .exited
         metadata[id]?.exitCode = exitCode
+        await engine.releaseMemoryTarget(id: id)
         return exitCode
     }
 
@@ -1641,6 +1745,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
 
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws {
         let resolved = try await resolve(id)
+        await attachments.cancel(id: resolved)
         let hasPublishedPorts = metadata[resolved]?.ports.isEmpty == false
         let exitCode = metadata[resolved]?.exitCode ?? exitCodes.code(for: resolved) ?? 0
         _ = try await request(
@@ -1651,6 +1756,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             id: resolved,
             result: .failure(DockerRuntimeRouteError.notFound("container \(resolved)"))
         )
+        await engine.releaseMemoryTarget(id: resolved)
         if hasPublishedPorts {
             try await portPublisher.remove(containerID: resolved)
         }
@@ -1668,13 +1774,35 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     }
 
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer {
+        try await inspectContainer(id: id, includeSize: false)
+    }
+
+    func inspectContainer(
+        id: String, includeSize: Bool
+    ) async throws -> DockerRuntimeContainer {
         let resolved = try await resolve(id)
-        let response = try await request("container.inspect", ["id": .string(resolved)])
+        // The runtime owns complete Docker metadata for containers created in
+        // this process. A normal inspect does not need guest filesystem usage,
+        // so use that metadata without paying for a guest RPC. Recovery and
+        // ?size=1 still use the guest as the source of truth.
+        if !includeSize, let cached = cachedContainer(id: resolved) {
+            return cached
+        }
+        var payload: [String: JSONValue] = ["id": .string(resolved)]
+        if includeSize { payload["size"] = .bool(true) }
+        let response = try await request("container.inspect", payload)
         return dockerContainer(try decode(response, as: GuestContainerPayload.self).container)
     }
 
     static func requiresStart(_ state: EngineContainerState) -> Bool {
         state != .running
+    }
+
+    static func cachedWaitExitCode(
+        state: EngineContainerState?, exitCode: Int32?, condition: ContainerWaitCondition
+    ) -> Int32? {
+        guard condition == .notRunning, state == .exited else { return nil }
+        return exitCode
     }
 
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer] {
@@ -1967,15 +2095,22 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             stderr: detach ? false : exec.attachStderr
         )
         let connection = try await engine.readyConnection()
-        let response = try await connection.request(
-            method: "container.exec", payload: .object(payload), onStream: collector.append
-        )
-        let output = try collector.output(exitCode: response.exitCode ?? -1)
-        await broadcastContainer(
-            "exec_die", id: containerID,
-            extra: ["execID": id, "exitCode": String(output.exitCode)]
-        )
-        return output
+        try await engine.prepareForWork()
+        do {
+            let response = try await connection.request(
+                method: "container.exec", payload: .object(payload), onStream: collector.append
+            )
+            let output = try collector.output(exitCode: response.exitCode ?? -1)
+            await engine.finishedWork()
+            await broadcastContainer(
+                "exec_die", id: containerID,
+                extra: ["execID": id, "exitCode": String(output.exitCode)]
+            )
+            return output
+        } catch {
+            await engine.finishedWork()
+            throw error
+        }
     }
 
     func streamExec(
@@ -1998,6 +2133,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if let cwd = exec.workingDirectory, !cwd.isEmpty { payload["cwd"] = .string(cwd) }
         if let user = exec.user, !user.isEmpty { payload["user"] = .string(user) }
         let connection = try await engine.readyConnection()
+        try await engine.prepareForWork()
         let requestPayload: JSONValue = .object(payload)
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
             let control = GuestStreamRequestControl()
@@ -2030,6 +2166,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 } catch {
                     continuation.finish(throwing: error)
                 }
+                await engine.finishedWork()
             }
             control.set(request)
             continuation.onTermination = { _ in
@@ -2070,53 +2207,125 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         options: DockerRuntimeLogOptions,
         onInput: GuestInputRelay?
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
-        let resolved = try await resolve(id)
-        let connection = try await engine.readyConnection()
-        var payload: [String: JSONValue] = [
-            "id": .string(resolved), "stdout": .bool(stdout), "stderr": .bool(stderr),
+        try await attachContainer(
+            id: id, stdout: stdout, stderr: stderr, options: options,
+            onInput: onInput, attachment: nil
+        )
+    }
 
-            // Attach uses tail=0 when only live output is requested. A nil
-            // tail means Docker requested the existing log replay as well.
-            "logs": .bool(options.tail == nil),
-        ]
-        Self.addLogOptions(options, to: &payload)
-        let requestPayload = JSONValue.object(payload)
-        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
-            let control = GuestStreamRequestControl()
-            let relay = onInput
-            let request = Task {
-                do {
-                    let response = try await connection.request(
-                        method: "container.attach", payload: requestPayload,
-                        onStream: { frame in
-                            guard let data = frame.data else { return }
-                            let result = continuation.yield(
-                                .init(stream: frame.stream, data: data, exitCode: nil)
-                            )
-                            if case .dropped = result {
-                                continuation.finish(
-                                    throwing: DockerRuntimeRouteError.invalidRequest(
-                                        "attach client is too slow for the bounded stream buffer"
-                                    )
+    func beginAttachment(id: String) async throws -> DockerRuntimeAttachmentLease {
+        let resolved = try await resolve(id)
+        let token = await attachments.begin(id: resolved)
+        return DockerRuntimeAttachmentLease(id: resolved, token: token)
+    }
+
+    func releaseAttachment(_ lease: DockerRuntimeAttachmentLease) async {
+        await finishAttachment(id: lease.id, token: lease.token)
+    }
+
+    func attachContainer(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions,
+        onInput: GuestInputRelay?,
+        attachment: DockerRuntimeAttachmentLease?
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
+        let resolved: String
+        do {
+            resolved = try await resolve(id)
+        } catch {
+            if let attachment {
+                await finishAttachment(id: attachment.id, token: attachment.token)
+            }
+            throw error
+        }
+        let attachmentToken: UUID
+        if let attachment {
+            guard attachment.id == resolved else {
+                await finishAttachment(id: attachment.id, token: attachment.token)
+                throw DockerRuntimeRouteError.notFound(Self.missingContainerMessage(id))
+            }
+            attachmentToken = attachment.token
+        } else {
+            attachmentToken = await attachments.begin(id: resolved)
+        }
+        do {
+            let runtimeEngine = engine
+            let connection = try await runtimeEngine.readyConnection()
+            try await runtimeEngine.prepareForWork()
+            var payload: [String: JSONValue] = [
+                "id": .string(resolved), "stdout": .bool(stdout), "stderr": .bool(stderr),
+
+                // Attach uses tail=0 when only live output is requested. A nil
+                // tail means Docker requested the existing log replay as well.
+                "logs": .bool(options.tail == nil),
+            ]
+            Self.addLogOptions(options, to: &payload)
+            let requestPayload = JSONValue.object(payload)
+            return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
+                let control = GuestStreamRequestControl()
+                let relay = onInput
+                let request = Task { [weak self] in
+                    do {
+                        let response = try await connection.request(
+                            method: "container.attach", payload: requestPayload,
+                            onStream: { frame in
+                                guard let data = frame.data else { return }
+                                let result = continuation.yield(
+                                    .init(stream: frame.stream, data: data, exitCode: nil)
                                 )
-                                control.cancel()
-                            }
-                        },
-                        onRequestID: { requestID in
-                            relay?.set(connection: connection, requestID: requestID)
-                        })
-                    continuation.yield(
-                        .init(stream: nil, data: Data(), exitCode: response.exitCode ?? -1)
-                    )
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                                if case .dropped = result {
+                                    continuation.finish(
+                                        throwing: DockerRuntimeRouteError.invalidRequest(
+                                            "attach client is too slow for the bounded stream buffer"
+                                        )
+                                    )
+                                    control.cancel()
+                                }
+                            },
+                            onRequestID: { requestID in
+                                relay?.set(connection: connection, requestID: requestID)
+                            })
+                        continuation.yield(
+                            .init(stream: nil, data: Data(), exitCode: response.exitCode ?? -1)
+                        )
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                    await runtimeEngine.finishedWork()
+                    await self?.finishAttachment(id: resolved, token: attachmentToken)
+                }
+                control.set(request)
+                continuation.onTermination = { [weak self] _ in
+                    control.cancel()
+                    relay?.send(Data())
+                    Task { [weak self] in
+                        await self?.finishAttachment(id: resolved, token: attachmentToken)
+                    }
                 }
             }
-            control.set(request)
-            continuation.onTermination = { _ in
-                control.cancel()
-                relay?.send(Data())
+        } catch {
+            await finishAttachment(id: resolved, token: attachmentToken)
+            throw error
+        }
+    }
+
+    private func finishAttachment(id: String, token: UUID) async {
+        let ended = await attachments.end(id: id, token: token)
+        guard ended else { return }
+        let autoRemove = metadata[id]?.autoRemove == true
+        guard autoRemove else { return }
+        // Attach is owned by the HTTP request task. Docker closes that task
+        // as soon as it has consumed the final frame, so cleanup must not
+        // inherit its cancellation before the removal waiter is signalled.
+        _ = Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.deleteContainer(id: id, force: true, removeVolumes: true)
+            } catch {
+                return
             }
         }
     }
@@ -2129,6 +2338,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         method: String, payload: [String: JSONValue]
     ) async throws -> (Data, AsyncThrowingStream<Data, Error>) {
         let connection = try await engine.readyConnection()
+        try await engine.prepareForWork()
         let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         let gate = GuestFirstChunkGate()
         let control = GuestStreamRequestControl()
@@ -2151,6 +2361,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 continuation.finish(throwing: error)
                 gate.fail(error)
             }
+            await engine.finishedWork()
         }
         control.set(request)
         continuation.onTermination = { _ in control.cancel() }
@@ -2162,6 +2373,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         method: String, payload: [String: JSONValue]
     ) async throws -> AsyncThrowingStream<Data, Error> {
         let connection = try await engine.readyConnection()
+        try await engine.prepareForWork()
         // Unbounded buffering: dropping frames here silently truncated large
         // exports whenever the HTTP side drained slower than the guest wrote.
         // The consumer is always an active response body or file sink, so the
@@ -2186,6 +2398,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 } catch {
                     continuation.finish(throwing: error)
                 }
+                await engine.finishedWork()
             }
             control.set(request)
             continuation.onTermination = { _ in control.cancel() }
@@ -2257,9 +2470,23 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         "No such container: \(reference)"
     }
 
-    private func request(_ method: String, _ payload: [String: JSONValue]) async throws -> GuestFrame {
+    private func request(
+        _ method: String,
+        _ payload: [String: JSONValue],
+        memoryTarget: UInt64? = nil
+    ) async throws -> GuestFrame {
         do {
-            return try await engine.readyConnection().request(method: method, payload: .object(payload))
+            let connection = try await engine.readyConnection()
+            try await engine.prepareForWork(memoryTarget: memoryTarget)
+            let response: GuestFrame
+            do {
+                response = try await connection.request(method: method, payload: .object(payload))
+            } catch {
+                await engine.finishedWork()
+                throw error
+            }
+            await engine.finishedWork()
+            return response
         } catch let error as GuestProtocolError {
             throw Self.routeError(for: error) ?? error
         }
@@ -2272,34 +2499,43 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     ) async throws -> GuestFrame {
         do {
             let connection = try await engine.readyConnection()
-            return try await connection.request(
-                method: method,
-                payload: .object(payload),
-                onStream: { _ in },
-                onRequestID: { requestID in
-                    Task {
-                        do {
-                            let chunkSize = 256 * 1024
-                            var offset = 0
-                            while offset < data.count {
-                                let end = min(offset + chunkSize, data.count)
+            try await engine.prepareForWork()
+            let response: GuestFrame
+            do {
+                response = try await connection.request(
+                    method: method,
+                    payload: .object(payload),
+                    onStream: { _ in },
+                    onRequestID: { requestID in
+                        Task {
+                            do {
+                                let chunkSize = 256 * 1024
+                                var offset = 0
+                                while offset < data.count {
+                                    let end = min(offset + chunkSize, data.count)
+                                    try await connection.sendStream(
+                                        id: requestID,
+                                        stream: .stdin,
+                                        data: data.subdata(in: offset..<end)
+                                    )
+                                    offset = end
+                                }
+                                // An empty stdin frame is the upload EOF marker.
                                 try await connection.sendStream(
-                                    id: requestID,
-                                    stream: .stdin,
-                                    data: data.subdata(in: offset..<end)
+                                    id: requestID, stream: .stdin, data: Data()
                                 )
-                                offset = end
+                            } catch {
+                                await connection.close()
                             }
-                            // An empty stdin frame is the upload EOF marker.
-                            try await connection.sendStream(
-                                id: requestID, stream: .stdin, data: Data()
-                            )
-                        } catch {
-                            await connection.close()
                         }
                     }
-                }
-            )
+                )
+            } catch {
+                await engine.finishedWork()
+                throw error
+            }
+            await engine.finishedWork()
+            return response
         } catch let error as GuestProtocolError {
             throw Self.routeError(for: error) ?? error
         }
@@ -2353,6 +2589,38 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         }
     }
 
+    private func scheduleAutoRemoval(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let autoRemove = await self.isAutoRemoveContainer(id: id)
+            guard autoRemove else { return }
+            let decision = await self.attachments.requestRemoval(id: id)
+            switch decision {
+            case .waitForAttachment:
+                return
+            case .waitForGrace:
+                // Yield once when no attach is active so a just-arriving
+                // attach request can claim the pending removal. The normal
+                // docker run --rm path remains free of a fixed delay.
+                try? await Task.sleep(for: .milliseconds(1))
+                let retry = await self.attachments.requestRemoval(id: id)
+                guard retry == .removeNow else {
+                    return
+                }
+            case .removeNow:
+                break
+            }
+            do {
+                try await self.deleteContainer(id: id, force: true, removeVolumes: true)
+            } catch {
+            }
+        }
+    }
+
+    private func isAutoRemoveContainer(id: String) -> Bool {
+        metadata[id]?.autoRemove == true
+    }
+
     private func teardownPortsIfIdle(id: String) async {
         guard metadata[id]?.state != .running else { return }
         let current = try? await inspectContainer(id: id)
@@ -2366,6 +2634,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         else { return }
         metadata[exit.id]?.state = .exited
         metadata[exit.id]?.exitCode = Int32(exit.exitCode)
+        await engine.releaseMemoryTarget(id: exit.id)
         pendingPublications.remove(exit.id)
         schedulePortTeardown(exit.id)
         exitCodes.record(id: exit.id, code: Int32(exit.exitCode))
@@ -2382,7 +2651,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 || policy.maximumRetryCount == 0
                 || restartCount < policy.maximumRetryCount)
         if metadata[exit.id]?.autoRemove == true {
-            try? await deleteContainer(id: exit.id, force: true, removeVolumes: true)
+            scheduleAutoRemoval(exit.id)
         } else if shouldRestart {
             metadata[exit.id]?.state = .restarting
             metadata[exit.id]?.restartCount = restartCount + 1
@@ -2608,6 +2877,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             )
             metadata[container.id]?.ports = published
             try await persistPortBindings(containerID: container.id, bindings: published)
+            try? await engine.retainMemoryTarget(
+                id: container.id, bytes: PersistentEngine.publishedNetworkMemoryBytes
+            )
         }
     }
 
@@ -2879,6 +3151,8 @@ private final class GuestFirstChunkGate: @unchecked Sendable {
 extension GuestRuntime: DockerRuntimeImageImportStreamingBackend {
     func openImportSession(reference: String?) async throws -> GuestImportSession {
         let connection = try await engine.readyConnection()
+        try await engine.prepareForWork()
+        let engine = self.engine
         return GuestImportSession(
             connection: connection,
             reference: reference.map { Self.normalizedRegistryReference($0) },
@@ -2893,7 +3167,8 @@ extension GuestRuntime: DockerRuntimeImageImportStreamingBackend {
                 return imported.images.map {
                     DockerRuntimeImage(reference: $0.name, digest: $0.digest)
                 }
-            }
+            },
+            onFinish: { await engine.finishedWork() }
         )
     }
 }

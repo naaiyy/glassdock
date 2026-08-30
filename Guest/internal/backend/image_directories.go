@@ -8,8 +8,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
@@ -36,11 +38,57 @@ type imagePathState struct {
 	modTime   time.Time
 }
 
-func (b *Backend) materializeImageDirectories(ctx context.Context, id string, image containerd.Image) error {
+type imageDirectoryPreparation struct {
+	done        chan struct{}
+	directories []imageDirectory
+	err         error
+}
+
+func (b *Backend) prewarmImageMetadata(image containerd.Image) {
+	go func() {
+		ctx := b.ctx(context.Background())
+		_ = b.dockerImageConfig(ctx, image)
+		_, _ = b.imageDirectories(ctx, image)
+	}()
+}
+
+// materializeImageDirectories repairs only Docker-configured VOLUME paths.
+// The complete layer directory set is repaired immediately before the first
+// task starts, where its metadata scan can overlap network preparation. This
+// keeps ordinary docker create requests free of an image-layer walk while
+// preserving the filesystem contract before a process can run.
+func (b *Backend) materializeImageDirectories(
+	ctx context.Context, id string, image containerd.Image, imageVolumes map[string]struct{},
+) error {
+	directories := addImageVolumeDirectories(nil, imageVolumes)
+	return b.materializeImageDirectorySet(ctx, id, directories)
+}
+
+// prepareImageDirectories leaves image directory repair deferred for images
+// with VOLUME paths. Start repairs the complete directory set immediately
+// before the task starts, where its metadata scan can overlap network setup.
+// Eagerly copying volume directories during create adds synchronous guest
+// filesystem work to Docker's create-to-start readiness path.
+func (b *Backend) prepareImageDirectories(
+	ctx context.Context, id string, image containerd.Image, imageVolumes map[string]struct{},
+) (bool, error) {
+	if len(imageVolumes) == 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (b *Backend) repairImageDirectories(ctx context.Context, id string, image containerd.Image) error {
 	directories, err := b.imageDirectories(ctx, image)
 	if err != nil {
 		return err
 	}
+	return b.materializeImageDirectorySet(ctx, id, directories)
+}
+
+func (b *Backend) materializeImageDirectorySet(
+	ctx context.Context, id string, directories []imageDirectory,
+) error {
 	if len(directories) == 0 {
 		return nil
 	}
@@ -53,6 +101,12 @@ func (b *Backend) materializeImageDirectories(ctx context.Context, id string, im
 
 	toRepair := make([]imageDirectory, 0)
 	for _, directory := range directories {
+		// A non-empty directory has a surviving descendant in the merged
+		// image, so its parent path cannot be missing. Only final empty
+		// directories need the overlayfs repair and copy-up path.
+		if !directory.empty {
+			continue
+		}
 		target, safe, err := imageDirectoryTarget(root, directory.path)
 		if err != nil {
 			return fmt.Errorf("resolve image directory %q: %w", directory.path, err)
@@ -65,9 +119,7 @@ func (b *Backend) materializeImageDirectories(ctx context.Context, id string, im
 			if !info.IsDir() {
 				return fmt.Errorf("image path %q is not a directory", directory.path)
 			}
-			if directory.empty {
-				toRepair = append(toRepair, directory)
-			}
+			toRepair = append(toRepair, directory)
 			continue
 		}
 		if !os.IsNotExist(err) {
@@ -96,6 +148,72 @@ func (b *Backend) materializeImageDirectories(ctx context.Context, id string, im
 		}
 	}
 	return nil
+}
+
+// addImageVolumeDirectories adds image-config VOLUME paths that are not
+// present in a layer tar. Keep the cached layer metadata immutable and add
+// every missing parent so a volume path can be created in one pass.
+func addImageVolumeDirectories(directories []imageDirectory, volumes map[string]struct{}) []imageDirectory {
+	if len(volumes) == 0 {
+		return directories
+	}
+
+	result := append([]imageDirectory(nil), directories...)
+	known := make(map[string]struct{}, len(result))
+	for _, directory := range result {
+		known[directory.path] = struct{}{}
+	}
+	for volume := range volumes {
+		volume = path.Clean(strings.ReplaceAll(volume, "\\", "/"))
+		if volume == "/" || !strings.HasPrefix(volume, "/") {
+			continue
+		}
+		for relative := strings.TrimPrefix(volume, "/"); relative != "" && relative != "."; relative = path.Dir(relative) {
+			if _, ok := known[relative]; ok {
+				continue
+			}
+			known[relative] = struct{}{}
+			result = append(result, imageDirectory{path: relative, mode: 0o755, empty: true})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].path < result[j].path })
+	return result
+}
+
+func imageVolumeDirectories(directories []imageDirectory, volumes map[string]struct{}) []imageDirectory {
+	if len(volumes) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{})
+	for volume := range volumes {
+		volume = path.Clean(strings.ReplaceAll(volume, "\\", "/"))
+		if volume == "/" || !strings.HasPrefix(volume, "/") {
+			continue
+		}
+		for relative := strings.TrimPrefix(volume, "/"); relative != "" && relative != "."; relative = path.Dir(relative) {
+			wanted[relative] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	selected := make([]imageDirectory, 0, len(wanted))
+	known := make(map[string]struct{}, len(wanted))
+	for _, directory := range directories {
+		if _, ok := wanted[directory.path]; !ok {
+			continue
+		}
+		selected = append(selected, directory)
+		known[directory.path] = struct{}{}
+	}
+	for relative := range wanted {
+		if _, ok := known[relative]; ok {
+			continue
+		}
+		selected = append(selected, imageDirectory{path: relative, mode: 0o755, empty: true})
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].path < selected[j].path })
+	return selected
 }
 
 func imageDirectoryTarget(root, relative string) (string, bool, error) {
@@ -135,6 +253,20 @@ func imageDirectoryTarget(root, relative string) (string, bool, error) {
 // forces the directory inode into the writable upper layer; removing the file
 // leaves the image contents unchanged.
 func forceImageDirectoryCopyUp(directory string) error {
+	if runtime.GOOS == "linux" {
+		// An unnamed temporary inode forces overlayfs to copy up the directory
+		// without adding and then deleting a directory entry. The numeric flag
+		// keeps this file buildable for the host-side darwin test binary, where
+		// O_TMPFILE is not defined.
+		const oTmpfile = 0o20200000
+		fd, err := syscall.Open(directory, oTmpfile|syscall.O_RDWR|syscall.O_CLOEXEC, 0)
+		if err == nil {
+			return syscall.Close(fd)
+		}
+		if err != syscall.EINVAL && err != syscall.ENOTSUP && err != syscall.EOPNOTSUPP && err != syscall.ENOENT {
+			return err
+		}
+	}
 	temporary, err := os.CreateTemp(directory, ".glassdock-copyup-")
 	if err != nil {
 		return err
@@ -161,16 +293,34 @@ func (b *Backend) imageDirectories(ctx context.Context, image containerd.Image) 
 	if cached, ok := b.imageDirectoryCache.Load(cacheKey); ok {
 		return cached.([]imageDirectory), nil
 	}
+	preparation := &imageDirectoryPreparation{done: make(chan struct{})}
+	actual, loaded := b.imageDirectoryWork.LoadOrStore(cacheKey, preparation)
+	if loaded {
+		preparation = actual.(*imageDirectoryPreparation)
+		select {
+		case <-preparation.done:
+			return preparation.directories, preparation.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	defer b.imageDirectoryWork.Delete(cacheKey)
 
 	manifest, err := containerimages.Manifest(ctx, image.ContentStore(), target, nil)
 	if err != nil {
-		return nil, fmt.Errorf("read image manifest %s: %w", target.Digest, err)
+		preparation.err = fmt.Errorf("read image manifest %s: %w", target.Digest, err)
+		close(preparation.done)
+		return nil, preparation.err
 	}
 	directories, err := collectImageDirectories(ctx, image.ContentStore(), manifest.Layers)
 	if err != nil {
-		return nil, fmt.Errorf("read image layer directories: %w", err)
+		preparation.err = fmt.Errorf("read image layer directories: %w", err)
+		close(preparation.done)
+		return nil, preparation.err
 	}
-	b.imageDirectoryCache.LoadOrStore(cacheKey, directories)
+	b.imageDirectoryCache.Store(cacheKey, directories)
+	preparation.directories = directories
+	close(preparation.done)
 	return directories, nil
 }
 
@@ -203,6 +353,7 @@ func collectImageDirectories(
 	}
 
 	directories := make([]imageDirectory, 0, len(state))
+	directoriesWithChildren := imageDirectoriesWithChildren(state)
 	for directoryPath, entry := range state {
 		if !entry.directory {
 			continue
@@ -211,21 +362,31 @@ func collectImageDirectories(
 		if mode == 0 {
 			mode = 0o755
 		}
-		empty := true
-		for candidate := range state {
-			if strings.HasPrefix(candidate, directoryPath+"/") {
-				empty = false
-				break
-			}
-		}
+		_, hasChildren := directoriesWithChildren[directoryPath]
 		directories = append(directories, imageDirectory{
-			path: directoryPath, mode: mode, modTime: entry.modTime, empty: empty,
+			path: directoryPath, mode: mode, modTime: entry.modTime, empty: !hasChildren,
 		})
 	}
 	sort.Slice(directories, func(i, j int) bool {
 		return directories[i].path < directories[j].path
 	})
 	return directories, nil
+}
+
+// imageDirectoriesWithChildren records the final directory entries that have
+// at least one descendant. The previous implementation compared every final
+// directory with every final path, which made image metadata processing
+// quadratic in the number of layer entries. Walking each path's ancestors
+// keeps the result identical while making the work proportional to the total
+// path depth.
+func imageDirectoriesWithChildren(state map[string]imagePathState) map[string]struct{} {
+	withChildren := make(map[string]struct{}, len(state))
+	for candidate := range state {
+		for parent := path.Dir(candidate); parent != "." && parent != ""; parent = path.Dir(parent) {
+			withChildren[parent] = struct{}{}
+		}
+	}
+	return withChildren
 }
 
 func applyImageLayerDirectories(reader io.Reader, state map[string]imagePathState) error {

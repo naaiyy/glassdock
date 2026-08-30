@@ -2,9 +2,6 @@ import Foundation
 import NIOCore
 import Vapor
 
-import func Foundation.fputs
-import var Foundation.stderr
-
 enum EngineContainerState: String, Sendable, Equatable {
     case created
     case running
@@ -56,8 +53,11 @@ protocol DockerRuntimeRouteBackend: Sendable {
     func renameContainer(id: String, name: String) async throws
     func killContainer(id: String, signal: UInt32) async throws
     func waitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32
+    func cachedWaitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32?
+    func validateContainer(id: String) async throws
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer
+    func inspectContainer(id: String, includeSize: Bool) async throws -> DockerRuntimeContainer
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer]
     func listNetworks() async throws -> [DockerRuntimeNetwork]
     func inspectNetwork(id: String) async throws -> DockerRuntimeNetwork
@@ -157,13 +157,35 @@ protocol DockerRuntimeImageBuildOptionsBackend: Sendable {
 }
 
 protocol DockerRuntimeInteractiveBackend: DockerRuntimeRouteBackend {
+    func beginAttachment(id: String) async throws -> DockerRuntimeAttachmentLease
+    func releaseAttachment(_ lease: DockerRuntimeAttachmentLease) async
     func streamExec(
         id: String, tty: Bool, onInput: GuestInputRelay?
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
     func attachContainer(
         id: String, stdout: Bool, stderr: Bool, options: DockerRuntimeLogOptions,
-        onInput: GuestInputRelay?
+        onInput: GuestInputRelay?, attachment: DockerRuntimeAttachmentLease?
     ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+}
+
+extension DockerRuntimeInteractiveBackend {
+    func attachContainer(
+        id: String,
+        stdout: Bool,
+        stderr: Bool,
+        options: DockerRuntimeLogOptions,
+        onInput: GuestInputRelay?
+    ) async throws -> AsyncThrowingStream<DockerRuntimeProcessFrame, Error> {
+        try await attachContainer(
+            id: id, stdout: stdout, stderr: stderr, options: options,
+            onInput: onInput, attachment: nil
+        )
+    }
+}
+
+struct DockerRuntimeAttachmentLease: Sendable, Equatable {
+    let id: String
+    let token: UUID
 }
 
 struct DockerRuntimeProcessFrame: Sendable {
@@ -180,6 +202,17 @@ struct DockerRegistryAuth: Codable, Sendable, Equatable {
 }
 
 extension DockerRuntimeRouteBackend {
+    func inspectContainer(
+        id: String, includeSize: Bool
+    ) async throws -> DockerRuntimeContainer {
+        _ = includeSize
+        return try await inspectContainer(id: id)
+    }
+
+    func validateContainer(id: String) async throws {
+        _ = try await inspectContainer(id: id)
+    }
+
     func connectNetwork(
         id: String,
         containerID: String,
@@ -1679,13 +1712,15 @@ struct DockerRuntimeRoutes: RouteCollection {
         try Self.validateCreateRequest(request)
         let container = try await call { try await backend.createContainer(request) }
         if let volumes = volumeClient as? RuntimeVolumeService {
-            do {
-                try await volumes.retain(
-                    names: Set(mounts.compactMap(\.volumeName)), containerID: container.id)
-            } catch {
-                try? await backend.deleteContainer(
-                    id: container.id, force: true, removeVolumes: false)
-                throw error
+            let volumeNames = Set(mounts.compactMap(\.volumeName))
+            if !volumeNames.isEmpty {
+                do {
+                    try await volumes.retain(names: volumeNames, containerID: container.id)
+                } catch {
+                    try? await backend.deleteContainer(
+                        id: container.id, force: true, removeVolumes: false)
+                    throw error
+                }
             }
         }
         return try jsonResponse(.created, RESTContainerCreate(Id: container.id, Warnings: []))
@@ -1780,15 +1815,26 @@ struct DockerRuntimeRoutes: RouteCollection {
             condition = .default
         }
         let backend = self.backend
+        if condition == .notRunning {
+            // cachedWaitContainer validates the container before returning nil,
+            // so the streaming path does not need a second resolution.
+            if let exitCode = try await call({
+                try await backend.cachedWaitContainer(id: id, condition: condition)
+            }) {
+                let response = Response(
+                    status: .ok, body: .init(string: "{\"StatusCode\":\(exitCode)}")
+                )
+                response.headers.contentType = .json
+                return response
+            }
+        } else {
+            try await call { try await backend.validateContainer(id: id) }
+        }
         return try await streamingResponse(
             logger: req.logger,
             contentType: .json,
-            resolve: {
-                // Resolve before headers are sent: a missing container must
-                // surface as a normal 404, not as an error inside an
-                // already-committed stream body.
-                _ = try await backend.inspectContainer(id: id)
-            }
+            // The container was validated above. Keep the streaming path for
+            // waits that are not already complete, including next-exit.
         ) { writer in
             let exitCode = try await backend.waitContainer(id: id, condition: condition)
             let data = try JSONEncoder().encode(RESTContainerWait(statusCode: Int64(exitCode)))
@@ -1871,9 +1917,13 @@ struct DockerRuntimeRoutes: RouteCollection {
     }
 
     private func inspectContainer(_ req: Request) async throws -> Response {
-        let container = try await call { try await backend.inspectContainer(id: requiredParameter("id", request: req)) }
-        let networks = try await call { try await backend.listNetworks() }
         let includeSize = Self.mobyBool(req.query[String.self, at: "size"])
+        let container = try await call {
+            try await backend.inspectContainer(
+                id: requiredParameter("id", request: req), includeSize: includeSize
+            )
+        }
+        let networks = try await call { try await backend.listNetworks() }
         return try jsonResponse(
             .ok,
             InspectResponse(container, networks: networks, includeSize: includeSize)
@@ -2440,7 +2490,6 @@ struct DockerRuntimeRoutes: RouteCollection {
 
     private func attach(_ req: Request) async throws -> Response {
         let id = try requiredParameter("id", request: req)
-        let tty = try await inspectContainer(id: id).tty
         let backend = self.backend
         let replayLogs = Self.mobyBool(req.query[String.self, at: "logs"])
         let streamOutput = Self.mobyBool(req.query[String.self, at: "stream"])
@@ -2469,90 +2518,103 @@ struct DockerRuntimeRoutes: RouteCollection {
                 body: .init(data: Data())
             )
         }
-        if replayLogs && !streamOutput {
-            let output: DockerRuntimeProcessOutput
-            if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
-                output = try await call {
-                    try await optionsBackend.logs(
-                        id: id, stdout: stdout, stderr: stderr, options: options
+        let interactive = backend as? any DockerRuntimeInteractiveBackend
+        var attachment: DockerRuntimeAttachmentLease?
+        if streamOutput, let interactive {
+            attachment = try await call { try await interactive.beginAttachment(id: id) }
+        }
+        do {
+            let tty = try await inspectContainer(id: id).tty
+            if replayLogs && !streamOutput {
+                let output: DockerRuntimeProcessOutput
+                if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
+                    output = try await call {
+                        try await optionsBackend.logs(
+                            id: id, stdout: stdout, stderr: stderr, options: options
+                        )
+                    }
+                } else {
+                    output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
+                }
+                return Self.streamResponse(output: output, tty: tty, contentType: true)
+            }
+            var initialInput: Data?
+            if relay != nil && !upgraded,
+                let buffer = try await req.body.collect(
+                    max: req.application.routes.defaultMaxBodySize.value
+                ).get()
+            {
+                initialInput = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
+            }
+            let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
+            if let interactive {
+                stream = try await call {
+                    try await interactive.attachContainer(
+                        id: id, stdout: stdout, stderr: stderr,
+                        options: options, onInput: relay, attachment: attachment
                     )
                 }
             } else {
-                output = try await call { try await backend.logs(id: id, stdout: stdout, stderr: stderr) }
-            }
-            return Self.streamResponse(output: output, tty: tty, contentType: true)
-        }
-        var initialInput: Data?
-        if relay != nil && !upgraded,
-            let buffer = try await req.body.collect(
-                max: req.application.routes.defaultMaxBodySize.value
-            ).get()
-        {
-            initialInput = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
-        }
-        let stream: AsyncThrowingStream<DockerRuntimeProcessFrame, Error>
-        if let interactive = backend as? any DockerRuntimeInteractiveBackend {
-            stream = try await call {
-                try await interactive.attachContainer(
-                    id: id, stdout: stdout, stderr: stderr,
-                    options: options, onInput: relay
-                )
-            }
-        } else {
-            stream = try await call {
-                try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
-            }
-        }
-        if let relay, let initialInput, !initialInput.isEmpty {
-            relay.send(initialInput)
-        }
-        if let relay, !upgraded {
-            relay.send(Data())
-        }
-        if upgraded {
-            return .dockerTCPUpgrade(execId: id, ttyEnabled: tty) { channel, handler in
-                if let relay {
-                    handler.setStdinDataHandler { data in relay.send(data) }
-                }
-                do {
-                    for try await frame in stream {
-                        guard frame.exitCode == nil else { continue }
-                        let bytes =
-                            tty
-                            ? frame.data
-                            : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
-                        var buffer = channel.allocator.buffer(capacity: bytes.count)
-                        buffer.writeBytes(bytes)
-                        try await channel.writeAndFlush(buffer).get()
-                    }
-                    try await channel.close().get()
-                } catch {
-                    throw error
+                stream = try await call {
+                    try await backend.attachContainer(id: id, stdout: stdout, stderr: stderr)
                 }
             }
-        }
-        var headers = HTTPHeaders()
-        headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
-        return try await streamingResponse(
-            logger: req.logger,
-            contentType: HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
-        ) { writer in
+            if let relay, let initialInput, !initialInput.isEmpty {
+                relay.send(initialInput)
+            }
+            if let relay, !upgraded {
+                relay.send(Data())
+            }
             if upgraded {
-                // Send the upgrade response before Docker issues the separate
-                // container-start request. Attach must not start the container.
-                try await writer.writeBuffer(ByteBuffer())
-            }
-            for try await frame in stream {
-                guard frame.exitCode == nil else { continue }
-                if tty {
-                    try await writer.writeBuffer(ByteBuffer(data: frame.data))
-                } else {
-                    let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
-                    try await writer.writeBuffer(
-                        ByteBuffer(data: Self.frame(frame.data, stream: streamID))
-                    )
+                return .dockerTCPUpgrade(execId: id, ttyEnabled: tty) { channel, handler in
+                    if let relay {
+                        handler.setStdinDataHandler { data in relay.send(data) }
+                    }
+                    do {
+                        for try await frame in stream {
+                            guard frame.exitCode == nil else { continue }
+                            let bytes =
+                                tty
+                                ? frame.data
+                                : Self.frame(frame.data, stream: frame.stream == .stderr ? 2 : 1)
+                            var buffer = channel.allocator.buffer(capacity: bytes.count)
+                            buffer.writeBytes(bytes)
+                            try await channel.writeAndFlush(buffer).get()
+                        }
+                        try await channel.close().get()
+                    } catch {
+                        throw error
+                    }
                 }
             }
+            var headers = HTTPHeaders()
+            headers.contentType = HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+            return try await streamingResponse(
+                logger: req.logger,
+                contentType: HTTPMediaType(type: "application", subType: "vnd.docker.raw-stream")
+            ) { writer in
+                if upgraded {
+                    // Send the upgrade response before Docker issues the separate
+                    // container-start request. Attach must not start the container.
+                    try await writer.writeBuffer(ByteBuffer())
+                }
+                for try await frame in stream {
+                    guard frame.exitCode == nil else { continue }
+                    if tty {
+                        try await writer.writeBuffer(ByteBuffer(data: frame.data))
+                    } else {
+                        let streamID: UInt8 = frame.stream == .stderr ? 2 : 1
+                        try await writer.writeBuffer(
+                            ByteBuffer(data: Self.frame(frame.data, stream: streamID))
+                        )
+                    }
+                }
+            }
+        } catch {
+            if let attachment, let interactive {
+                await interactive.releaseAttachment(attachment)
+            }
+            throw error
         }
     }
 

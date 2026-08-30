@@ -56,7 +56,7 @@ for path in "${host_bind_source}" "${excluded_host_bind_source}"; do
 done
 
 mkdir -p /run/containerd
-mount -t ext4 -o data=ordered /dev/vdb /var/lib/containerd
+mount -t ext4 -o discard /dev/vdb /var/lib/containerd
 mount -t virtiofs glassdock-home /mnt/glassdock-host
 
 containerd --config /etc/containerd/config.toml >&2 &

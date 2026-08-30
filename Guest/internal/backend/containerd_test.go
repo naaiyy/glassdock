@@ -10,7 +10,9 @@ import (
 	"time"
 
 	containerrecords "github.com/containerd/containerd/v2/core/containers"
+	registryreference "github.com/distribution/reference"
 	"github.com/glassdock/glassdock/guest/internal/api"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
@@ -65,6 +67,58 @@ func TestContainerUpdateResourcesMapsAndPersistsOCIFields(t *testing.T) {
 	if spec.Linux.Resources.CPU.Cpus != cpus || *spec.Linux.Resources.Memory.Limit != memory ||
 		spec.Linux.Resources.Pids.Limit != pids {
 		t.Fatalf("unexpected persisted resources: %+v", spec.Linux.Resources)
+	}
+}
+
+func TestApplyRunningStatePersistsPublishedPortBindings(t *testing.T) {
+	t.Parallel()
+	metadata := api.ContainerMetadata{
+		PortBindings:   []api.DockerPortBinding{{ContainerPort: 80, Protocol: "tcp", HostIP: "0.0.0.0"}},
+		LifecycleState: "created",
+	}
+	published := []api.PublishedPort{{ContainerPort: 80, GuestPort: 49152, Protocol: "tcp"}}
+	bindings := []api.DockerPortBinding{{
+		ContainerPort: 80,
+		Protocol:      "tcp",
+		HostIP:        "127.0.0.1",
+		HostPort:      uint16Pointer(49153),
+	}}
+
+	applyRunningState(&metadata, published, bindings)
+
+	if metadata.LifecycleState != "running" || metadata.LastExitCode != nil {
+		t.Fatalf("running state was not applied: %+v", metadata)
+	}
+	if len(metadata.PublishedPorts) != 1 || metadata.PublishedPorts[0].GuestPort != 49152 {
+		t.Fatalf("published guest ports were not applied: %+v", metadata.PublishedPorts)
+	}
+	if len(metadata.PortBindings) != 1 || metadata.PortBindings[0].HostPort == nil ||
+		*metadata.PortBindings[0].HostPort != 49153 {
+		t.Fatalf("host port binding was not persisted: %+v", metadata.PortBindings)
+	}
+	bindings[0].HostPort = uint16Pointer(49154)
+	if *metadata.PortBindings[0].HostPort != 49153 {
+		t.Fatal("running-state metadata aliases the caller's port bindings")
+	}
+}
+
+func uint16Pointer(value uint16) *uint16 { return &value }
+
+func TestInvalidateImageUnpackCacheRemovesDigestAcrossSnapshotters(t *testing.T) {
+	backend := &Backend{}
+	backend.imageUnpackCache.Store(imageUnpackCacheKeyForDigest("sha256:image", "overlayfs"), struct{}{})
+	backend.imageUnpackCache.Store(imageUnpackCacheKeyForDigest("sha256:image", "native"), struct{}{})
+	backend.imageUnpackCache.Store(imageUnpackCacheKeyForDigest("sha256:other", "overlayfs"), struct{}{})
+
+	backend.invalidateImageUnpackCache("sha256:image")
+
+	for _, snapshotter := range []string{"overlayfs", "native"} {
+		if _, ok := backend.imageUnpackCache.Load(imageUnpackCacheKeyForDigest("sha256:image", snapshotter)); ok {
+			t.Fatalf("unpack cache entry for %s was not removed", snapshotter)
+		}
+	}
+	if _, ok := backend.imageUnpackCache.Load(imageUnpackCacheKeyForDigest("sha256:other", "overlayfs")); !ok {
+		t.Fatal("unpack cache entry for another image was removed")
 	}
 }
 
@@ -200,6 +254,44 @@ func TestContainerRecordAllowsReapRetryAfterFailure(t *testing.T) {
 	}
 }
 
+func TestContainerRecordSharesConcurrentWaitResult(t *testing.T) {
+	t.Parallel()
+	record := &containerRecord{}
+	first, owner := record.beginWait()
+	if !owner {
+		t.Fatal("first waiter must own the task wait")
+	}
+	second, owner := record.beginWait()
+	if owner || second != first {
+		t.Fatal("second waiter did not join the task wait")
+	}
+
+	result := containerWaitResult{code: 17, exitedAt: time.Unix(42, 0)}
+	record.finishWait(first, result)
+	select {
+	case <-second.done:
+	default:
+		t.Fatal("wait joiner was not released")
+	}
+	if second.result.code != 17 || !second.result.exitedAt.Equal(result.exitedAt) {
+		t.Fatalf("unexpected shared wait result: %+v", second.result)
+	}
+}
+
+func TestContainerRecordResetsCompletedWaitBeforeRestart(t *testing.T) {
+	t.Parallel()
+	record := &containerRecord{}
+	state, owner := record.beginWait()
+	if !owner {
+		t.Fatal("first waiter must own the task wait")
+	}
+	record.finishWait(state, containerWaitResult{code: 0})
+	record.resetWaitState()
+	if _, owner := record.beginWait(); !owner {
+		t.Fatal("a restarted task must get a fresh task wait")
+	}
+}
+
 func TestToOCIMountsRejectsUnsupportedType(t *testing.T) {
 	t.Parallel()
 	_, err := toOCIMounts([]api.Mount{{Type: "volume", Target: "/data"}})
@@ -258,6 +350,73 @@ func TestIsDanglingImage(t *testing.T) {
 				t.Fatalf("isDanglingImage(%#v) = %v, want %v", test.references, got, test.want)
 			}
 		})
+	}
+}
+
+func TestImageReferenceDigestOnlyMatchesImmutableReferences(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		reference string
+		want      string
+		ok        bool
+	}{
+		{
+			name:      "digest",
+			reference: "alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			want:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ok:        true,
+		},
+		{
+			name:      "tag",
+			reference: "alpine:latest",
+			ok:        false,
+		},
+		{
+			name:      "tag and digest",
+			reference: "alpine:latest@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			want:      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			ok:        true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reference, err := registryreference.ParseDockerRef(test.reference)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := imageReferenceDigest(reference)
+			if ok != test.ok || got.String() != test.want {
+				if !test.ok && got == "" {
+					return
+				}
+				t.Fatalf("imageReferenceDigest(%q) = %q, %v; want %q, %v", test.reference, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestLocalDigestImageAcceptsExactIndexRecord(t *testing.T) {
+	t.Parallel()
+	reference := "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	requested := digest.Digest("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	platformTarget := digest.Digest("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if !isLocalDigestImage(reference, platformTarget, reference, requested) {
+		t.Fatal("exact digest-named index record was rejected")
+	}
+	if !isLocalDigestImage("docker.io/library/alpine:latest", requested, reference, requested) {
+		t.Fatal("matching target digest was rejected")
+	}
+	if isLocalDigestImage("docker.io/library/alpine:latest", platformTarget, reference, requested) {
+		t.Fatal("unrelated tagged record was accepted")
+	}
+}
+
+func TestImageResponseNeedsSyncDefaultsToFalse(t *testing.T) {
+	t.Parallel()
+	response := api.ImageResponse{Name: "alpine", Digest: "sha256:image"}
+	if response.NeedsSync {
+		t.Fatal("local image response unexpectedly requires a sync")
 	}
 }
 

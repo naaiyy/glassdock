@@ -173,6 +173,9 @@ static int launch_gvproxy(const char *executable, const char *datapath_socket,
         return -1;
     }
     if (child == 0) {
+        // Keep the long-lived network helper's Go heap bounded while the VM
+        // is idle. The helper is part of the measured runtime footprint.
+        (void)setenv("GOGC", "50", 1);
         const int null_descriptor = open("/dev/null", O_RDWR);
         if (null_descriptor >= 0) {
             (void)dup2(null_descriptor, STDIN_FILENO);

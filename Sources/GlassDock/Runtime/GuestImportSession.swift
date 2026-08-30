@@ -49,14 +49,17 @@ final class GuestImportSession: @unchecked Sendable {
     private let connection: GuestConnection
     private let gate: StartGate
     private let decodeResponse: @Sendable (GuestFrame) throws -> [DockerRuntimeImage]
+    private let onFinish: @Sendable () async -> Void
     private let responseTask: Task<[DockerRuntimeImage], Error>
 
     init(
         connection: GuestConnection, reference: String?,
-        decodeResponse: @escaping @Sendable (GuestFrame) throws -> [DockerRuntimeImage]
+        decodeResponse: @escaping @Sendable (GuestFrame) throws -> [DockerRuntimeImage],
+        onFinish: @escaping @Sendable () async -> Void = {}
     ) {
         self.connection = connection
         self.decodeResponse = decodeResponse
+        self.onFinish = onFinish
         let gate = StartGate()
         self.gate = gate
         var payload: [String: JSONValue] = [:]
@@ -65,7 +68,8 @@ final class GuestImportSession: @unchecked Sendable {
         }
         // Captures only immutable members plus the gate — never self — so the
         // task can be created during initialization.
-        responseTask = Task { [connection, decodeResponse, gate] in
+        responseTask = Task { [connection, decodeResponse, gate, onFinish] in
+            defer { Task { await onFinish() } }
             let frame = try await connection.request(
                 method: "image.import",
                 payload: .object(payload),

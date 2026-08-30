@@ -6,7 +6,7 @@
 // found in the THIRD-PARTY file.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
@@ -168,42 +168,82 @@ impl Vm {
 }
 
 #[derive(Default)]
-struct ReleasedRanges {
-    ranges: BTreeMap<u64, u64>,
+struct PageBitSet {
+    words: Vec<u64>,
 }
 
-impl ReleasedRanges {
-    fn insert(&mut self, start: u64, end: u64) -> io::Result<()> {
-        if self
-            .ranges
-            .range(..end)
-            .next_back()
-            .is_some_and(|(&other_start, &other_end)| other_end > start && other_start < end)
-        {
-            return Err(io::Error::from_raw_os_error(libc::EINVAL));
-        }
-        self.ranges.insert(start, end);
-        Ok(())
+impl PageBitSet {
+    fn contains(&self, index: usize) -> bool {
+        let word = index / u64::BITS as usize;
+        let mask = 1u64 << (index % u64::BITS as usize);
+        self.words.get(word).is_some_and(|value| value & mask != 0)
     }
 
-    fn take_containing(&mut self, address: u64) -> Option<(u64, u64)> {
-        let (&start, &end) = self.ranges.range(..=address).next_back()?;
-        if address >= end {
-            return None;
+    fn insert(&mut self, index: usize) -> bool {
+        let word = index / u64::BITS as usize;
+        let mask = 1u64 << (index % u64::BITS as usize);
+        if word >= self.words.len() {
+            self.words.resize(word + 1, 0);
         }
-        self.ranges.remove(&start);
-        Some((start, end))
+        let was_set = self.words[word] & mask != 0;
+        self.words[word] |= mask;
+        !was_set
+    }
+
+    fn remove(&mut self, index: usize) -> bool {
+        let word = index / u64::BITS as usize;
+        let Some(value) = self.words.get_mut(word) else {
+            return false;
+        };
+        let mask = 1u64 << (index % u64::BITS as usize);
+        let was_set = *value & mask != 0;
+        *value &= !mask;
+        was_set
+    }
+}
+
+fn coalesce_page_ranges<I>(page_size: u64, starts: I) -> Vec<(u64, u64)>
+where
+    I: IntoIterator<Item = u64>,
+{
+    let mut ranges = Vec::new();
+    for start in starts {
+        let Some((range_start, range_len)) = ranges.last_mut() else {
+            ranges.push((start, page_size));
+            continue;
+        };
+        if range_start
+            .checked_add(*range_len)
+            .is_some_and(|end| end == start)
+        {
+            *range_len += page_size;
+        } else {
+            ranges.push((start, page_size));
+        }
+    }
+    ranges
+}
+
+const GUEST_PAGE_SIZE: u64 = 4096;
+
+fn clear_guest_page_bits(bits: &mut PageBitSet, host_page: u64, host_page_size: u64) {
+    let guest_pages = host_page_size / GUEST_PAGE_SIZE;
+    for index in 0..guest_pages {
+        let address = host_page.saturating_add(index.saturating_mul(GUEST_PAGE_SIZE));
+        bits.remove((address / GUEST_PAGE_SIZE) as usize);
     }
 }
 
 /// Owns the macOS stage-2 state for guest pages returned by virtio-balloon.
-/// The host virtual mapping remains allocated so a later guest fault can
-/// restore the same zero-filled range without changing guest addresses.
+/// Free-page reports are unmapped from stage 2 while complete explicit-balloon
+/// host pages retain their mappings and remain available for reuse.
 pub struct MemoryReclaimer {
     hvf_vm: Arc<HvfVm>,
     memory: GuestMemoryMmap,
-    released: Mutex<ReleasedRanges>,
-    page_size: u64,
+    released: Mutex<PageBitSet>,
+    ballooned_page_bits: Mutex<PageBitSet>,
+    ballooned_host_pages: Mutex<PageBitSet>,
+    host_page_size: u64,
 }
 
 fn validated_host_range(
@@ -237,24 +277,86 @@ impl MemoryReclaimer {
         Self {
             hvf_vm,
             memory,
-            released: Mutex::new(ReleasedRanges::default()),
-            page_size: u64::try_from(page_size).expect("invalid host page size"),
+            released: Mutex::new(PageBitSet::default()),
+            ballooned_page_bits: Mutex::new(PageBitSet::default()),
+            ballooned_host_pages: Mutex::new(PageBitSet::default()),
+            host_page_size: u64::try_from(page_size).expect("invalid host page size"),
         }
     }
 
     fn validated_host_range(&self, start: u64, len: u64) -> io::Result<*mut u8> {
-        validated_host_range(&self.memory, self.page_size, start, len)
+        validated_host_range(&self.memory, self.host_page_size, start, len)
     }
 
-    pub fn restore_fault(&self, address: u64) -> bool {
-        let mut released = self.released.lock().unwrap();
-        let Some((start, end)) = released.take_containing(address) else {
-            return false;
-        };
-        let len = end - start;
-        let host = self
-            .validated_host_range(start, len)
-            .expect("tracked released range is no longer valid guest RAM");
+    fn host_page_start(&self, address: u64) -> u64 {
+        address - address % self.host_page_size
+    }
+
+    fn host_page_index(&self, address: u64) -> usize {
+        (address / self.host_page_size) as usize
+    }
+
+    fn guest_page_index(address: u64) -> usize {
+        (address / GUEST_PAGE_SIZE) as usize
+    }
+
+    fn host_page_is_ballooned(&self, bits: &PageBitSet, start: u64) -> bool {
+        let pages = self.host_page_size / GUEST_PAGE_SIZE;
+        (0..pages).all(|index| {
+            let guest_page = start.saturating_add(index.saturating_mul(GUEST_PAGE_SIZE));
+            let page_index = Self::guest_page_index(guest_page);
+            bits.contains(page_index)
+        })
+    }
+
+    fn validate_guest_page(&self, address: u64) -> io::Result<()> {
+        if !address.is_multiple_of(GUEST_PAGE_SIZE) {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let _ = self
+            .memory
+            .get_host_address(GuestAddress(address))
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let last = address
+            .checked_add(GUEST_PAGE_SIZE - 1)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let _ = self
+            .memory
+            .get_host_address(GuestAddress(last))
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        Ok(())
+    }
+
+    fn restore_host_range_locked(
+        &self,
+        released: &mut PageBitSet,
+        start: u64,
+        len: u64,
+    ) -> io::Result<()> {
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut page = start;
+        while page < end {
+            if !released.contains(self.host_page_index(page)) {
+                return Err(io::Error::from_raw_os_error(libc::ENOENT));
+            }
+            page = page
+                .checked_add(self.host_page_size)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        }
+
+        let host = self.validated_host_range(start, len)?;
+        let mut removed_pages = Vec::new();
+        page = start;
+        while page < end {
+            let index = self.host_page_index(page);
+            released.remove(index);
+            removed_pages.push(index);
+            page = page
+                .checked_add(self.host_page_size)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        }
         let reused = unsafe {
             libc::madvise(
                 host.cast::<libc::c_void>(),
@@ -262,20 +364,203 @@ impl MemoryReclaimer {
                 libc::MADV_FREE_REUSE,
             )
         } == 0;
-        if !reused || self.hvf_vm.map_memory(host as u64, start, len).is_err() {
+        let mapped = reused && self.hvf_vm.map_memory(host as u64, start, len).is_ok();
+        if !mapped {
             if reused {
                 unsafe {
                     libc::madvise(
                         host.cast::<libc::c_void>(),
                         len as usize,
                         libc::MADV_FREE_REUSABLE,
-                    )
-                };
+                    );
+                }
             }
-            let _ = released.insert(start, end);
-            panic!("failed to restore a released guest RAM range");
+            for index in removed_pages {
+                released.insert(index);
+            }
+            return Err(io::Error::other("failed to restore guest memory mapping"));
         }
-        true
+        Ok(())
+    }
+
+    fn release_host_range_locked(
+        &self,
+        released: &mut PageBitSet,
+        start: u64,
+        len: u64,
+    ) -> io::Result<()> {
+        let host = self.validated_host_range(start, len)?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let mut inserted_pages = Vec::new();
+        let mut page = start;
+        while page < end {
+            let index = self.host_page_index(page);
+            if released.contains(index) {
+                for inserted in inserted_pages {
+                    released.remove(inserted);
+                }
+                return Err(io::Error::from_raw_os_error(libc::EALREADY));
+            }
+            released.insert(index);
+            inserted_pages.push(index);
+            page = page
+                .checked_add(self.host_page_size)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        }
+        if self.hvf_vm.unmap_memory(start, len).is_err() {
+            for index in inserted_pages {
+                released.remove(index);
+            }
+            return Err(io::Error::other("failed to release guest memory mapping"));
+        }
+        if unsafe {
+            libc::madvise(
+                host.cast::<libc::c_void>(),
+                len as usize,
+                // Balloon ownership makes the guest pages disposable. Mark the
+                // unmapped range reusable so macOS can reclaim it without
+                // forcing a synchronous zero-fill on the next guest fault.
+                libc::MADV_FREE_REUSABLE,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            let _ = self.hvf_vm.map_memory(host as u64, start, len);
+            for index in inserted_pages {
+                released.remove(index);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn release_host_ranges<I>(&self, starts: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut released = self.released.lock().unwrap();
+        let ranges = coalesce_page_ranges(
+            self.host_page_size,
+            starts
+                .into_iter()
+                .filter(|start| !released.contains(self.host_page_index(*start))),
+        );
+        for (start, len) in ranges {
+            self.release_host_range_locked(&mut released, start, len)?;
+        }
+        Ok(())
+    }
+
+    /// Makes complete host pages explicitly handed to virtio-balloon reusable.
+    /// The guest does not access these pages until it submits them on the
+    /// deflate queue, so retaining the stage-2 mapping avoids a host mapping
+    /// syscall on every balloon transition.
+    fn release_ballooned_host_ranges<I>(&self, starts: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut ballooned = self.ballooned_host_pages.lock().unwrap();
+        let ranges = coalesce_page_ranges(
+            self.host_page_size,
+            starts
+                .into_iter()
+                .filter(|start| !ballooned.contains(self.host_page_index(*start))),
+        );
+        for (start, len) in ranges {
+            let host = self.validated_host_range(start, len)?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+            let mut inserted_pages = Vec::new();
+            let mut page = start;
+            while page < end {
+                let index = self.host_page_index(page);
+                if ballooned.contains(index) {
+                    for inserted in inserted_pages {
+                        ballooned.remove(inserted);
+                    }
+                    return Err(io::Error::from_raw_os_error(libc::EALREADY));
+                }
+                ballooned.insert(index);
+                inserted_pages.push(index);
+                page = page
+                    .checked_add(self.host_page_size)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+            }
+            if unsafe {
+                libc::madvise(
+                    host.cast::<libc::c_void>(),
+                    len as usize,
+                    libc::MADV_FREE_REUSABLE,
+                )
+            } != 0
+            {
+                let error = io::Error::last_os_error();
+                for index in inserted_pages {
+                    ballooned.remove(index);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_ballooned_host_ranges<I>(&self, starts: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut ballooned = self.ballooned_host_pages.lock().unwrap();
+        let ranges = coalesce_page_ranges(
+            self.host_page_size,
+            starts
+                .into_iter()
+                .filter(|start| ballooned.contains(self.host_page_index(*start))),
+        );
+        for (start, len) in ranges {
+            let host = self.validated_host_range(start, len)?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+            let mut page = start;
+            while page < end {
+                if !ballooned.contains(self.host_page_index(page)) {
+                    return Err(io::Error::from_raw_os_error(libc::ENOENT));
+                }
+                page = page
+                    .checked_add(self.host_page_size)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+            }
+            if unsafe {
+                libc::madvise(
+                    host.cast::<libc::c_void>(),
+                    len as usize,
+                    libc::MADV_FREE_REUSE,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            page = start;
+            while page < end {
+                ballooned.remove(self.host_page_index(page));
+                page = page
+                    .checked_add(self.host_page_size)
+                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn restore_fault(&self, address: u64) -> bool {
+        let mut released = self.released.lock().unwrap();
+        let start = self.host_page_start(address);
+        match self.restore_host_range_locked(&mut released, start, self.host_page_size) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => false,
+            Err(error) => panic!("failed to restore a released guest RAM range: {error}"),
+        }
     }
 }
 
@@ -290,25 +575,122 @@ impl devices::virtio::balloon::FreePageReclaimer for MemoryReclaimer {
         let end = start
             .checked_add(len)
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-        let host = self.validated_host_range(start, len)?;
-        let mut released = self.released.lock().unwrap();
-        released.insert(start, end)?;
-        if self.hvf_vm.unmap_memory(start, len).is_err() {
-            released.take_containing(start);
-            return Err(io::Error::other("failed to unmap guest memory"));
-        }
-        if unsafe {
-            libc::madvise(
-                host.cast::<libc::c_void>(),
-                len as usize,
-                libc::MADV_FREE_REUSABLE,
-            )
-        } != 0
+        if len == 0
+            || !start.is_multiple_of(GUEST_PAGE_SIZE)
+            || !len.is_multiple_of(GUEST_PAGE_SIZE)
         {
-            let error = io::Error::last_os_error();
-            let _ = self.hvf_vm.map_memory(host as u64, start, len);
-            released.take_containing(start);
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        self.validate_guest_page(start)?;
+        self.validate_guest_page(end - GUEST_PAGE_SIZE)?;
+
+        let aligned_start = start
+            .checked_add(self.host_page_size - 1)
+            .map(|address| address - address % self.host_page_size)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let aligned_end = end - end % self.host_page_size;
+        let mut pages = Vec::new();
+        let mut page = aligned_start;
+        while page < aligned_end {
+            pages.push(page);
+            page = page
+                .checked_add(self.host_page_size)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        }
+        self.release_host_ranges(pages)
+    }
+
+    fn release_pages(&self, _mem: &GuestMemoryMmap, pages: &[GuestAddress]) -> io::Result<()> {
+        let mut groups = BTreeSet::new();
+        let guest_pages_per_host_page = self.host_page_size / GUEST_PAGE_SIZE;
+        if guest_pages_per_host_page == 0 || self.host_page_size % GUEST_PAGE_SIZE != 0 {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        {
+            let mut ballooned_page_bits = self.ballooned_page_bits.lock().unwrap();
+            for page in pages {
+                let address = page.raw_value();
+                self.validate_guest_page(address)?;
+                let host_page = self.host_page_start(address);
+                ballooned_page_bits.insert(Self::guest_page_index(address));
+                if self.host_page_is_ballooned(&ballooned_page_bits, host_page) {
+                    groups.insert(host_page);
+                }
+            }
+        }
+
+        if let Err(error) = self.release_ballooned_host_ranges(groups) {
+            // The guest has already transferred ownership of the pages to
+            // the balloon queue. Keep the ownership bitmap coherent when
+            // stage-2 reclamation fails.
             return Err(error);
+        }
+        Ok(())
+    }
+
+    fn restore_range(
+        &self,
+        _mem: &GuestMemoryMmap,
+        guest_addr: GuestAddress,
+        len: u64,
+    ) -> io::Result<()> {
+        let start = guest_addr.raw_value();
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        if !start.is_multiple_of(self.host_page_size)
+            || len == 0
+            || !len.is_multiple_of(self.host_page_size)
+        {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let mut released = self.released.lock().unwrap();
+        let mut page = start;
+        while page < end {
+            if !released.contains(self.host_page_index(page)) {
+                return Err(io::Error::from_raw_os_error(libc::ENOENT));
+            }
+            page = page
+                .checked_add(self.host_page_size)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+        }
+
+        if let Err(error) = self.restore_host_range_locked(&mut released, start, len) {
+            panic!("failed to restore a released guest RAM range: {error}");
+        }
+        Ok(())
+    }
+
+    fn restore_pages(&self, _mem: &GuestMemoryMmap, pages: &[GuestAddress]) -> io::Result<()> {
+        let mut groups = BTreeSet::new();
+        {
+            let mut ballooned_page_bits = self.ballooned_page_bits.lock().unwrap();
+            for page in pages {
+                let address = page.raw_value();
+                self.validate_guest_page(address)?;
+                let host_page = self.host_page_start(address);
+                if self.host_page_is_ballooned(&ballooned_page_bits, host_page) {
+                    groups.insert(host_page);
+                } else {
+                    // A host page can be partially ballooned when a free-page
+                    // report has already made the other guest pages reusable.
+                    // Clear every returned page, not only complete host pages;
+                    // otherwise a later partial inflate could appear to own
+                    // this host page and reclaim an active guest page.
+                    ballooned_page_bits.remove(Self::guest_page_index(address));
+                }
+            }
+        }
+        // macOS can expose a host page larger than the guest's 4 KiB balloon
+        // page. Once a complete host page is reusable, restoring one returned
+        // guest page restores the whole host mapping. Clear every guest-page
+        // bit in that host page so a later partial deflate can build the
+        // ownership state again from scratch.
+        for host_page in groups {
+            let result = self.restore_ballooned_host_ranges(std::iter::once(host_page));
+            let mut ballooned_page_bits = self.ballooned_page_bits.lock().unwrap();
+            clear_guest_page_bits(&mut ballooned_page_bits, host_page, self.host_page_size);
+            result?;
         }
         Ok(())
     }
@@ -787,15 +1169,42 @@ mod tests {
     }
 
     #[test]
-    fn released_ranges_reject_overlap_and_restore_once() {
-        let mut ranges = ReleasedRanges::default();
-        ranges.insert(0x4000, 0x8000).unwrap();
-        ranges.insert(0x8000, 0xc000).unwrap();
-        assert!(ranges.insert(0x6000, 0xa000).is_err());
-        assert_eq!(ranges.take_containing(0x5fff), Some((0x4000, 0x8000)));
-        assert_eq!(ranges.take_containing(0x5fff), None);
-        assert_eq!(ranges.take_containing(0xbfff), Some((0x8000, 0xc000)));
-        assert_eq!(ranges.take_containing(0xc000), None);
+    fn page_bit_set_tracks_sparse_pages() {
+        let mut pages = PageBitSet::default();
+        assert!(pages.insert(4));
+        assert!(!pages.insert(4));
+        assert!(pages.insert(65));
+        assert!(pages.contains(4));
+        assert!(pages.contains(65));
+        assert!(!pages.contains(5));
+        assert!(pages.remove(4));
+        assert!(!pages.remove(4));
+        assert!(!pages.contains(4));
+        assert!(pages.contains(65));
+    }
+
+    #[test]
+    fn coalesces_contiguous_page_starts() {
+        assert_eq!(
+            coalesce_page_ranges(0x4000, [0x4000, 0x8000, 0xc000, 0x20000]),
+            vec![(0x4000, 0xc000), (0x20000, 0x4000)]
+        );
+    }
+
+    #[test]
+    fn clears_all_guest_pages_in_a_restored_host_page() {
+        let mut pages = PageBitSet::default();
+        for index in 4..8 {
+            assert!(pages.insert(index));
+        }
+        assert!(pages.insert(8));
+
+        clear_guest_page_bits(&mut pages, 0x4000, 0x4000);
+
+        for index in 4..8 {
+            assert!(!pages.contains(index));
+        }
+        assert!(pages.contains(8));
     }
 
     #[test]

@@ -97,6 +97,8 @@ const EC_AA64_HVC: u64 = 0x16;
 const EC_AA64_SMC: u64 = 0x17;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const EC_SYSTEMREGISTERTRAP: u64 = 0x18;
+const EC_INSTRABORT_LOWER: u64 = 0x20;
+const EC_INSTRABORT_SAME: u64 = 0x21;
 const EC_DATAABORT: u64 = 0x24;
 const EC_AA64_BKPT: u64 = 0x3c;
 
@@ -658,6 +660,17 @@ impl HvfVcpu<'_> {
                     self.pending_mmio_read = Some(MmioRead { addr: pa, srt, len });
                     Ok(VcpuExit::MmioRead(pa, &mut self.mmio_buf[0..len]))
                 }
+            }
+            EC_INSTRABORT_LOWER | EC_INSTRABORT_SAME => {
+                let pa = self.vcpu_exit.exception.physical_address;
+                if restore_memory(pa) {
+                    // The instruction did not execute. Return without advancing
+                    // the PC so the guest retries against the restored mapping.
+                    return Ok(VcpuExit::MemoryRestored);
+                }
+                panic!(
+                    "unexpected instruction abort: syndrome=0x{syndrome:x} physical_address=0x{pa:x}"
+                );
             }
             #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
             EC_SYSTEMREGISTERTRAP => {

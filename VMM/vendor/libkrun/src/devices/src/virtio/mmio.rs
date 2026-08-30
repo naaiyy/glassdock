@@ -232,6 +232,10 @@ impl MmioTransport {
         self.device.clone()
     }
 
+    pub fn signal_config_change(&self) {
+        self.interrupt.signal_config_change();
+    }
+
     /// Returns a reference to the queue eventfds. Used by the VMM to register
     /// queue notifications with KVM.
     pub fn queue_evts(&self) -> &[Arc<EventFd>] {

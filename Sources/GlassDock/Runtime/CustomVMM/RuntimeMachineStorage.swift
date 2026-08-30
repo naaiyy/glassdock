@@ -25,10 +25,12 @@ enum RuntimeMachineStorage {
         if fileManager.fileExists(atPath: url.path) {
             do {
                 let reader = try EXT4.EXT4Reader(blockDevice: FilePath(url.path))
-                if reader.superBlock.featureCompat & 0x4 != 0,
-                    reader.superBlock.journalInum == 8,
-                    reader.superBlock.defaultMountOpts == 0x40
-                {
+                let hasOrderedJournal =
+                    reader.superBlock.featureCompat & 0x4 != 0
+                    && reader.superBlock.journalInum == 8
+                    && reader.superBlock.defaultMountOpts == 0x40
+                let isUnjournaled = reader.superBlock.featureCompat & 0x4 == 0
+                if hasOrderedJournal || isUnjournaled {
                     return
                 }
                 throw RuntimeMachineStorageError.incompatibleDataDisk
@@ -43,8 +45,7 @@ enum RuntimeMachineStorage {
         do {
             let formatter = try EXT4.Formatter(
                 FilePath(staging.path),
-                minDiskSize: size,
-                journal: .init(defaultMode: .ordered)
+                minDiskSize: size
             )
             try formatter.close()
             try fileManager.moveItem(at: staging, to: url)

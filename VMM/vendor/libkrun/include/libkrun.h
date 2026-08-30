@@ -98,6 +98,25 @@ int32_t krun_free_ctx(uint32_t ctx_id);
 int32_t krun_set_vm_config(uint32_t ctx_id, uint8_t num_vcpus, uint32_t ram_mib);
 
 /**
+ * Configures a host Unix socket for changing the running VM's virtio-balloon
+ * target. The socket accepts one little-endian uint64 target memory size in
+ * bytes and returns one little-endian int32 status code. When the high bit of
+ * the request is set, the target is applied without that bit and the response
+ * waits until the guest reports that it reached the target. The high bit is
+ * therefore reserved as a wait-for-target flag.
+ *
+ * This must be called before krun_start_enter().
+ *
+ * Arguments:
+ *  "ctx_id"       - the configuration context ID.
+ *  "socket_path"  - an absolute path for the control socket.
+ *
+ * Returns:
+ *  Zero on success or a negative error number on failure.
+ */
+int32_t krun_set_balloon_socket(uint32_t ctx_id, const char *socket_path);
+
+/**
  * The virtiofs tag used for the root filesystem. Can be used with krun_add_virtiofs*
  * for more control over root filesystem parameters (e.g. read-only, DAX window size).
  */

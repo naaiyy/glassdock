@@ -182,6 +182,8 @@ struct DockerRuntimeRoutesTests {
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
                 #expect(value?["StatusCode"] as? Int == 7)
             }
+            #expect(await backend.validateCount == 1)
+            #expect(await backend.inspectCount == 0)
             try await app.testing().test(.GET, "/v1.51/containers/container-1/json") { response async throws in
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
@@ -192,6 +194,11 @@ struct DockerRuntimeRoutesTests {
                 #expect(portBindings?["80/tcp"] != nil)
                 #expect(hostConfig?["StopTimeout"] as? Int == -1)
             }
+            #expect(await backend.lastInspectIncludeSize == false)
+            try await app.testing().test(.GET, "/v1.51/containers/container-1/json?size=1") { response async in
+                #expect(response.status == .ok)
+            }
+            #expect(await backend.lastInspectIncludeSize == true)
             try await app.testing().test(.GET, "/v1.51/containers/json?all=1") { response async throws in
                 #expect(response.status == .ok)
                 let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [[String: Any]]
@@ -215,6 +222,23 @@ struct DockerRuntimeRoutesTests {
         #expect(await backend.lastWaitCondition == .nextExit)
         #expect(await backend.lastListShowAll == true)
         #expect(await backend.lastDelete == .init(force: true, volumes: true))
+    }
+
+    @Test("completed wait uses a non-streaming response when the exit is cached")
+    func completedWaitUsesCachedExit() async throws {
+        let backend = DockerRuntimeBackendMock(cachedWaitCode: 7)
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/containers/container-1/wait"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                #expect(response.headers.contentType == .json)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect(value?["StatusCode"] as? Int == 7)
+            }
+        }
+        #expect(await backend.validateCount == 1)
+        #expect(await backend.lastWaitCondition == nil)
     }
 
     @Test("container create canonicalizes macOS bind path aliases")
@@ -1064,6 +1088,9 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private(set) var lastNetworkAliases: [String]?
     private(set) var lastNetworkDisconnect: (String, String)?
     private(set) var lastNetworkDelete: String?
+    private(set) var validateCount = 0
+    private(set) var inspectCount = 0
+    private(set) var lastInspectIncludeSize: Bool?
     private(set) var startCount = 0
     private var running = false
     private var paused = false
@@ -1073,6 +1100,7 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
     private let containerSizeRootFs: Int64
     private let stopTimeout: Int?
     private let waitDelayNanoseconds: UInt64
+    private let cachedWaitCode: Int32?
 
     init(
         logOutput: String? = nil,
@@ -1081,7 +1109,8 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         containerSizeRootFs: Int64 = -1,
         running: Bool = false,
         stopTimeout: Int? = nil,
-        waitDelayNanoseconds: UInt64 = 0
+        waitDelayNanoseconds: UInt64 = 0,
+        cachedWaitCode: Int32? = nil
     ) {
         self.logOutput = logOutput
         self.imageRows =
@@ -1093,6 +1122,7 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         self.running = running
         self.stopTimeout = stopTimeout
         self.waitDelayNanoseconds = waitDelayNanoseconds
+        self.cachedWaitCode = cachedWaitCode
     }
 
     func pullImage(
@@ -1233,13 +1263,32 @@ actor DockerRuntimeBackendMock: DockerRuntimeRouteBackend {
         return 7
     }
 
+    func cachedWaitContainer(id: String, condition: ContainerWaitCondition) async throws -> Int32? {
+        guard condition == .notRunning else { return nil }
+        try await validateContainer(id: id)
+        return cachedWaitCode
+    }
+
     func deleteContainer(id: String, force: Bool, removeVolumes: Bool) async throws {
         lastDelete = Delete(force: force, volumes: removeVolumes)
     }
 
     func inspectContainer(id: String) async throws -> DockerRuntimeContainer {
+        inspectCount += 1
         guard id != "missing" else { throw DockerRuntimeRouteError.notFound("No such container: missing") }
         return container()
+    }
+
+    func inspectContainer(
+        id: String, includeSize: Bool
+    ) async throws -> DockerRuntimeContainer {
+        lastInspectIncludeSize = includeSize
+        return try await inspectContainer(id: id)
+    }
+
+    func validateContainer(id: String) async throws {
+        validateCount += 1
+        guard id != "missing" else { throw DockerRuntimeRouteError.notFound("No such container: missing") }
     }
 
     func listContainers(showAll: Bool) async throws -> [DockerRuntimeContainer] {
