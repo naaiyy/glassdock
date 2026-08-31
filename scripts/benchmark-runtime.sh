@@ -177,9 +177,10 @@ product_value() {
     fi
     case $field in
         DOCKER_HOST) printf 'unix://%s/glassdock-home/.glassdock/container.sock' "$ENGINE_STATE_DIR" ;;
-        START_CMD) printf 'env GLASSDOCK_HOST_HOME_DIRECTORY=%q GLASSDOCK_ENGINE_STATE_DIRECTORY=%q %q --no-docker-context' \
+        START_CMD) printf 'env GLASSDOCK_HOST_HOME_DIRECTORY=%q GLASSDOCK_ENGINE_STATE_DIRECTORY=%q %q --no-docker-context --cpus %s --memory-mib %s' \
             "$ENGINE_STATE_DIR/glassdock-home" "$ENGINE_STATE_DIR/glassdock-state" \
-            "$REPO_ROOT/.build/release/glassdock" ;;
+            "$REPO_ROOT/.build/release/glassdock" \
+            "${GLASSDOCK_BENCH_CPUS:-6}" "$(( (${GLASSDOCK_BENCH_MEMORY_MIB:-1024}) ))" ;;
         RESET_CMD) printf 'rm -rf %q %q && mkdir -p %q %q' \
             "$ENGINE_STATE_DIR/glassdock-home" "$ENGINE_STATE_DIR/glassdock-state" \
             "$ENGINE_STATE_DIR/glassdock-home" "$ENGINE_STATE_DIR/glassdock-state" ;;
@@ -194,11 +195,11 @@ product_value() {
             "$REPO_ROOT/Guest/out/glassdock-root.ext4" \
             "$ENGINE_STATE_DIR/glassdock-state" ;;
         STORAGE_SCOPE) printf 'Glass Dock executable, VMM, guest artifacts, and isolated mutable engine state' ;;
-        VM_MEMORY_BYTES) printf '%s' "$((1024 * 1024 * 1024))" ;;
-        VM_ALLOCATED_MEMORY_BYTES) printf '%s' "$((1024 * 1024 * 1024))" ;;
-        CPU_COUNT) printf '6' ;;
+        VM_MEMORY_BYTES) printf '%s' "$(( ${GLASSDOCK_BENCH_MEMORY_MIB:-1024} * 1024 * 1024 ))" ;;
+        VM_ALLOCATED_MEMORY_BYTES) printf '%s' "$(( ${GLASSDOCK_BENCH_MEMORY_MIB:-1024} * 1024 * 1024 ))" ;;
+        CPU_COUNT) printf '%s' "${GLASSDOCK_BENCH_CPUS:-6}" ;;
         VARIANT) printf 'custom-vmm' ;;
-        CONFIG_CMD) printf "printf 'cpu=6; memory_bytes=1073741824; architecture=custom-vmm'" ;;
+        CONFIG_CMD) printf "printf 'cpu=%s; memory_bytes=%s; architecture=custom-vmm'" "${GLASSDOCK_BENCH_CPUS:-6}" "$(( ${GLASSDOCK_BENCH_MEMORY_MIB:-1024} * 1024 * 1024 ))" ;;
         RESET_POLICY) printf 'full isolated Glass Dock state, including the image store' ;;
         IMAGE_CACHE_POLICY) printf 'reset' ;;
     esac
@@ -1137,11 +1138,6 @@ benchmark_product() {
         value=$(api_ping_fresh_ms "$socket")
         append_result "$product" "$sample" "$position" cold api_ping_fresh_connection "$value" ms
     fi
-    if suite_enabled resources; then
-        begin_metric cold_idle_physical_footprint
-        record_process_snapshot "$product" "$sample" cold_idle
-        append_result "$product" "$sample" "$position" cold cold_idle_physical_footprint "$(owned_memory_bytes "$product")" bytes
-    fi
 
     begin_metric common_capability_ready
     docker_api pull "$BASE_IMAGE" >/dev/null
@@ -1153,6 +1149,11 @@ benchmark_product() {
     value=$(elapsed_since_ms "$start_ns")
     if suite_enabled startup; then
         append_result "$product" "$sample" "$position" cold common_capability_ready "$value" ms "$IMAGE_CACHE_POLICIES_MATCH"
+    fi
+    if suite_enabled resources; then
+        begin_metric cold_idle_physical_footprint
+        record_process_snapshot "$product" "$sample" cold_idle
+        append_result "$product" "$sample" "$position" cold cold_idle_physical_footprint "$(owned_memory_bytes "$product")" bytes
     fi
 
     if suite_enabled lifecycle; then
