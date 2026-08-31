@@ -12,14 +12,14 @@ import (
 
 func TestMapDockerResources(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      api.Resources
-		wantCPU    bool
-		wantMemory bool
-		wantPids   bool
-		wantQuota  int64
-		wantPeriod uint64
-		wantSwap   int64
+		name          string
+		input         api.Resources
+		wantCPU       bool
+		wantMemory    bool
+		wantPids      bool
+		wantQuota     int64
+		wantPeriod    uint64
+		wantSwap      int64
 		wantPidsLimit bool
 	}{
 		{
@@ -173,5 +173,38 @@ func writeCgroupFixture(t *testing.T, root, controllers, enabled string) {
 	}
 	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte(enabled), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDockerSocketRelayMountRequiresInternalMarker(t *testing.T) {
+	tests := []struct {
+		name  string
+		mount api.Mount
+		valid bool
+	}{
+		{
+			name:  "daemon marker",
+			mount: api.Mount{Source: api.DockerSocketRelayPath, Type: "bind", Relay: true},
+			valid: true,
+		},
+		{
+			name:  "missing marker",
+			mount: api.Mount{Source: api.DockerSocketRelayPath, Type: "bind"},
+		},
+		{
+			name:  "wrong source",
+			mount: api.Mount{Source: "/run/other.sock", Type: "bind", Relay: true},
+		},
+		{
+			name:  "wrong type",
+			mount: api.Mount{Source: api.DockerSocketRelayPath, Type: "tmpfs", Relay: true},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isDockerSocketRelayMount(test.mount); got != test.valid {
+				t.Fatalf("isDockerSocketRelayMount() = %v, want %v", got, test.valid)
+			}
+		})
 	}
 }

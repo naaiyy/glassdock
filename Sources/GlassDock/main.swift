@@ -45,6 +45,13 @@ struct CLIOptions: ParsableArguments {
     @ArgumentParser.Flag(
         name: .long,
         inversion: .prefixedNo,
+        help: "Allow containers to bind-mount the host Docker socket through the Glass Dock relay"
+    )
+    var dockerSocketRelay: Bool = true
+
+    @ArgumentParser.Flag(
+        name: .long,
+        inversion: .prefixedNo,
         help: "Answer Docker ping before route lookup"
     )
     var fastPing: Bool = true
@@ -111,7 +118,8 @@ try await configure(
     cpuCount: options.cpus,
     memoryBytes: options.memoryMiB * 1024 * 1024,
     directTCPForwarding: options.directTCPForwarding,
-    fastPing: options.fastPing
+    fastPing: options.fastPing,
+    dockerSocketRelay: options.dockerSocketRelay
 )
 
 // Bind Vapor's private socket before the public gateway becomes reachable.

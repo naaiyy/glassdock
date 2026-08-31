@@ -42,6 +42,7 @@ actor PersistentEngine {
     private let configuredMemoryTarget: UInt64
     private let guestReadinessTimeout: Duration
     private let isConnectionTerminal: @Sendable (GuestConnection) async -> Bool
+    private let socketRelay: DockerSocketRelayService?
     private var connection: GuestConnection?
     private var readyMachine: RuntimeMachineReady?
     private struct Readiness {
@@ -60,13 +61,15 @@ actor PersistentEngine {
         logger: Logger = Logger(label: "glassdock.engine"),
         configuredMemoryBytes: UInt64 = PersistentEngine.configuredMemoryBytes,
         guestReadinessTimeout: Duration = .seconds(10),
-        isConnectionTerminal: @escaping @Sendable (GuestConnection) async -> Bool = PersistentEngine.connectionIsTerminal
+        isConnectionTerminal: @escaping @Sendable (GuestConnection) async -> Bool = PersistentEngine.connectionIsTerminal,
+        socketRelay: DockerSocketRelayService? = nil
     ) {
         self.machine = machine
         self.logger = logger
         self.configuredMemoryTarget = configuredMemoryBytes
         self.guestReadinessTimeout = guestReadinessTimeout
         self.isConnectionTerminal = isConnectionTerminal
+        self.socketRelay = socketRelay
     }
 
     func readyConnection() async throws -> GuestConnection {
@@ -113,6 +116,7 @@ actor PersistentEngine {
         -> (GuestConnection, RuntimeMachineReady)
     {
         if restartMachine {
+            socketRelay?.stop()
             try await machine.stop()
         }
         let snapshot = try await machine.start()
@@ -120,6 +124,7 @@ actor PersistentEngine {
         do {
             let connection = try await waitForGuestReadiness()
             try await setMemoryTarget(effectiveIdleMemoryTarget)
+            await socketRelay?.start(connection: connection)
             logger.info("persistent engine is ready", metadata: ["ip": "\(snapshot.guestIPv4)"])
             return (connection, snapshot)
         } catch {
@@ -246,6 +251,7 @@ actor PersistentEngine {
         activeWork = 0
         retainedMemoryTargets.removeAll()
         currentMemoryTarget = nil
+        socketRelay?.stop()
         if let connection {
             _ = try? await connection.request(method: "engine.sync", payload: .object([:]))
             await connection.close()

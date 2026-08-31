@@ -11,6 +11,7 @@ struct CLIOptionsTests {
         #expect(options.cpus == 6)
         #expect(options.memoryMiB == 1024)
         #expect(options.directTCPForwarding)
+        #expect(options.dockerSocketRelay)
         #expect(options.fastPing)
         #expect(options.eventLoopThreads > 0)
     }
@@ -20,6 +21,13 @@ struct CLIOptionsTests {
         let options = try CLIOptions.parse(["--no-direct-tcp-forwarding"])
 
         #expect(!options.directTCPForwarding)
+    }
+
+    @Test("can disable the Docker socket relay")
+    func dockerSocketRelay() throws {
+        let options = try CLIOptions.parse(["--no-docker-socket-relay"])
+
+        #expect(!options.dockerSocketRelay)
     }
 
     @Test("can disable pre-router Docker ping")

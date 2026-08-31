@@ -34,14 +34,16 @@ const (
 // Envelope is the complete wire schema. Data contains base64 in JSON, as required
 // by encoding/json for []byte. Payload must contain a JSON object when present.
 type Envelope struct {
-	ID       uint64          `json:"id"`
-	Kind     Kind            `json:"kind"`
-	Method   string          `json:"method,omitempty"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
-	Stream   Stream          `json:"stream,omitempty"`
-	Data     []byte          `json:"data,omitempty"`
-	Error    *Error          `json:"error,omitempty"`
-	ExitCode *int32          `json:"exitCode,omitempty"`
+	ID      uint64          `json:"id"`
+	Kind    Kind            `json:"kind"`
+	Method  string          `json:"method,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Stream  Stream          `json:"stream,omitempty"`
+	// Data keeps an explicit empty string on the wire. Relay streams use an
+	// empty data frame as a half-close marker.
+	Data     []byte `json:"data"`
+	Error    *Error `json:"error,omitempty"`
+	ExitCode *int32 `json:"exitCode,omitempty"`
 }
 
 type Error struct {
