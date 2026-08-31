@@ -53,3 +53,18 @@ func TestPayloadMustBeObject(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestEmptyStreamFrameRoundTripsAsAnEOFMarker(t *testing.T) {
+	var buffer bytes.Buffer
+	frame := Envelope{ID: 9, Kind: KindStream, Stream: StreamStdout, Data: []byte{}}
+	if err := NewWriter(&buffer).Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewReader(&buffer).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Data == nil || len(got.Data) != 0 {
+		t.Fatalf("data = %#v, want a non-nil empty slice", got.Data)
+	}
+}

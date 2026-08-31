@@ -9,11 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mdlayher/vsock"
 	"github.com/glassdock/glassdock/guest/internal/backend"
 	builder "github.com/glassdock/glassdock/guest/internal/builder"
 	"github.com/glassdock/glassdock/guest/internal/forwarder"
 	"github.com/glassdock/glassdock/guest/internal/server"
+	"github.com/mdlayher/vsock"
 )
 
 var version = "dev"
@@ -109,9 +109,12 @@ func main() {
 	)
 	guestServer := server.New(b, version)
 	tcpServer := forwarder.NewTCPServer(b.PublishedTCPDestination)
-	errors := make(chan error, 3)
+	socketServer := forwarder.NewUnixSocketServer(forwarder.DockerSocketPath, guestServer.AnnounceSocket)
+	guestServer.SetSocketRelay(socketServer)
+	errors := make(chan error, 4)
 	go func() { errors <- guestServer.Serve(ctx, listener) }()
 	go func() { errors <- tcpServer.Serve(ctx, forwardListener) }()
+	go func() { errors <- socketServer.Serve(ctx) }()
 	if builderListener != nil {
 		go func() {
 			for {

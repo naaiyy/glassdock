@@ -25,6 +25,7 @@
     - [Runtime and published-port recovery](#runtime-and-published-port-recovery)
     - [Volume sync mode](#volume-sync-mode)
     - [Engine resources](#engine-resources)
+    - [Docker socket relay](#docker-socket-relay)
   - [Migrating from Docker](#migrating-from-docker)
   - [Runtime benchmarks](#runtime-benchmarks)
   - [Building from Source 🏗️](#building-from-source-🏗️)
@@ -264,6 +265,26 @@ includes `--cpus`, `--cpu-shares`, `--cpuset-cpus`, `--memory`,
 the requested combination is invalid or the guest cannot delegate a required
 cgroup controller.
 
+### Docker socket relay
+
+Docker socket bind mounts are relayed to the Glass Dock Docker API socket inside
+the guest. This supports tools that run the following command inside a
+container without exposing the VMM or the guest control connection:
+
+```text
+docker -H unix:///var/run/docker.sock ps
+```
+
+The relay is enabled by default for local development. Disable it with
+`--no-docker-socket-relay` when containers must not receive Docker API access.
+
+Run the manual integration check against the active Docker socket with:
+
+```bash
+DOCKER_HOST=unix://$HOME/.glassdock/container.sock \
+  scripts/verify-docker-socket-relay.sh
+```
+
 ---
 
 ## Building from Source 🏗️
@@ -446,7 +467,11 @@ machines.
 - Per-container CPU, memory, swap, reservation, cpuset, and PID limits use the
   guest cgroup v2 hierarchy. Glass Dock rejects invalid combinations and does
   not silently drop a limit when a required controller is unavailable.
-- Bind-mounting the Docker socket into a container is not implemented.
+- Docker socket bind mounts use a guest Unix socket relay to the same Glass Dock
+  API socket used by the Docker CLI. A container with this mount can control
+  the daemon and all containers that the daemon can control. Keep the relay
+  enabled only for trusted workloads, or disable it with
+  `--no-docker-socket-relay`.
 - The VMM exports the host home directory to the trusted guest so it can serve
   arbitrary Docker bind requests. Containers receive only their requested bind
   paths. Glass Dock rejects binds that overlap its engine state, and the

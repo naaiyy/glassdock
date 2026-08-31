@@ -13,6 +13,7 @@ import (
 
 	"github.com/glassdock/glassdock/guest/internal/api"
 	"github.com/glassdock/glassdock/guest/internal/backend"
+	"github.com/glassdock/glassdock/guest/internal/forwarder"
 	"github.com/glassdock/glassdock/guest/internal/protocol"
 )
 
@@ -21,6 +22,9 @@ type Server struct {
 	agentVersion string
 	waitsMu      sync.Mutex
 	waits        map[string]*exitWait
+	writersMu    sync.RWMutex
+	writers      map[*protocol.Writer]struct{}
+	socketRelay  *forwarder.UnixSocketServer
 }
 
 type exitWait struct {
@@ -31,7 +35,50 @@ type exitWait struct {
 }
 
 func New(b *backend.Backend, version string) *Server {
-	return &Server{backend: b, agentVersion: version, waits: make(map[string]*exitWait)}
+	return &Server{
+		backend:      b,
+		agentVersion: version,
+		waits:        make(map[string]*exitWait),
+		writers:      make(map[*protocol.Writer]struct{}),
+	}
+}
+
+func (s *Server) SetSocketRelay(relay *forwarder.UnixSocketServer) {
+	s.socketRelay = relay
+}
+
+// AnnounceSocket sends a guest socket-open event over the active control
+// connection. The relay request that follows can then be multiplexed on the
+// same connection without exposing another vsock port.
+func (s *Server) AnnounceSocket(id string) error {
+	s.writersMu.RLock()
+	var writer *protocol.Writer
+	for candidate := range s.writers {
+		writer = candidate
+		break
+	}
+	s.writersMu.RUnlock()
+	if writer == nil {
+		return errors.New("guest control connection is not ready")
+	}
+	payload, err := protocol.NewPayload(api.SocketRelayRequest{ID: id})
+	if err != nil {
+		return err
+	}
+	return writer.Write(protocol.Envelope{
+		ID: 0, Kind: protocol.KindEvent, Method: api.EventSocketOpen, Payload: payload,
+	})
+}
+
+func (s *Server) registerWriter(writer *protocol.Writer) func() {
+	s.writersMu.Lock()
+	s.writers[writer] = struct{}{}
+	s.writersMu.Unlock()
+	return func() {
+		s.writersMu.Lock()
+		delete(s.writers, writer)
+		s.writersMu.Unlock()
+	}
 }
 
 func (s *Server) registerWait(id string) *exitWait {
@@ -120,6 +167,8 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 	defer cancel()
 	defer conn.Close()
 	r, w := protocol.NewReader(conn), protocol.NewWriter(conn)
+	unregisterWriter := s.registerWriter(w)
+	defer unregisterWriter()
 	inFlight := make(chan struct{}, 256)
 	var requestMu sync.Mutex
 	requestCancels := make(map[uint64]context.CancelFunc)
@@ -194,7 +243,7 @@ func (s *Server) serveConnection(ctx context.Context, conn net.Conn) {
 		var input chan []byte
 		if request.Method == api.MethodContainerExec || request.Method == api.MethodContainerAttach ||
 			request.Method == api.MethodImageImport || request.Method == api.MethodImageBuild ||
-			request.Method == api.MethodContainerArchivePut {
+			request.Method == api.MethodContainerArchivePut || request.Method == api.MethodSocketRelay {
 			input = make(chan []byte, 64)
 			inputMu.Lock()
 			inputs[request.ID] = input
@@ -781,6 +830,51 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		syscall.Sync()
 		_ = writePayload(w, request.ID, api.ContainerUpdateResponse{Warnings: warnings})
+	case api.MethodSocketRelay:
+		if s.socketRelay == nil {
+			fail("unavailable", errors.New("docker socket relay is unavailable"))
+			return
+		}
+		body, err := decode[api.SocketRelayRequest](request)
+		if err != nil || body.ID == "" {
+			if err == nil {
+				err = errors.New("socket relay id is required")
+			}
+			fail("invalid_argument", err)
+			return
+		}
+		connection, release, err := s.socketRelay.Open(body.ID)
+		if err != nil {
+			fail("not_found", err)
+			return
+		}
+		defer release()
+		defer connection.Close()
+		err = forwarder.RelayConnection(ctx, connection, input, func(data []byte) error {
+			return w.Write(protocol.Envelope{
+				ID: request.ID, Kind: protocol.KindStream,
+				Stream: protocol.StreamStdout, Data: data,
+			})
+		})
+		if err != nil {
+			if ctx.Err() == nil {
+				fail("containerd", err)
+			}
+			return
+		}
+		_ = writePayload(w, request.ID, api.Empty{})
+	case api.MethodSocketClose:
+		if s.socketRelay == nil {
+			_ = writePayload(w, request.ID, api.Empty{})
+			return
+		}
+		body, err := decode[api.SocketRelayRequest](request)
+		if err != nil {
+			fail("invalid_argument", err)
+			return
+		}
+		_ = s.socketRelay.Close(body.ID)
+		_ = writePayload(w, request.ID, api.Empty{})
 	case api.MethodContainerDelete:
 		body, err := decode[api.ContainerDeleteRequest](request)
 		if err != nil {

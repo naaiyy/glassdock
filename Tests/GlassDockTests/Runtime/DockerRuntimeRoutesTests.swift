@@ -306,6 +306,56 @@ struct DockerRuntimeRoutesTests {
         #expect(create.mounts == [.init(source: canonicalSource, target: "/data", readOnly: false)])
     }
 
+    @Test("container create maps the Docker socket to the guest relay socket")
+    func containerCreateInterceptsDockerSocketBind() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture@sha256:abc","HostConfig":{"Binds":["/var/run/docker.sock:/var/run/docker.sock"]}}"#
+                )
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let create = try #require(await backend.lastCreate)
+        #expect(
+            create.mounts == [
+                .init(
+                    source: DockerSocketRelayConfiguration.guestSocketPath,
+                    target: "/var/run/docker.sock",
+                    readOnly: false,
+                    relay: true,
+                    sourceForInspect: DockerSocketRelayConfiguration.hostBindPath
+                )
+            ]
+        )
+    }
+
+    @Test("disabled Docker socket relay rejects the bind")
+    func disabledDockerSocketRelayRejectsBind() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend, dockerSocketRelayEnabled: false) { app in
+            try await app.testing().test(
+                .POST,
+                "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture@sha256:abc","HostConfig":{"Binds":["/var/run/docker.sock:/var/run/docker.sock"]}}"#
+                )
+            ) { response async throws in
+                #expect(response.status == .badRequest)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                #expect((value?["message"] as? String)?.contains("relay is disabled") == true)
+            }
+        }
+        #expect(await backend.lastCreate == nil)
+    }
+
     @Test("container create translates named volume mounts to shared bind paths")
     func containerCreateTranslatesNamedVolumeMount() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -1426,6 +1476,7 @@ func withRuntimeRoutes(
     _ backend: DockerRuntimeBackendMock,
     volumeClient: (any ClientVolumeProtocol)? = nil,
     broadcaster: EventBroadcaster? = nil,
+    dockerSocketRelayEnabled: Bool = true,
     test: @escaping (Application) async throws -> Void
 ) async throws {
     try await withApp(configure: { _ in }) { app in
@@ -1435,7 +1486,13 @@ func withRuntimeRoutes(
         if let broadcaster {
             app.storage[EventBroadcasterKey.self] = broadcaster
         }
-        try app.register(collection: DockerRuntimeRoutes(backend: backend, volumeClient: volumeClient))
+        try app.register(
+            collection: DockerRuntimeRoutes(
+                backend: backend,
+                volumeClient: volumeClient,
+                dockerSocketRelayEnabled: dockerSocketRelayEnabled
+            )
+        )
         try await test(app)
     }
 }

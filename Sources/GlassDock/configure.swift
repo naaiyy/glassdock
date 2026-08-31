@@ -14,7 +14,8 @@ func configure(
     cpuCount: Int = RuntimeMachineConfiguration.defaultCPUCount,
     memoryBytes: UInt64 = RuntimeMachineConfiguration.defaultMemoryBytes,
     directTCPForwarding: Bool = false,
-    fastPing: Bool = false
+    fastPing: Bool = false,
+    dockerSocketRelay: Bool = true
 ) async throws {
     guard #available(macOS 26.0, *) else {
         throw Abort(.internalServerError, reason: "Glass Dock requires macOS 26 or newer")
@@ -52,7 +53,18 @@ func configure(
             memoryBytes: memoryBytes
         )
     )
-    let engine = PersistentEngine(machine: machine, configuredMemoryBytes: memoryBytes)
+    let socketRelay =
+        dockerSocketRelay
+        ? DockerSocketRelayService(
+            hostSocketPath: containerSocketPath(homeDirectory: GlassDockDirectories.hostHome.path),
+            eventLoopGroup: app.eventLoopGroup
+        )
+        : nil
+    let engine = PersistentEngine(
+        machine: machine,
+        configuredMemoryBytes: memoryBytes,
+        socketRelay: socketRelay
+    )
     app.lifecycle.use(PersistentEngineLifecycle(engine: engine))
     // The builder relay serves hijacked /session and /grpc connections. It must
     // start before the public gateway becomes reachable and stop before the
@@ -112,7 +124,13 @@ func configure(
     // /events
     try app.register(collection: EventsRoute())
 
-    try app.register(collection: DockerRuntimeRoutes(backend: runtime, volumeClient: volumeClient))
+    try app.register(
+        collection: DockerRuntimeRoutes(
+            backend: runtime,
+            volumeClient: volumeClient,
+            dockerSocketRelayEnabled: dockerSocketRelay
+        )
+    )
     try app.register(collection: ImageSearchRoute())
     try app.register(collection: DistributionJsonRoute(systemConfig: ContainerSystemConfig()))
     try app.register(collection: AuthRoute())

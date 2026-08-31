@@ -3111,6 +3111,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if let volumeName = mount.volumeName {
             object["volumeName"] = .string(volumeName)
         }
+        if mount.relay {
+            object["relay"] = .bool(true)
+        }
         return .object(object)
     }
 

@@ -30,4 +30,26 @@ struct GuestRuntimePayloadTests {
                 == .invalidRequest("MemorySwap must be greater than or equal to Memory")
         )
     }
+
+    @Test("Docker socket relay mounts keep their guest-only marker")
+    func dockerSocketRelayMountPayload() {
+        let mount = DockerRuntimeMount(
+            source: DockerSocketRelayConfiguration.guestSocketPath,
+            target: "/var/run/docker.sock",
+            readOnly: false,
+            relay: true
+        )
+
+        #expect(
+            GuestRuntime.mountJSON(mount)
+                == .object([
+                    "source": .string(DockerSocketRelayConfiguration.guestSocketPath),
+                    "target": .string("/var/run/docker.sock"),
+                    "type": .string("bind"),
+                    "readonly": .bool(false),
+                    "options": .array([]),
+                    "relay": .bool(true),
+                ])
+        )
+    }
 }

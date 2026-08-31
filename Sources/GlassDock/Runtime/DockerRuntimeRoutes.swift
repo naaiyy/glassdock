@@ -545,9 +545,14 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
     let options: [String]
     var volumeName: String? = nil
     var noCopy: Bool = false
+    /// Internal marker for the guest agent's Docker socket relay mount.
+    var relay: Bool = false
+    /// Host-facing source preserved for Docker inspect when the guest source
+    /// is intentionally different, such as the Docker socket relay.
+    var sourceForInspect: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case source, target, readOnly, type, options, volumeName, noCopy
+        case source, target, readOnly, type, options, volumeName, noCopy, relay
     }
 
     init(
@@ -557,7 +562,9 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         type: String = "bind",
         options: [String] = [],
         volumeName: String? = nil,
-        noCopy: Bool = false
+        noCopy: Bool = false,
+        relay: Bool = false,
+        sourceForInspect: String? = nil
     ) {
         self.source = source
         self.target = target
@@ -566,6 +573,8 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         self.options = options
         self.volumeName = volumeName
         self.noCopy = noCopy
+        self.relay = relay
+        self.sourceForInspect = sourceForInspect
     }
 
     /// The guest serializes mounts with `omitempty`; absent `readOnly`,
@@ -579,6 +588,12 @@ struct DockerRuntimeMount: Codable, Sendable, Equatable {
         options = try values.decodeIfPresent([String].self, forKey: .options) ?? []
         volumeName = try values.decodeIfPresent(String.self, forKey: .volumeName)
         noCopy = try values.decodeIfPresent(Bool.self, forKey: .noCopy) ?? false
+        relay = try values.decodeIfPresent(Bool.self, forKey: .relay) ?? false
+        sourceForInspect = nil
+    }
+
+    var inspectionSource: String {
+        sourceForInspect ?? (relay ? DockerSocketRelayConfiguration.hostBindPath : source)
     }
 }
 
@@ -1200,14 +1215,17 @@ private final class DockerRuntimeExecState: @unchecked Sendable {
 struct DockerRuntimeRoutes: RouteCollection {
     let backend: any DockerRuntimeRouteBackend
     let volumeClient: (any ClientVolumeProtocol)?
+    let dockerSocketRelayEnabled: Bool
     private let execState = DockerRuntimeExecState()
 
     init(
         backend: any DockerRuntimeRouteBackend,
-        volumeClient: (any ClientVolumeProtocol)? = nil
+        volumeClient: (any ClientVolumeProtocol)? = nil,
+        dockerSocketRelayEnabled: Bool = true
     ) {
         self.backend = backend
         self.volumeClient = volumeClient
+        self.dockerSocketRelayEnabled = dockerSocketRelayEnabled
     }
 
     func boot(routes: RoutesBuilder) throws {
@@ -1787,7 +1805,14 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard !body.Image.isEmpty else { throw Abort(.badRequest, reason: "No image specified") }
         try Self.resources(body.HostConfig).validateForCreate()
         let image = try await call { try await backend.inspectImage(reference: body.Image) }
-        let resolvedMounts = try await mounts(from: body.HostConfig)
+        let resolvedMounts:
+            (
+                mounts: [DockerRuntimeMount],
+                autoCreatedVolumes: [Volume],
+                anonymousVolumeNames: Set<String>
+            ) = try await call { [self] in
+                try await self.mounts(from: body.HostConfig)
+            }
         var mounts = resolvedMounts.mounts
         let imageVolumeTargets = try Self.imageVolumeTargets(image.config.volumes)
         var autoCreatedVolumes = resolvedMounts.autoCreatedVolumes
@@ -3582,6 +3607,14 @@ struct DockerRuntimeRoutes: RouteCollection {
             guard components.count >= 2, components[1].hasPrefix("/") else {
                 throw Abort(.badRequest, reason: "Invalid bind mount: \(bind)")
             }
+            let flags = components.count == 3 ? components[2].split(separator: ",").map(String.init) : []
+            if let socketMount = try DockerSocketRelayConfiguration.mount(
+                source: components[0], target: components[1],
+                readOnly: flags.contains("ro"), enabled: dockerSocketRelayEnabled
+            ) {
+                result.append(socketMount)
+                continue
+            }
             let source = try await resolveMountSource(components[0])
             if source.isAnonymous {
                 anonymousVolumeNames.insert(try requireVolumeName(source))
@@ -3589,7 +3622,6 @@ struct DockerRuntimeRoutes: RouteCollection {
             if let created = source.createdVolume, source.isAnonymous {
                 autoCreatedVolumes.append(created)
             }
-            let flags = components.count == 3 ? components[2].split(separator: ",").map(String.init) : []
             result.append(
                 DockerRuntimeMount(
                     source: source.path,
@@ -3607,6 +3639,13 @@ struct DockerRuntimeRoutes: RouteCollection {
             case "bind":
                 guard let source = mount.Source, source.hasPrefix("/") else {
                     throw Abort(.badRequest, reason: "Mount source is required")
+                }
+                if let socketMount = try DockerSocketRelayConfiguration.mount(
+                    source: source, target: mount.Target,
+                    readOnly: mount.ReadOnly ?? false, enabled: dockerSocketRelayEnabled
+                ) {
+                    result.append(socketMount)
+                    continue
                 }
                 let resolved = try await resolveMountSource(source)
                 if resolved.isAnonymous {
@@ -4556,7 +4595,7 @@ private struct InspectResponse: Content {
             let isVolume = mount.volumeName != nil
             `Type` = isVolume ? "volume" : mount.type
             Name = mount.volumeName
-            Source = mount.source
+            Source = mount.inspectionSource
             Destination = mount.target
             Driver = isVolume ? "local" : ""
             Mode = mount.readOnly ? "ro" : "rw"
@@ -4645,7 +4684,7 @@ private struct InspectResponse: Content {
             Binds: container.mounts.filter { $0.type == "bind" }.map {
                 let mode = $0.readOnly ? "ro" : "rw"
                 let noCopy = $0.noCopy ? ",nocopy" : ""
-                return "\($0.volumeName ?? $0.source):\($0.target):\(mode)\(noCopy)"
+                return "\($0.volumeName ?? $0.inspectionSource):\($0.target):\(mode)\(noCopy)"
             }, PortBindings: ports, NetworkMode: container.networkMode,
             StopTimeout: container.stopTimeout,
             RestartPolicy: .init(container.restartPolicy), AutoRemove: container.autoRemove,

@@ -1723,6 +1723,15 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		if mounts[index].Type != "bind" {
 			continue
 		}
+		if input.Relay {
+			if !isDockerSocketRelayMount(input) {
+				return api.Container{}, errors.New("invalid Docker socket relay mount")
+			}
+			// The relay socket is created by the guest agent and is not part of
+			// the host directory exported through virtiofs. Keep its guest path
+			// unchanged instead of applying host-bind path translation.
+			continue
+		}
 		if isBuildkitStateVolume(input) {
 			source, err := buildkitStateVolumePath(input.VolumeName)
 			if err != nil {
@@ -2304,6 +2313,10 @@ func toOCIMounts(input []api.Mount) ([]specs.Mount, error) {
 		result = append(result, specs.Mount{Source: source, Destination: mount.Target, Type: mount.Type, Options: options})
 	}
 	return result, nil
+}
+
+func isDockerSocketRelayMount(mount api.Mount) bool {
+	return mount.Relay && mount.Type == "bind" && mount.Source == api.DockerSocketRelayPath
 }
 
 func isBuildkitStateVolume(mount api.Mount) bool {

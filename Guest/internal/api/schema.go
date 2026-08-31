@@ -4,6 +4,8 @@ import "time"
 
 const Version = "1"
 
+const DockerSocketRelayPath = "/run/glassdock/docker.sock"
+
 const (
 	MethodPing                    = "ping"
 	MethodVersion                 = "version"
@@ -51,7 +53,10 @@ const (
 	MethodNetworkPrune            = "network.prune"
 	MethodNetworkConnect          = "network.connect"
 	MethodNetworkDisconnect       = "network.disconnect"
+	MethodSocketRelay             = "socket.relay"
+	MethodSocketClose             = "socket.close"
 	EventContainerExit            = "container.exit"
+	EventSocketOpen               = "socket.open"
 )
 
 type ImagePullRequest struct {
@@ -308,6 +313,10 @@ type ContainerUpdateResponse struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+type SocketRelayRequest struct {
+	ID string `json:"id"`
+}
+
 // Mount maps directly to an OCI mount. Supported types are bind, tmpfs,
 // proc, sysfs, devpts, and mqueue. A bind mount requires an absolute source.
 type Mount struct {
@@ -316,6 +325,9 @@ type Mount struct {
 	Type     string   `json:"type"`
 	Readonly bool     `json:"readonly,omitempty"`
 	Options  []string `json:"options,omitempty"`
+	// Relay marks a daemon-created Docker socket mount. It is an internal
+	// control-plane field and is never accepted from the Docker API directly.
+	Relay bool `json:"relay,omitempty"`
 	// VolumeName is host-side identity metadata for a Docker named volume.
 	// The guest still realizes the mount as a bind mount at Source.
 	VolumeName string `json:"volumeName,omitempty"`
