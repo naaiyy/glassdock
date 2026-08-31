@@ -9,6 +9,31 @@ CLI, `jq`, ApacheBench, and macOS process tools. The harness uses direct Unix
 socket requests for API timing. It does not copy Dory's removed GPL benchmark
 code or require a general benchmark framework.
 
+## Comparability policy
+
+Three rules govern which result rows may be presented as comparative wins.
+Results that break a rule are diagnostic only and must carry the
+`diagnostic` marker from the output manifest.
+
+1. **Matched allocations.** Publish a footprint, storage, or CPU-sensitive row
+   as a win only when every compared product ran with the same declared CPU
+   count and VM memory. The default example configs declare 6 CPUs and 4 GiB
+   for external products and 6 CPUs and 1 GiB for Glass Dock; a campaign that
+   mixes these needs `--allow-unmatched-resources`, and its footprint rows are
+   diagnostic. To publish comparative footprint rows, rerun Glass Dock with
+   `--cpus 6 --memory-mib 4096` or lower every product to the same allocation,
+   and record the allocation in the published table.
+2. **Same lifecycle phase for footprint samples.** Cold idle footprint is
+   captured after the guest VM has finished booting, both image fixtures are
+   pulled, and the native-architecture verification container has run — the
+   same steady state for every product. A footprint captured during boot
+   underestimates a lazily-faulting VMM and overstates the gap against a fully
+   booted engine.
+3. **Verified PID coverage.** A product's measured set must contain at least
+   one process that hosts its VM. The harness prints each product's owned PIDs
+   with the result; review them before publishing. A footprint set with zero
+   VM-hosting processes produces an invalid row.
+
 ## Measurement policy
 
 - Use pinned native `linux/arm64` Alpine and NGINX image digests.
