@@ -261,6 +261,14 @@ func writeError(w *protocol.Writer, id uint64, code string, err error) error {
 	return w.Write(protocol.Envelope{ID: id, Kind: protocol.KindResponse, Error: &protocol.Error{Code: code, Message: err.Error()}})
 }
 
+func containerResourceErrorCode(err error) string {
+	var resourceError *backend.ResourceLimitError
+	if errors.As(err, &resourceError) {
+		return "invalid_argument"
+	}
+	return "containerd"
+}
+
 func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *protocol.Writer, input <-chan []byte) {
 	fail := func(code string, err error) { _ = writeError(w, request.ID, code, err) }
 	switch request.Method {
@@ -655,7 +663,7 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		item, err := s.backend.Create(ctx, body)
 		if err != nil {
-			fail("containerd", err)
+			fail(containerResourceErrorCode(err), err)
 			return
 		}
 		_ = writePayload(w, request.ID, api.ContainerResponse{Container: item})
@@ -768,7 +776,7 @@ func (s *Server) handle(ctx context.Context, request protocol.Envelope, w *proto
 		}
 		warnings, err := s.backend.UpdateContainer(ctx, body)
 		if err != nil {
-			fail("containerd", err)
+			fail(containerResourceErrorCode(err), err)
 			return
 		}
 		syscall.Sync()

@@ -17,4 +17,17 @@ struct GuestRuntimePayloadTests {
 
         #expect(payload != nil)
     }
+
+    @Test("invalid guest resource errors map to Docker bad requests")
+    func invalidResourceErrorMapsToBadRequest() {
+        let error = GuestProtocolError(
+            code: "invalid_argument",
+            message: "MemorySwap must be greater than or equal to Memory"
+        )
+
+        #expect(
+            GuestRuntime.routeError(for: error)
+                == .invalidRequest("MemorySwap must be greater than or equal to Memory")
+        )
+    }
 }

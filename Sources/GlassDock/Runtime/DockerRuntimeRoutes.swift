@@ -759,6 +759,58 @@ struct DockerRuntimeResources: Codable, Sendable, Equatable {
             pidsLimit: try container.decodeIfPresent(Int64.self, forKey: .pidsLimit) ?? 0
         )
     }
+
+    func validateForCreate() throws {
+        guard memory >= 0 else {
+            throw Abort(.badRequest, reason: "Memory must be non-negative")
+        }
+        guard memorySwap >= -1 else {
+            throw Abort(.badRequest, reason: "MemorySwap must be -1 or non-negative")
+        }
+        guard memoryReservation >= 0 else {
+            throw Abort(.badRequest, reason: "MemoryReservation must be non-negative")
+        }
+        guard nanoCPUs >= 0 else {
+            throw Abort(.badRequest, reason: "NanoCpus must be non-negative")
+        }
+        guard cpuShares == 0 || (2...262_144).contains(cpuShares) else {
+            throw Abort(.badRequest, reason: "CpuShares must be 0 or between 2 and 262144")
+        }
+        guard cpuPeriod == 0 || (1_000...1_000_000).contains(cpuPeriod) else {
+            throw Abort(.badRequest, reason: "CpuPeriod must be between 1000 and 1000000")
+        }
+        guard cpuQuota >= -1 else {
+            throw Abort(.badRequest, reason: "CpuQuota must be -1 or non-negative")
+        }
+        guard pidsLimit >= -1 else {
+            throw Abort(.badRequest, reason: "PidsLimit must be -1 or non-negative")
+        }
+        guard memorySwap == 0 || memory > 0 else {
+            throw Abort(.badRequest, reason: "MemorySwap requires Memory")
+        }
+        guard memorySwap <= 0 || memorySwap >= memory else {
+            throw Abort(.badRequest, reason: "MemorySwap must be greater than or equal to Memory")
+        }
+        guard memoryReservation <= memory else {
+            throw Abort(.badRequest, reason: "MemoryReservation must be less than or equal to Memory")
+        }
+        guard memorySwap != 0 || memory <= Int64.max / 2 else {
+            throw Abort(.badRequest, reason: "Memory is too large to calculate the default MemorySwap")
+        }
+        guard nanoCPUs == 0 || (cpuPeriod == 0 && cpuQuota == 0) else {
+            throw Abort(.badRequest, reason: "NanoCpus cannot be combined with CpuPeriod or CpuQuota")
+        }
+    }
+
+    func applyingDockerDefaults() -> Self {
+        guard memory > 0, memorySwap == 0, memory <= Int64.max / 2 else { return self }
+        return Self(
+            memory: memory, memorySwap: memory * 2, memoryReservation: memoryReservation,
+            nanoCPUs: nanoCPUs, cpuShares: cpuShares, cpuPeriod: cpuPeriod,
+            cpuQuota: cpuQuota, cpusetCpus: cpusetCpus, cpusetMems: cpusetMems,
+            pidsLimit: pidsLimit
+        )
+    }
 }
 
 struct DockerRuntimeContainerCreate: Sendable, Equatable {
@@ -977,8 +1029,8 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
     static let supportedDockerFields = Set(CodingKeys.allCases.map(\.stringValue))
 
     func validate() throws {
-        if let cpuShares, cpuShares < 0 {
-            throw DockerRuntimeRouteError.invalidRequest("CpuShares must be non-negative")
+        if let cpuShares, cpuShares < 0 || cpuShares > 0 && !(2...262_144).contains(cpuShares) {
+            throw DockerRuntimeRouteError.invalidRequest("CpuShares must be 0 or between 2 and 262144")
         }
         if let nanoCPUs, nanoCPUs < 0 {
             throw DockerRuntimeRouteError.invalidRequest("NanoCpus must be non-negative")
@@ -992,14 +1044,36 @@ struct DockerRuntimeContainerUpdate: Decodable, Sendable, Equatable {
         if let memoryReservation, memoryReservation < 0 {
             throw DockerRuntimeRouteError.invalidRequest("MemoryReservation must be non-negative")
         }
-        if let cpuPeriod, cpuPeriod < 0 {
-            throw DockerRuntimeRouteError.invalidRequest("CpuPeriod must be non-negative")
+        if let cpuPeriod, cpuPeriod < 0 || cpuPeriod > 0 && !(1_000...1_000_000).contains(cpuPeriod) {
+            throw DockerRuntimeRouteError.invalidRequest("CpuPeriod must be between 1000 and 1000000")
         }
         if let cpuQuota, cpuQuota < -1 {
             throw DockerRuntimeRouteError.invalidRequest("CpuQuota must be -1 or non-negative")
         }
         if let pidsLimit, pidsLimit < -1 {
             throw DockerRuntimeRouteError.invalidRequest("PidsLimit must be -1 or non-negative")
+        }
+        if let memory, let memorySwap {
+            if memorySwap != 0 && memory == 0 {
+                throw DockerRuntimeRouteError.invalidRequest("MemorySwap requires Memory")
+            }
+            if memorySwap > 0 && memorySwap < memory {
+                throw DockerRuntimeRouteError.invalidRequest(
+                    "MemorySwap must be greater than or equal to Memory"
+                )
+            }
+        }
+        if let memory, let memoryReservation, memoryReservation > memory {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "MemoryReservation must be less than or equal to Memory"
+            )
+        }
+        if let nanoCPUs, nanoCPUs > 0,
+            cpuPeriod.map({ $0 != 0 }) == true || cpuQuota.map({ $0 != 0 }) == true
+        {
+            throw DockerRuntimeRouteError.invalidRequest(
+                "NanoCpus cannot be combined with CpuPeriod or CpuQuota"
+            )
         }
         if let restartPolicy, !["", "no", "always", "unless-stopped", "on-failure"].contains(restartPolicy.name) {
             throw DockerRuntimeRouteError.invalidRequest(
@@ -1442,7 +1516,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             DockerRootDir: GlassDockDirectories.engineStateDirectory.path,
             Plugins: PluginsInfo(),
             MemoryLimit: true,
-            SwapLimit: false,
+            SwapLimit: true,
             CpuCfsPeriod: true,
             CpuCfsQuota: true,
             CPUShares: true,
@@ -1466,7 +1540,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             ServerVersion: getBuildVersion(),
             IndexServerAddress: "https://index.docker.io/v1/",
             LoggingDriver: "json-file",
-            CgroupDriver: "none",
+            CgroupDriver: "cgroupfs",
             CgroupVersion: "2",
             SecurityOptions: ["name=seccomp,profile=default"],
             ProductLicense: "Apache-2.0",
@@ -1711,6 +1785,7 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid container create request: \(error)")
         }
         guard !body.Image.isEmpty else { throw Abort(.badRequest, reason: "No image specified") }
+        try Self.resources(body.HostConfig).validateForCreate()
         let image = try await call { try await backend.inspectImage(reference: body.Image) }
         let resolvedMounts = try await mounts(from: body.HostConfig)
         var mounts = resolvedMounts.mounts
@@ -2915,7 +2990,11 @@ struct DockerRuntimeRoutes: RouteCollection {
         } catch let abort as Abort {
             throw abort
         } catch let error as DockerRuntimeRouteError {
-            throw error
+            switch error {
+            case .notFound(let message): throw Abort(.notFound, reason: message)
+            case .conflict(let message): throw Abort(.conflict, reason: message)
+            case .invalidRequest(let message): throw Abort(.badRequest, reason: message)
+            }
         } catch {
             throw Abort(.badRequest, reason: "Invalid container update request: \(error)")
         }
@@ -3805,18 +3884,12 @@ struct DockerRuntimeRoutes: RouteCollection {
             cpusetCpus: host.CpusetCpus ?? "",
             cpusetMems: host.CpusetMems ?? "",
             pidsLimit: host.PidsLimit ?? 0
-        )
+        ).applyingDockerDefaults()
     }
 
     private static func validateCreateRequest(_ request: DockerRuntimeContainerCreate) throws {
         let resources = request.resources
-        guard resources.memory >= 0, resources.memorySwap >= -1,
-            resources.memoryReservation >= 0, resources.nanoCPUs >= 0,
-            resources.cpuShares >= 0, resources.cpuPeriod >= 0,
-            resources.cpuQuota >= -1, resources.pidsLimit >= -1
-        else {
-            throw Abort(.badRequest, reason: "Container resource limits must be valid non-negative values")
-        }
+        try resources.validateForCreate()
         guard
             ["", "no", "always", "unless-stopped", "on-failure"].contains(
                 request.restartPolicy.name.lowercased()

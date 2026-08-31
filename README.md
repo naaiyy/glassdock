@@ -256,7 +256,13 @@ and a 1 GiB configured memory ceiling. Use `--cpus <count>` and
 `--memory-mib <MiB>` to set the VM resources when you start Glass Dock. The VMM
 reclaims guest pages through the virtio balloon device, so configured memory
 and physical footprint are separate measurements. Docker per-container CPU and
-memory limits are not implemented.
+memory controls are applied inside the guest's cgroup v2 hierarchy. This
+includes `--cpus`, `--cpu-shares`, `--cpuset-cpus`, `--memory`,
+`--memory-swap`, `--memory-reservation`, `--cpuset-mems`, and `--pids-limit`.
+`MemorySwap=0` follows Docker's default of twice the memory limit, while
+`MemorySwap=-1` means unlimited swap. Create and update fail with HTTP 400 if
+the requested combination is invalid or the guest cannot delegate a required
+cgroup controller.
 
 ---
 
@@ -437,6 +443,9 @@ machines.
 - Privileged containers receive OCI capabilities and a guest cgroup mount for
   nested tools such as BuildKit. The privilege is scoped to the Linux guest;
   it does not expose macOS host capabilities or devices.
+- Per-container CPU, memory, swap, reservation, cpuset, and PID limits use the
+  guest cgroup v2 hierarchy. Glass Dock rejects invalid combinations and does
+  not silently drop a limit when a required controller is unavailable.
 - Bind-mounting the Docker socket into a container is not implemented.
 - The VMM exports the host home directory to the trusted guest so it can serve
   arbitrary Docker bind requests. Containers receive only their requested bind
