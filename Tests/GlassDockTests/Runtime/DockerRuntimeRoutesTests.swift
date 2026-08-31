@@ -1298,6 +1298,91 @@ struct DockerRuntimeRoutesTests {
         #expect(create.resources.memory == 1_048_576)
     }
 
+    @Test("container create forwards all resource limits")
+    func createResourceLimits() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string:
+                        #"{"Image":"fixture","HostConfig":{"Memory":268435456,"MemorySwap":-1,"MemoryReservation":134217728,"NanoCpus":500000000,"CpuShares":512,"CpusetCpus":"0","CpusetMems":"0","PidsLimit":64}}"#
+                )
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let resources = try #require(await backend.lastCreate?.resources)
+        #expect(resources.memory == 268_435_456)
+        #expect(resources.memorySwap == -1)
+        #expect(resources.memoryReservation == 134_217_728)
+        #expect(resources.nanoCPUs == 500_000_000)
+        #expect(resources.cpuShares == 512)
+        #expect(resources.cpusetCpus == "0")
+        #expect(resources.cpusetMems == "0")
+        #expect(resources.pidsLimit == 64)
+    }
+
+    @Test("container create applies Docker's default memory swap")
+    func createResourceLimitsApplyDefaultSwap() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture","HostConfig":{"Memory":1048576}}"#
+                )
+            ) { response async in
+                #expect(response.status == .created)
+            }
+        }
+
+        let resources = try #require(await backend.lastCreate?.resources)
+        #expect(resources.memory == 1_048_576)
+        #expect(resources.memorySwap == 2_097_152)
+    }
+
+    @Test("container create rejects memory swap below memory before backend creation")
+    func createRejectsInvalidMemorySwap() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/containers/create",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(
+                    string: #"{"Image":"fixture","HostConfig":{"Memory":100,"MemorySwap":99}}"#
+                )
+            ) { response async throws in
+                #expect(response.status == .badRequest)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let message = value?["message"] as? String
+                #expect(message?.localizedCaseInsensitiveContains("MemorySwap") == true)
+            }
+        }
+        #expect(await backend.lastCreate == nil)
+    }
+
+    @Test("container update rejects memory swap below memory before backend update")
+    func updateRejectsInvalidMemorySwap() async throws {
+        let backend = DockerRuntimeBackendMock()
+        try await withRuntimeRoutes(backend) { app in
+            try await app.testing().test(
+                .POST, "/v1.51/containers/container-1/update",
+                headers: ["Content-Type": "application/json"],
+                body: ByteBuffer(string: #"{"Memory":100,"MemorySwap":99}"#)
+            ) { response async throws in
+                #expect(response.status == .badRequest)
+                let value = try JSONSerialization.jsonObject(with: Data(buffer: response.body)) as? [String: Any]
+                let message = value?["message"] as? String
+                #expect(message?.localizedCaseInsensitiveContains("MemorySwap") == true)
+            }
+        }
+        #expect(await backend.updates.isEmpty)
+    }
+
     @Test("image import forwards archives to the guest runtime")
     func imageImport() async throws {
         let backend = DockerRuntimeBackendMock()
@@ -1344,6 +1429,7 @@ func withRuntimeRoutes(
     test: @escaping (Application) async throws -> Void
 ) async throws {
     try await withApp(configure: { _ in }) { app in
+        app.middleware.use(DockerErrorMiddleware(), at: .beginning)
         let router = app.regexRouter(with: app.logger)
         app.setRegexRouter(router)
         if let broadcaster {

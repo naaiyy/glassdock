@@ -87,6 +87,7 @@ type Backend struct {
 	metadataMu          sync.Mutex
 	statsMu             sync.Mutex
 	lastStats           map[string]api.ContainerStatsResponse
+	cgroupRoot          string
 	imageDirectoryCache sync.Map
 	imageDirectoryWork  sync.Map
 	imageConfigCache    sync.Map
@@ -483,8 +484,9 @@ func New(address, namespace, snapshotter, runtimeName, runtimeBinary string) (*B
 	return &Backend{
 		client: client, namespace: namespace, snapshotter: snapshotter,
 		runtime: runtimeName, runtimeBinary: runtimeBinary,
-		logsDir: "/var/lib/containerd/io.glassdock.logs",
-		network: NewNetworkManager(commandRunner{}), taskCreates: make(chan struct{}, maxConcurrentTaskCreations),
+		cgroupRoot: defaultCgroupRoot,
+		logsDir:    "/var/lib/containerd/io.glassdock.logs",
+		network:    NewNetworkManager(commandRunner{}), taskCreates: make(chan struct{}, maxConcurrentTaskCreations),
 		healthStops: make(map[string]chan struct{}),
 	}, nil
 }
@@ -1551,6 +1553,20 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 	if request.ID == "" || request.Image == "" {
 		return api.Container{}, errors.New("id and image are required")
 	}
+	normalizedResources, err := normalizeDockerResources(request.Resources)
+	if err != nil {
+		return api.Container{}, err
+	}
+	request.Resources = normalizedResources
+	mappedResources, hasResources, err := mapNormalizedResources(normalizedResources)
+	if err != nil {
+		return api.Container{}, err
+	}
+	if hasResources {
+		if err := b.ensureResourceControllers(mappedResources); err != nil {
+			return api.Container{}, err
+		}
+	}
 	// Private network cleanup is serialized by NetworkManager and each
 	// container owns a distinct namespace. Keep the previous deletion off the
 	// create critical path so image and snapshot work can start immediately.
@@ -1875,6 +1891,9 @@ func (b *Backend) Create(ctx context.Context, request api.ContainerCreateRequest
 		if snapshotCreated {
 			_ = b.client.SnapshotService(snapshotter).Remove(ctx, request.ID)
 		}
+		if hasResources && strings.Contains(strings.ToLower(err.Error()), "cgroup") {
+			return api.Container{}, wrapResourceApplicationError(err)
+		}
 		return api.Container{}, err
 	}
 	record := &containerRecord{
@@ -1946,10 +1965,13 @@ func resolveImageProcessArgs(imageEntrypoint, imageCmd []string, entrypoint, cmd
 }
 
 func initialResourceOpt(request api.Resources) oci.SpecOpts {
-	if request.Memory == 0 && request.MemorySwap == 0 && request.MemoryReservation == 0 &&
-		request.NanoCPUs == 0 &&
-		request.CPUShares == 0 && request.CPUPeriod == 0 && request.CPUQuota == 0 &&
-		request.CPUSetCPUs == "" && request.CPUSetMems == "" && request.PidsLimit == 0 {
+	resources, hasResources, err := mapDockerResources(request)
+	if err != nil {
+		return func(context.Context, oci.Client, *containerrecords.Container, *oci.Spec) error {
+			return err
+		}
+	}
+	if !hasResources {
 		return nil
 	}
 	return func(_ context.Context, _ oci.Client, _ *containerrecords.Container, spec *oci.Spec) error {
@@ -1959,59 +1981,14 @@ func initialResourceOpt(request api.Resources) oci.SpecOpts {
 		if spec.Linux.Resources == nil {
 			spec.Linux.Resources = &specs.LinuxResources{}
 		}
-		resources := spec.Linux.Resources
-		if request.NanoCPUs != 0 || request.CPUShares != 0 || request.CPUPeriod != 0 || request.CPUQuota != 0 ||
-			request.CPUSetCPUs != "" || request.CPUSetMems != "" {
-			if resources.CPU == nil {
-				resources.CPU = &specs.LinuxCPU{}
-			}
-			if request.CPUShares != 0 {
-				value := uint64(request.CPUShares)
-				resources.CPU.Shares = &value
-			}
-			if request.NanoCPUs != 0 && request.CPUQuota == 0 {
-				period := uint64(100000)
-				if request.CPUPeriod != 0 {
-					period = uint64(request.CPUPeriod)
-				}
-				resources.CPU.Period = &period
-				quota := nanoCPUQuota(request.NanoCPUs, period)
-				resources.CPU.Quota = &quota
-			}
-			if request.CPUPeriod != 0 {
-				value := uint64(request.CPUPeriod)
-				resources.CPU.Period = &value
-			}
-			if request.CPUQuota != 0 {
-				value := request.CPUQuota
-				resources.CPU.Quota = &value
-			}
-			if request.CPUSetCPUs != "" {
-				resources.CPU.Cpus = request.CPUSetCPUs
-			}
-			if request.CPUSetMems != "" {
-				resources.CPU.Mems = request.CPUSetMems
-			}
+		if resources.CPU != nil {
+			spec.Linux.Resources.CPU = resources.CPU
 		}
-		if request.Memory != 0 || request.MemorySwap != 0 || request.MemoryReservation != 0 {
-			if resources.Memory == nil {
-				resources.Memory = &specs.LinuxMemory{}
-			}
-			if request.Memory != 0 {
-				value := request.Memory
-				resources.Memory.Limit = &value
-			}
-			if request.MemorySwap != 0 {
-				value := request.MemorySwap
-				resources.Memory.Swap = &value
-			}
-			if request.MemoryReservation != 0 {
-				value := request.MemoryReservation
-				resources.Memory.Reservation = &value
-			}
+		if resources.Memory != nil {
+			spec.Linux.Resources.Memory = resources.Memory
 		}
-		if request.PidsLimit != 0 {
-			resources.Pids = &specs.LinuxPids{Limit: request.PidsLimit}
+		if resources.Pids != nil {
+			spec.Linux.Resources.Pids = resources.Pids
 		}
 		return nil
 	}
@@ -2177,8 +2154,32 @@ func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpda
 		}
 	}
 
-	resources, hasResources := containerUpdateResources(request)
+	hasResources := resourceUpdateRequested(request)
 	if hasResources {
+		info, err := record.container.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+		metadata := decodeRuntimeMetadata(info.Labels)
+		spec, err := record.container.Spec(ctx)
+		if err != nil {
+			return nil, err
+		}
+		previousResources := metadata.Resources
+		if previousResources == (api.Resources{}) && spec.Linux != nil {
+			previousResources = resourcesFromOCISpec(spec.Linux.Resources)
+		}
+		mergedResources, err := mergeDockerResourceUpdate(previousResources, request)
+		if err != nil {
+			return nil, err
+		}
+		resources, _, err := mapDockerResourceUpdate(previousResources, request)
+		if err != nil {
+			return nil, err
+		}
+		if err := b.ensureResourceControllers(resources); err != nil {
+			return nil, err
+		}
 		task, _, _ := record.taskState()
 		if task == nil {
 			loadedTask, err := record.container.Task(ctx, nil)
@@ -2196,16 +2197,12 @@ func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpda
 			}
 			if err == nil && status.Status != containerd.Stopped {
 				if err := task.Update(ctx, containerd.WithResources(resources)); err != nil {
-					return nil, err
+					return nil, wrapResourceApplicationError(err)
 				}
 			}
 		}
 
-		spec, err := record.container.Spec(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if err := applyContainerUpdateToSpec(spec, request); err != nil {
+		if err := applyMappedResourceUpdate(spec, request, resources); err != nil {
 			return nil, err
 		}
 		encoded, err := typeurl.MarshalAny(spec)
@@ -2221,6 +2218,11 @@ func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpda
 			return nil, err
 		}
 		record.setSpec(spec)
+		if err := b.updateRuntimeMetadata(ctx, record.container, func(metadata *api.ContainerMetadata) {
+			metadata.Resources = mergedResources
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if request.RestartPolicy != nil {
 		if err := b.updateRuntimeMetadata(ctx, record.container, func(metadata *api.ContainerMetadata) {
@@ -2229,106 +2231,13 @@ func (b *Backend) UpdateContainer(ctx context.Context, request api.ContainerUpda
 			return nil, err
 		}
 	}
-	if hasResources {
-		if err := b.updateRuntimeMetadata(ctx, record.container, func(metadata *api.ContainerMetadata) {
-			resources := metadata.Resources
-			if request.NanoCPUs != nil {
-				resources.NanoCPUs = *request.NanoCPUs
-			}
-			if request.Memory != nil {
-				resources.Memory = *request.Memory
-			}
-			if request.MemorySwap != nil {
-				resources.MemorySwap = *request.MemorySwap
-			}
-			if request.MemoryReservation != nil {
-				resources.MemoryReservation = *request.MemoryReservation
-			}
-			if request.CPUShares != nil {
-				resources.CPUShares = int64(*request.CPUShares)
-			}
-			if request.CPUPeriod != nil {
-				resources.CPUPeriod = int64(*request.CPUPeriod)
-			}
-			if request.CPUQuota != nil {
-				resources.CPUQuota = *request.CPUQuota
-			}
-			if request.CPUSetCPUs != nil {
-				resources.CPUSetCPUs = *request.CPUSetCPUs
-			}
-			if request.CPUSetMems != nil {
-				resources.CPUSetMems = *request.CPUSetMems
-			}
-			if request.PidsLimit != nil {
-				resources.PidsLimit = *request.PidsLimit
-			}
-			metadata.Resources = resources
-		}); err != nil {
-			return nil, err
-		}
-	}
 	return []string{}, nil
 }
 
 func containerUpdateResources(request api.ContainerUpdateRequest) (*specs.LinuxResources, bool) {
-	resources := &specs.LinuxResources{}
-	hasResources := false
-
-	if request.NanoCPUs != nil || request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
-		request.CPUSetCPUs != nil || request.CPUSetMems != nil {
-		cpu := &specs.LinuxCPU{}
-		if request.NanoCPUs != nil && request.CPUQuota == nil {
-			period := uint64(100000)
-			if request.CPUPeriod != nil {
-				period = *request.CPUPeriod
-			}
-			cpu.Period = &period
-			quota := nanoCPUQuota(*request.NanoCPUs, period)
-			cpu.Quota = &quota
-		}
-		if request.CPUShares != nil {
-			value := *request.CPUShares
-			cpu.Shares = &value
-		}
-		if request.CPUPeriod != nil {
-			value := *request.CPUPeriod
-			cpu.Period = &value
-		}
-		if request.CPUQuota != nil {
-			value := *request.CPUQuota
-			cpu.Quota = &value
-		}
-		if request.CPUSetCPUs != nil {
-			cpu.Cpus = *request.CPUSetCPUs
-		}
-		if request.CPUSetMems != nil {
-			cpu.Mems = *request.CPUSetMems
-		}
-		resources.CPU = cpu
-		hasResources = true
-	}
-
-	if request.Memory != nil || request.MemorySwap != nil || request.MemoryReservation != nil {
-		memory := &specs.LinuxMemory{}
-		if request.Memory != nil {
-			value := *request.Memory
-			memory.Limit = &value
-		}
-		if request.MemorySwap != nil {
-			value := *request.MemorySwap
-			memory.Swap = &value
-		}
-		if request.MemoryReservation != nil {
-			value := *request.MemoryReservation
-			memory.Reservation = &value
-		}
-		resources.Memory = memory
-		hasResources = true
-	}
-
-	if request.PidsLimit != nil {
-		resources.Pids = &specs.LinuxPids{Limit: *request.PidsLimit}
-		hasResources = true
+	resources, hasResources, err := mapDockerResourceUpdate(api.Resources{}, request)
+	if err != nil {
+		return nil, false
 	}
 	return resources, hasResources
 }
@@ -2337,72 +2246,15 @@ func applyContainerUpdateToSpec(spec *specs.Spec, request api.ContainerUpdateReq
 	if spec.Linux == nil {
 		return errors.New("container has no Linux resource specification")
 	}
-	if spec.Linux.Resources == nil {
-		spec.Linux.Resources = &specs.LinuxResources{}
+	previous := resourcesFromOCISpec(spec.Linux.Resources)
+	mapped, hasResources, err := mapDockerResourceUpdate(previous, request)
+	if err != nil {
+		return err
 	}
-	resources := spec.Linux.Resources
-
-	if request.NanoCPUs != nil || request.CPUShares != nil || request.CPUPeriod != nil || request.CPUQuota != nil ||
-		request.CPUSetCPUs != nil || request.CPUSetMems != nil {
-		if resources.CPU == nil {
-			resources.CPU = &specs.LinuxCPU{}
-		}
-		if request.CPUShares != nil {
-			value := *request.CPUShares
-			resources.CPU.Shares = &value
-		}
-		if request.NanoCPUs != nil && request.CPUQuota == nil {
-			period := uint64(100000)
-			if resources.CPU.Period != nil {
-				period = *resources.CPU.Period
-			} else if request.CPUPeriod != nil {
-				period = *request.CPUPeriod
-				resources.CPU.Period = &period
-			}
-			quota := nanoCPUQuota(*request.NanoCPUs, period)
-			resources.CPU.Quota = &quota
-		}
-		if request.CPUPeriod != nil {
-			value := *request.CPUPeriod
-			resources.CPU.Period = &value
-		}
-		if request.CPUQuota != nil {
-			value := *request.CPUQuota
-			resources.CPU.Quota = &value
-		}
-		if request.CPUSetCPUs != nil {
-			resources.CPU.Cpus = *request.CPUSetCPUs
-		}
-		if request.CPUSetMems != nil {
-			resources.CPU.Mems = *request.CPUSetMems
-		}
+	if !hasResources {
+		return nil
 	}
-
-	if request.Memory != nil || request.MemorySwap != nil || request.MemoryReservation != nil {
-		if resources.Memory == nil {
-			resources.Memory = &specs.LinuxMemory{}
-		}
-		if request.Memory != nil {
-			value := *request.Memory
-			resources.Memory.Limit = &value
-		}
-		if request.MemorySwap != nil {
-			value := *request.MemorySwap
-			resources.Memory.Swap = &value
-		}
-		if request.MemoryReservation != nil {
-			value := *request.MemoryReservation
-			resources.Memory.Reservation = &value
-		}
-	}
-
-	if request.PidsLimit != nil {
-		if resources.Pids == nil {
-			resources.Pids = &specs.LinuxPids{}
-		}
-		resources.Pids.Limit = *request.PidsLimit
-	}
-	return nil
+	return applyMappedResourceUpdate(spec, request, mapped)
 }
 
 func nanoCPUQuota(nanoCPUs int64, period uint64) int64 {

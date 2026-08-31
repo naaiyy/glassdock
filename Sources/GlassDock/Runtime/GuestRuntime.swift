@@ -1296,6 +1296,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
 
     func createContainer(_ request: DockerRuntimeContainerCreate) async throws -> DockerRuntimeContainer {
         let id = Self.makeID()
+        let resources = request.resources.applyingDockerDefaults()
         let containerName = request.name.map(Self.normalizedContainerName) ?? id
         if let name = request.name, !name.isEmpty {
             try ensureNameAvailable(name)
@@ -1378,7 +1379,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     "maximumRetryCount": .number(Double(request.restartPolicy.maximumRetryCount)),
                 ]),
                 "restartCount": .number(Double(request.restartCount)),
-                "resources": Self.resourcesJSON(request.resources),
+                "resources": Self.resourcesJSON(resources),
                 "networkMode": .string(request.networkMode),
             ]),
         ]
@@ -1404,7 +1405,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "maximumRetryCount": .number(Double(request.restartPolicy.maximumRetryCount)),
         ])
         payload["restartCount"] = .number(Double(request.restartCount))
-        payload["resources"] = Self.resourcesJSON(request.resources)
+        payload["resources"] = Self.resourcesJSON(resources)
         let response = try await self.request(
             "container.create",
             payload,
@@ -1445,7 +1446,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             healthcheck: request.healthcheck,
             restartPolicy: request.restartPolicy,
             restartCount: request.restartCount,
-            resources: request.resources,
+            resources: resources,
             stopSignal: request.stopSignal ?? "",
             networkMode: request.networkMode
         )
@@ -1505,10 +1506,26 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         }
         let response = try await request("container.update", payload)
         if var resources = metadata[resolved]?.resources {
+            let memorySwap: Int64
+            if let value = update.memorySwap {
+                memorySwap = value
+            } else if update.memory == 0 {
+                memorySwap = 0
+            } else {
+                memorySwap = resources.memorySwap
+            }
+            let memoryReservation: Int64
+            if let value = update.memoryReservation {
+                memoryReservation = value
+            } else if update.memory == 0 {
+                memoryReservation = 0
+            } else {
+                memoryReservation = resources.memoryReservation
+            }
             resources = DockerRuntimeResources(
                 memory: update.memory ?? resources.memory,
-                memorySwap: update.memorySwap ?? resources.memorySwap,
-                memoryReservation: update.memoryReservation ?? resources.memoryReservation,
+                memorySwap: memorySwap,
+                memoryReservation: memoryReservation,
                 nanoCPUs: update.nanoCPUs ?? resources.nanoCPUs,
                 cpuShares: update.cpuShares ?? resources.cpuShares,
                 cpuPeriod: update.cpuPeriod ?? resources.cpuPeriod,
@@ -1516,7 +1533,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 cpusetCpus: update.cpusetCpus ?? resources.cpusetCpus,
                 cpusetMems: update.cpusetMems ?? resources.cpusetMems,
                 pidsLimit: update.pidsLimit ?? resources.pidsLimit
-            )
+            ).applyingDockerDefaults()
             metadata[resolved]?.resources = resources
         }
         if let policy = update.restartPolicy {
@@ -2693,7 +2710,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         }
     }
 
-    private static func routeError(for error: GuestProtocolError) -> DockerRuntimeRouteError? {
+    static func routeError(for error: GuestProtocolError) -> DockerRuntimeRouteError? {
         let message = error.message
         let lowercased = message.lowercased()
         if error.code.contains("not_found") || lowercased.contains("not found")
