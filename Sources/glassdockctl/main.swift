@@ -187,6 +187,14 @@ private struct Migrate: AsyncParsableCommand {
         @Flag(help: "Print the migration plan without changing anything.")
         var dryRun = false
 
+        @Option(
+            help: ArgumentHelp(
+                "Migrate only items carrying this Docker label (\"key\" or \"key=value\").",
+                discussion: "Items without the label are skipped. Omit to migrate everything."
+            )
+        )
+        var filterLabel: String?
+
         @Flag(help: "Write the stable JSON migration report.")
         var json = false
 
@@ -198,7 +206,8 @@ private struct Migrate: AsyncParsableCommand {
                 includeNetworks: !skipNetworks,
                 includeContainers: !skipContainers,
                 includeStoppedContainers: !runningOnly,
-                dryRun: dryRun
+                dryRun: dryRun,
+                filterLabel: filterLabel
             )
             let engine = MigrationEngine(
                 options: options,

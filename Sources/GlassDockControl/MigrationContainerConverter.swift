@@ -161,6 +161,28 @@ public enum MigrationContainerConverter {
         return body
     }
 
+    /// True when the item's labels satisfy the migration label filter.
+    /// A nil filter accepts everything. A filter of "key" requires the key to
+    /// exist; "key=value" requires an exact match.
+    public static func matchesLabelFilter(
+        _ labels: [String: String]?, filter: String?
+    ) -> Bool {
+        guard let filter, !filter.isEmpty else { return true }
+        guard let labels else { return false }
+        let key: String
+        let expected: String?
+        if let separator = filter.firstIndex(of: "=") {
+            key = String(filter[..<separator])
+            expected = String(filter[filter.index(after: separator)...])
+        } else {
+            key = filter
+            expected = nil
+        }
+        guard let actual = labels[key] else { return false }
+        guard let expected else { return true }
+        return actual == expected
+    }
+
     /// Detects conflicting fixed host port bindings across the planned containers.
     public static func hostPortConflicts(
         inspects: [[String: Any]]
@@ -225,12 +247,20 @@ public enum MigrationContainerConverter {
 
     private static func isEmptyValue(_ value: Any) -> Bool {
         switch value {
+        case is NSNull:
+            return true
         case let strings as [String]:
             return strings.isEmpty
         case let string as String:
             return string.isEmpty
         case let numbers as [Any]:
             return numbers.isEmpty
+        case let number as Int:
+            return number == 0
+        case let number as Double:
+            return number == 0
+        case let flag as Bool:
+            return flag == false
         default:
             return false
         }

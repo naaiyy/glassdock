@@ -82,6 +82,7 @@ public struct MigrationEngine: Sendable {
     struct SourceImageSummary: Decodable {
         let Id: String
         let RepoTags: [String]?
+        let Labels: [String: String]?
     }
 
     struct SourceContainerSummary: Decodable {
@@ -90,11 +91,13 @@ public struct MigrationEngine: Sendable {
         let Image: String
         let Created: Int?
         let State: String?
+        let Labels: [String: String]?
     }
 
     struct SourceVolume: Decodable {
         let Name: String
         let Driver: String
+        let Labels: [String: String]?
     }
 
     struct SourceVolumeList: Decodable {
@@ -107,6 +110,7 @@ public struct MigrationEngine: Sendable {
         let Scope: String?
         let Internal: Bool?
         let Options: [String: String]?
+        let Labels: [String: String]?
     }
 
     struct CreateResponse: Decodable {
@@ -174,7 +178,10 @@ public struct MigrationEngine: Sendable {
 
         let images = try source.json([SourceImageSummary].self, "/images/json?all=1")
         var references = Set<String>()
-        for image in images {
+        for image in images
+        where MigrationContainerConverter.matchesLabelFilter(
+            image.Labels, filter: options.filterLabel
+        ) {
             for tag in image.RepoTags ?? [] where !tag.hasPrefix("<none>") {
                 references.insert(tag)
             }
@@ -183,6 +190,11 @@ public struct MigrationEngine: Sendable {
 
         let containers = try source.json([SourceContainerSummary].self, "/containers/json?all=1")
         inventory.containerNames = containers.compactMap { container in
+            guard
+                MigrationContainerConverter.matchesLabelFilter(
+                    container.Labels, filter: options.filterLabel
+                )
+            else { return nil }
             let name = container.Names?.first?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
             if name.isEmpty { return nil }
             if !options.includeStoppedContainers && container.State != "running" { return nil }
@@ -190,10 +202,18 @@ public struct MigrationEngine: Sendable {
         }.sorted()
 
         let volumes = try source.json(SourceVolumeList.self, "/volumes").Volumes ?? []
-        inventory.volumeNames = volumes.filter { $0.Driver == "local" }.map(\.Name).sorted()
+        inventory.volumeNames =
+            volumes
+            .filter { $0.Driver == "local" }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
+            .map(\.Name).sorted()
 
         let networks = try source.json([SourceNetwork].self, "/networks")
-        inventory.networkNames = networks.filter { isMigratableNetwork($0) }.map(\.Name).sorted()
+        inventory.networkNames =
+            networks
+            .filter { isMigratableNetwork($0) }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
+            .map(\.Name).sorted()
 
         return inventory
     }
@@ -325,7 +345,10 @@ public struct MigrationEngine: Sendable {
         from source: DockerClient, to target: DockerClient, report: inout MigrationReport
     ) throws {
         let volumes = (try? source.json(SourceVolumeList.self, "/volumes").Volumes ?? []) ?? []
-        let localVolumes = volumes.filter { $0.Driver == "local" }
+        let localVolumes =
+            volumes
+            .filter { $0.Driver == "local" }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
         let unsupported = volumes.filter { $0.Driver != "local" }
         for volume in unsupported {
             report.volumes.skipped.append(
@@ -381,9 +404,12 @@ public struct MigrationEngine: Sendable {
     func copyVolumeData(named name: String, from source: DockerClient, to target: DockerClient) throws {
         let docker = try resolveDockerCLI()
         let stagingURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glassdock-migrate-\(UUID().uuidString).tar")
+            .appendingPathComponent("glassdock-migrate-\(UUID().uuidString)")
+        let stagingTar = stagingURL.appendingPathExtension("tar")
+        let stagingTree = stagingURL.appendingPathComponent("root", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: stagingURL) }
 
+        // Export the volume contents from the source engine as a tar stream.
         try runDockerCLI(
             docker,
             arguments: [
@@ -391,18 +417,48 @@ public struct MigrationEngine: Sendable {
                 "-v", "\(name):/migrate:ro", options.helperImage,
                 "tar", "-cf", "-", "-C", "/migrate", ".",
             ],
-            stdoutDestination: .file(stagingURL),
+            stdoutDestination: .file(stagingTar),
             failure: MigrationError.volumeCopyFailed(volume: name, stage: "source export", message: "")
         )
 
+        // Extract on the host, then copy the tree into a helper container whose
+        // filesystem has the target volume mounted. This avoids exec stdin
+        // entirely: `docker cp` uses PUT /containers/{id}/archive.
+        try FileManager.default.createDirectory(at: stagingTree, withIntermediateDirectories: true)
+        try runDockerCLI(
+            "/usr/bin/tar",
+            arguments: ["-xf", stagingTar.path, "-C", stagingTree.path],
+            failure: MigrationError.volumeCopyFailed(volume: name, stage: "host extract", message: "")
+        )
+
+        let helperName = "glassdock-migrate-helper-\(UUID().uuidString.prefix(8))"
+        var helperStarted = false
+        defer {
+            if helperStarted {
+                try? runDockerCLI(
+                    docker,
+                    arguments: [
+                        "--host", "unix://\(target.socketPath)", "rm", "-f", helperName,
+                    ],
+                    failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
+                )
+            }
+        }
         try runDockerCLI(
             docker,
             arguments: [
-                "--host", "unix://\(target.socketPath)", "run", "--rm", "-i",
-                "-v", "\(name):/migrate", options.helperImage,
-                "tar", "-xf", "-", "-C", "/migrate",
+                "--host", "unix://\(target.socketPath)", "run", "-d",
+                "--name", helperName, options.helperImage,
+                "sleep", "3600",
             ],
-            stdinSource: .file(stagingURL),
+            failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
+        )
+        helperStarted = true
+        try runDockerCLI(
+            docker,
+            arguments: [
+                "--host", "unix://\(target.socketPath)", "cp", "\(stagingTree.path)/.", "\(helperName):/migrate",
+            ],
             failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
         )
     }
@@ -413,7 +469,10 @@ public struct MigrationEngine: Sendable {
         from source: DockerClient, to target: DockerClient, report: inout MigrationReport
     ) throws {
         let networks = (try? source.json([SourceNetwork].self, "/networks")) ?? []
-        let migratable = networks.filter(isMigratableNetwork)
+        let migratable =
+            networks
+            .filter(isMigratableNetwork)
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
         emit(.init(phase: .networks, detail: "Recreating \(migratable.count) user-defined networks."))
 
         for network in migratable {
@@ -464,6 +523,7 @@ public struct MigrationEngine: Sendable {
         let summaries = try source.json([SourceContainerSummary].self, "/containers/json?all=1")
         let planned =
             summaries
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
             .filter { options.includeStoppedContainers || $0.State == "running" }
             .sorted { ($0.Created ?? 0) < ($1.Created ?? 0) }
 
@@ -603,7 +663,7 @@ public struct MigrationEngine: Sendable {
         throw MigrationError.dockerCLIMissing(options.dockerCLI)
     }
 
-    enum StagingSource {
+    enum StagingDestination {
         case file(URL)
         case none
     }
@@ -611,21 +671,12 @@ public struct MigrationEngine: Sendable {
     func runDockerCLI(
         _ dockerPath: String,
         arguments: [String],
-        stdinSource: StagingSource = .none,
-        stdoutDestination: StagingSource = .none,
+        stdoutDestination: StagingDestination = .none,
         failure: @autoclosure () -> MigrationError
     ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: dockerPath)
         process.arguments = arguments
-
-        switch stdinSource {
-        case .file(let url):
-            let handle = try FileHandle(forReadingFrom: url)
-            process.standardInput = handle
-        case .none:
-            break
-        }
 
         switch stdoutDestination {
         case .file(let url):
