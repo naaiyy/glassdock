@@ -4,6 +4,7 @@ import GlassDockControl
 
 public enum MenuSection: String, Hashable, CaseIterable {
     case containers = "Containers"
+    case migrate = "Migrate"
     case system = "System"
 }
 
@@ -16,6 +17,11 @@ public final class MenuModel: ObservableObject {
     @Published public private(set) var isLoading = false
     @Published public private(set) var isLoadingContainerLog = false
     @Published public private(set) var didCopySupportReport = false
+    @Published public private(set) var migrationPlan: MigrationReport?
+    @Published public private(set) var migrationReport: MigrationReport?
+    @Published public private(set) var isPreparingMigrationPlan = false
+    @Published public private(set) var isMigrating = false
+    @Published public private(set) var migrationStatus: String?
     @Published public var selectedSection = MenuSection.containers
     @Published public var errorMessage: String?
 
@@ -96,5 +102,61 @@ public final class MenuModel: ObservableObject {
         didCopySupportReport = true
         try? await Task.sleep(for: .seconds(2))
         didCopySupportReport = false
+    }
+
+    // MARK: - Migration
+
+    /// Scans the source Docker engine and produces a dry-run migration plan
+    /// without writing to Glass Dock.
+    public func prepareMigrationPlan() async {
+        isPreparingMigrationPlan = true
+        defer { isPreparingMigrationPlan = false }
+        migrationPlan = nil
+        migrationReport = nil
+        errorMessage = nil
+        do {
+            let engine = MigrationEngine(
+                options: MigrationOptions(dryRun: true)
+            )
+            migrationPlan = try await engine.run()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Runs the real migration, streaming phase events into `migrationStatus`.
+    public func runMigration() async {
+        isMigrating = true
+        migrationStatus = nil
+        errorMessage = nil
+        defer {
+            isMigrating = false
+            migrationPlan = nil
+        }
+        do {
+            let engine = MigrationEngine { [weak self] event in
+                Task { @MainActor [weak self] in
+                    self?.migrationStatus = event.detail
+                }
+            }
+            migrationReport = try await engine.run()
+            await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Clears the finished migration surface.
+    public func resetMigration() {
+        migrationPlan = nil
+        migrationReport = nil
+        migrationStatus = nil
+        errorMessage = nil
+    }
+
+    public func copyMigrationReport() {
+        guard let text = migrationReport?.text() ?? migrationPlan?.text(), !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }

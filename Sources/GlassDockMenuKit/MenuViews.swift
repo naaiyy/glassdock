@@ -41,6 +41,8 @@ public struct StatusPopoverView: View {
                     switch model.selectedSection {
                     case .containers:
                         ContainersSurface(model: model)
+                    case .migrate:
+                        MigrateSurface(model: model)
                     case .system:
                         SystemSurface(model: model)
                     }
@@ -303,6 +305,208 @@ private struct ContainerLogSurface: View {
             return "No logs are available."
         }
         return text
+    }
+}
+
+struct MigrateSurface: View {
+    @ObservedObject var model: MenuModel
+    @State private var confirmMigration = false
+
+    init(model: MenuModel) {
+        self.model = model
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let error = model.errorMessage {
+                    ErrorBanner(message: error) { model.errorMessage = nil }
+                }
+
+                if model.isMigrating {
+                    migratingView
+                } else if let report = model.migrationReport {
+                    finishedView(report)
+                } else if let plan = model.migrationPlan {
+                    planView(plan)
+                } else {
+                    idleView
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .scrollIndicators(.automatic)
+    }
+
+    // MARK: Idle — explain the feature and offer the scan
+
+    private var idleView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Migrate from Docker")
+                .font(.headline)
+            Text(
+                "Copies images, named volumes, user-defined networks, and containers "
+                    + "from your local Docker engine into Glass Dock. Running containers "
+                    + "are recreated and started; their Docker counterparts are stopped."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            Button {
+                Task { await model.prepareMigrationPlan() }
+            } label: {
+                Label("Scan Docker", systemImage: "magnifyingglass")
+            }
+            .disabled(model.snapshot?.daemon.healthy != true || model.isPreparingMigrationPlan)
+            .accessibilityHint("Reads the Docker inventory and builds a migration plan")
+
+            if model.isPreparingMigrationPlan {
+                ProgressView("Scanning Docker…")
+                    .padding(.top, 4)
+            } else if model.snapshot?.daemon.healthy != true {
+                Text("Glass Dock must be running before you can migrate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Plan — confirm before anything is written
+
+    private func planView(_ plan: MigrationReport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Migration plan", systemImage: "list.clipboard")
+                .font(.headline)
+
+            if plan.inventory.isEmpty {
+                Text("Nothing to migrate — no images, volumes, networks, or containers were found on the Docker engine.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                InfoGrid(rows: planRows(plan))
+                if !plan.warnings.isEmpty {
+                    Text("\(plan.warnings.count) warning(s) — shown in the report after migration.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                HStack(spacing: 8) {
+                    Button("Migrate Now") { confirmMigration = true }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(plan.inventory.isEmpty)
+                    Button("Rescan") {
+                        Task { await model.prepareMigrationPlan() }
+                    }
+                    Button("Cancel") { model.resetMigration() }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .confirmationDialog(
+            "Migrate everything from Docker?",
+            isPresented: $confirmMigration,
+            titleVisibility: .visible
+        ) {
+            Button("Migrate \(plan.inventory.summaryLine)") {
+                Task { await model.runMigration() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Images, volumes, networks, and containers are copied into Glass Dock. "
+                    + "Running Docker containers are stopped. Docker itself is not modified."
+            )
+        }
+    }
+
+    // MARK: Running
+
+    private var migratingView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Migrating from Docker…")
+                .font(.headline)
+            ProgressView()
+                .progressViewStyle(.linear)
+            Text(model.migrationStatus ?? "Starting…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Text("Keep this window open until the migration finishes.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: Finished
+
+    private func finishedView(_ report: MigrationReport) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(
+                report.succeeded ? "Migration Complete" : "Migration Finished with Failures",
+                systemImage: report.succeeded ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(report.succeeded ? .green : .orange)
+            .font(.headline)
+
+            InfoGrid(rows: [
+                ("Images", statusSummary(report.images)),
+                ("Volumes", statusSummary(report.volumes)),
+                ("Networks", statusSummary(report.networks)),
+                ("Containers", statusSummary(report.containers)),
+            ])
+
+            if !report.warnings.isEmpty {
+                DisclosureGroup("Warnings (\(report.warnings.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, warning in
+                            Text("• \(warning)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+            }
+
+            if !report.succeeded, let first = report.containers.failed.first ?? report.images.failed.first {
+                Text(first.detail ?? "An item failed to migrate.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            HStack(spacing: 8) {
+                Button("Copy Report") { model.copyMigrationReport() }
+                Button("Done") {
+                    model.resetMigration()
+                    Task { await model.refresh() }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func statusSummary(_ category: MigrationCategoryReport) -> String {
+        var parts: [String] = []
+        if !category.migrated.isEmpty { parts.append("\(category.migrated.count) migrated") }
+        if !category.skipped.isEmpty { parts.append("\(category.skipped.count) skipped") }
+        if !category.failed.isEmpty { parts.append("\(category.failed.count) failed") }
+        return parts.isEmpty ? "None" : parts.joined(separator: ", ")
+    }
+
+    private func planRows(_ plan: MigrationReport) -> [(String, String)] {
+        [
+            ("Images", "\(plan.inventory.imageReferences.count)"),
+            ("Volumes", "\(plan.inventory.volumeNames.count)"),
+            ("Networks", "\(plan.inventory.networkNames.count)"),
+            ("Containers", "\(plan.inventory.containerNames.count)"),
+        ]
     }
 }
 

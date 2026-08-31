@@ -60,6 +60,7 @@ done
 for relative in \
     bin/glassdock \
     bin/glassdock-uninstall \
+    bin/glassdockctl \
     libexec/glassdock/glassdock \
     libexec/glassdock/glassdock-vmm \
     libexec/glassdock/libkrun.1.dylib \
