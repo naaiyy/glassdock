@@ -10,6 +10,9 @@ public struct MigrationOptions: Sendable, Equatable {
     public var dryRun: Bool
     public var helperImage: String
     public var dockerCLI: String
+    /// Migrate only items carrying this Docker label ("key" or "key=value").
+    /// When set, items without the label are skipped. nil migrates everything.
+    public var filterLabel: String?
 
     public init(
         sourceSocketPath: String? = nil,
@@ -20,7 +23,8 @@ public struct MigrationOptions: Sendable, Equatable {
         includeStoppedContainers: Bool = true,
         dryRun: Bool = false,
         helperImage: String = "busybox:1.37.0",
-        dockerCLI: String = "/usr/local/bin/docker"
+        dockerCLI: String = "/usr/local/bin/docker",
+        filterLabel: String? = nil
     ) {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.sourceSocketPath =
@@ -34,6 +38,7 @@ public struct MigrationOptions: Sendable, Equatable {
         self.dryRun = dryRun
         self.helperImage = helperImage
         self.dockerCLI = dockerCLI
+        self.filterLabel = filterLabel
     }
 }
 
