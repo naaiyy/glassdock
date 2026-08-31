@@ -47,6 +47,7 @@ struct DockerEventTests {
 
         #expect(event.Actor.Attributes["name"] == "ctr-abc")
         #expect(event.Actor.Attributes["image"] == "")
+        #expect(event.Actor.Attributes["container"] == "ctr-abc")
     }
 
     @Test("simpleEvent with no labels produces only image and name in Attributes")
@@ -59,7 +60,7 @@ struct DockerEventTests {
             name: "db"
         )
 
-        #expect(event.Actor.Attributes.keys.sorted() == ["image", "name"])
+        #expect(event.Actor.Attributes.keys.sorted() == ["container", "image", "name"])
     }
 
     @Test("simpleEvent Attributes contain labels plus image and name")
@@ -73,7 +74,7 @@ struct DockerEventTests {
             labels: ["app": "x", "env": "prod"]
         )
 
-        #expect(event.Actor.Attributes.keys.sorted() == ["app", "env", "image", "name"])
+        #expect(event.Actor.Attributes.keys.sorted() == ["app", "container", "env", "image", "name"])
     }
 
     @Test("Attributes encodes as flat JSON dictionary")
@@ -95,6 +96,97 @@ struct DockerEventTests {
         #expect(attributes?["app"] == "myapp")
         #expect(attributes?["image"] == "alpine")
         #expect(attributes?["name"] == "test")
+    }
+
+    @Test("every event encodes the Docker stream envelope")
+    func envelopeShape() throws {
+        let event = DockerEvent.make(
+            type: "network", action: "connect", actorID: "network-id",
+            attributes: ["name": "bridge", "type": "bridge"]
+        )
+        let json =
+            try JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(event)
+            ) as? [String: Any]
+
+        #expect(json?["Type"] as? String == "network")
+        #expect(json?["Action"] as? String == "connect")
+        #expect(json?["scope"] as? String == "local")
+        #expect(json?["time"] is Int)
+        #expect(json?["timeNano"] is Int)
+        #expect(json?["Actor"] != nil)
+    }
+
+    @Test("deprecated lowercase fields are omitted for non-container events")
+    func deprecatedFieldsAreTypeSpecific() throws {
+        let event = DockerEvent.make(
+            type: "volume", action: "mount", actorID: "data",
+            attributes: ["driver": "local"]
+        )
+        let json =
+            try JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(event)
+            ) as? [String: Any]
+
+        #expect(json?["status"] == nil)
+        #expect(json?["id"] == nil)
+        #expect(json?["from"] == nil)
+    }
+
+    @Test("container events include the id, image, name, and user labels")
+    func containerAttributesIncludeStandardFields() {
+        let id = String(repeating: "a", count: 64)
+        let event = DockerEvent.simpleEvent(
+            id: id, type: "container", status: "start", image: "alpine:latest",
+            name: "worker", labels: ["app": "demo"]
+        )
+
+        #expect(event.Actor.Attributes["container"] == String(id.prefix(12)))
+        #expect(event.Actor.Attributes["image"] == "alpine:latest")
+        #expect(event.Actor.Attributes["name"] == "worker")
+        #expect(event.Actor.Attributes["app"] == "demo")
+    }
+
+    @Test("lifecycle events use the Docker action taxonomy")
+    func lifecycleActionTaxonomy() {
+        let actions: [(String, String)] = [
+            ("container", "create"),
+            ("container", "start"),
+            ("container", "die"),
+            ("container", "stop"),
+            ("container", "destroy"),
+            ("container", "rename"),
+            ("container", "restart"),
+            ("container", "attach"),
+            ("container", "detach"),
+            ("container", "exec_create: /bin/sh"),
+            ("container", "exec_start: /bin/sh"),
+            ("container", "exec_die"),
+            ("container", "exec_detach"),
+            ("image", "pull"),
+            ("image", "tag"),
+            ("image", "untag"),
+            ("image", "delete"),
+            ("image", "load"),
+            ("image", "save"),
+            ("volume", "create"),
+            ("volume", "mount"),
+            ("volume", "unmount"),
+            ("volume", "destroy"),
+            ("network", "create"),
+            ("network", "connect"),
+            ("network", "disconnect"),
+            ("network", "destroy"),
+            ("daemon", "reload"),
+        ]
+
+        for (type, action) in actions {
+            let event = DockerEvent.make(
+                type: type, action: action, actorID: "resource-id", attributes: [:]
+            )
+            #expect(event.Type == type)
+            #expect(event.Action == action)
+        }
     }
 }
 

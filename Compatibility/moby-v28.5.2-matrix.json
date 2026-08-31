@@ -611,7 +611,7 @@
       ],
       "responseSchema": "#/definitions/EventMessage",
       "owner": "EventsRoute",
-      "note": "Persistent guest event stream with Docker event filtering."
+      "note": "Moby-shaped newline-delimited event stream with bounded history, all declared filters, lifecycle/action coverage, and disconnect-coupled subscriptions."
     },
     {
       "method": "GET",

@@ -1,4 +1,6 @@
 import Foundation
+import NIOCore
+import NIOPosix
 import Testing
 import Vapor
 import VaporTesting
@@ -19,6 +21,82 @@ struct EventsRouteFilterTests {
                 #expect(response.status == .ok)
                 #expect(response.body.getString(at: 0, length: response.body.readableBytes) == "\n")
             }
+        }
+    }
+
+    @Test("event stream writes newline-delimited JSON frames")
+    func streamWritesFramedEvents() async throws {
+        let broadcaster = EventBroadcaster()
+        let event = DockerEvent.simpleEvent(
+            id: String(repeating: "a", count: 64), type: "container", status: "start",
+            image: "alpine:latest", name: "worker", labels: ["app": "demo"]
+        )
+        await broadcaster.broadcast(event)
+
+        try await withApp(configure: { app in
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(collection: EventsRoute())
+        }) { app in
+            let until = Double(event.timeNano) / 1_000_000_000
+            try await app.testing().test(
+                .GET, "/v1.51/events?since=0&until=\(until)"
+            ) { response async throws in
+                #expect(response.status == .ok)
+                let lines = String(decoding: response.body.readableBytesView, as: UTF8.self)
+                    .split(whereSeparator: { $0 == "\n" })
+                #expect(lines.count == 1)
+                let frame =
+                    try JSONSerialization.jsonObject(
+                        with: Data(lines[0].utf8)
+                    ) as? [String: Any]
+                #expect(frame?["Action"] as? String == "start")
+                #expect(frame?["Type"] as? String == "container")
+            }
+        }
+    }
+
+    @Test("quiet event streams remove their subscriber after client disconnect")
+    func disconnectUnblocksQuietStream() async throws {
+        let socket = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("gd-events-\(UUID().uuidString.prefix(8)).sock")
+        defer { try? FileManager.default.removeItem(at: socket) }
+        let broadcaster = EventBroadcaster()
+
+        try await withApp(configure: { app in
+            app.environment.commandInput.arguments = ["serve"]
+            let regexRouter = app.regexRouter(with: app.logger)
+            app.setRegexRouter(regexRouter)
+            app.storage[EventBroadcasterKey.self] = broadcaster
+            try app.register(collection: EventsRoute())
+            app.http.server.configuration.address = .unixDomainSocket(path: socket.path)
+            app.http.server.configuration.serverName = nil
+        }) { app in
+            try await app.startup()
+            let channel = try await ClientBootstrap(group: app.eventLoopGroup)
+                .connect(to: SocketAddress(unixDomainSocketPath: socket.path))
+                .get()
+            var request = channel.allocator.buffer(capacity: 128)
+            request.writeString(
+                "GET /v1.51/events HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+            )
+            try await channel.writeAndFlush(request).get()
+
+            let connectedDeadline = Date().addingTimeInterval(2)
+            while await broadcaster.subscriberCount() == 0, Date() < connectedDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await broadcaster.subscriberCount() == 1)
+
+            try await channel.close().get()
+            let disconnectedDeadline = Date().addingTimeInterval(3)
+            while await broadcaster.subscriberCount() != 0,
+                Date() < disconnectedDeadline
+            {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(await broadcaster.subscriberCount() == 0)
         }
     }
 
@@ -88,6 +166,31 @@ struct EventsRouteFilterTests {
         #expect(matching.matches(event))
         #expect(try DockerEventFilter(#"{"type":["image"]}"#).matches(event) == false)
         #expect(try DockerEventFilter(#"{"label":["role=api"]}"#).matches(event) == false)
+    }
+
+    @Test("event filters accept qualified Docker actions")
+    func qualifiedEventFilter() throws {
+        let event = DockerEvent.simpleEvent(
+            id: "container-id", type: "container", status: "start", image: "alpine", name: "worker"
+        )
+
+        #expect(try DockerEventFilter(#"{"event":["container:start"]}"#).matches(event))
+        #expect(try DockerEventFilter(#"{"event":["container:stop"]}"#).matches(event) == false)
+    }
+
+    @Test("all Docker event resource filter keys are accepted")
+    func resourceFilterKeys() throws {
+        let keys = ["config", "node", "secret", "service"]
+        for key in keys {
+            let event = DockerEvent.make(
+                type: key, action: "create", actorID: "resource-id",
+                attributes: ["name": "resource-name"]
+            )
+            #expect(
+                try DockerEventFilter("{\"\(key)\":[\"resource-name\"]}").matches(event),
+                "filter key \(key) should match its event type"
+            )
+        }
     }
 
     @Test("legacy boolean-map filter encoding remains accepted")

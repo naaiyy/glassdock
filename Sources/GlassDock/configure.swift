@@ -33,6 +33,10 @@ func configure(
     let volumeClient = RuntimeVolumeService()
     let broadcaster = EventBroadcaster()
     app.storage[EventBroadcasterKey.self] = broadcaster
+    // A fresh daemon is a reload from Docker clients' point of view. Keep the
+    // event in the bounded journal so listeners that connect immediately after
+    // startup can observe the same daemon lifecycle transition.
+    await broadcaster.broadcast(DockerEvent.daemonReload())
     let engineStateDirectory = GlassDockDirectories.engineStateDirectory
     let engineDataDisk = engineStateDirectory.appendingPathComponent("data.ext4")
     let machineArtifacts = try RuntimeMachineArtifacts.locate()

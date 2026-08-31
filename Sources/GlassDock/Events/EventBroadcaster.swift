@@ -20,12 +20,42 @@ struct DockerEvent: Codable {
     let scope: String
     let time: Int
     let timeNano: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case status, id, from, `Type`, Action, Actor, scope, time, timeNano
+    }
+
+    /// Moby keeps the three lowercase fields for older container and image
+    /// clients only. They are `omitempty` fields in the Engine API, so volume,
+    /// network, daemon, and other event types must not acquire empty copies.
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        if Type == "container" || Type == "image" {
+            if !status.isEmpty { try values.encode(status, forKey: .status) }
+            if !id.isEmpty { try values.encode(id, forKey: .id) }
+            if Type == "container", !from.isEmpty {
+                try values.encode(from, forKey: .from)
+            }
+        }
+        try values.encode(Type, forKey: .Type)
+        try values.encode(Action, forKey: .Action)
+        try values.encode(Actor, forKey: .Actor)
+        try values.encode(scope, forKey: .scope)
+        try values.encode(time, forKey: .time)
+        try values.encode(timeNano, forKey: .timeNano)
+    }
 }
 
 extension DockerEvent {
+    static func daemonReload(name: String = ProcessInfo.processInfo.hostName) -> DockerEvent {
+        make(type: "daemon", action: "reload", actorID: name, attributes: ["name": name])
+    }
+
     /// General constructor mirroring moby's `EventsService.Log(action, type, Actor{ID, Attributes})`.
     /// The deprecated top-level fields are derived exactly as moby does for backward compatibility:
-    /// `id` = Actor.ID, `status` = action, `from` = Attributes["image"] (empty when absent).
+    /// `id` = Actor.ID, `status` = action, and a container's `from` is
+    /// `Attributes["image"]`. The encoder applies Moby's omitempty behavior
+    /// for the deprecated fields.
     /// Use this for image/network/volume/prune events, whose attribute sets differ from containers
     /// (e.g. no forced `image`/`name` keys).
     static func make(
@@ -68,6 +98,9 @@ extension DockerEvent {
         var attributes = labels
         attributes["image"] = image
         attributes["name"] = name.isEmpty ? id : name
+        if type == "container" {
+            attributes["container"] = String(id.prefix(12))
+        }
         for (key, value) in extraAttributes { attributes[key] = value }
         return make(type: type, action: status, actorID: id, attributes: attributes)
     }
@@ -88,6 +121,25 @@ extension DockerEvent {
             image: ContainerImageIdentity.requestedReference(for: container),
             name: name,
             labels: ContainerImageIdentity.dockerLabels(for: container),
+            extraAttributes: extraAttributes
+        )
+    }
+
+    static func containerEvent(
+        _ action: String,
+        id: String,
+        image: String,
+        name: String,
+        labels: [String: String],
+        extraAttributes: [String: String] = [:]
+    ) -> DockerEvent {
+        simpleEvent(
+            id: id,
+            type: "container",
+            status: action,
+            image: image,
+            name: name,
+            labels: labels,
             extraAttributes: extraAttributes
         )
     }
@@ -156,6 +208,10 @@ actor EventBroadcaster {
         for continuation in continuations.values {
             continuation.yield(event)
         }
+    }
+
+    func subscriberCount() -> Int {
+        continuations.count
     }
 
     private static func nowNanoseconds() -> UInt64 {
