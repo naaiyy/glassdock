@@ -404,9 +404,12 @@ public struct MigrationEngine: Sendable {
     func copyVolumeData(named name: String, from source: DockerClient, to target: DockerClient) throws {
         let docker = try resolveDockerCLI()
         let stagingURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glassdock-migrate-\(UUID().uuidString).tar")
+            .appendingPathComponent("glassdock-migrate-\(UUID().uuidString)")
+        let stagingTar = stagingURL.appendingPathExtension("tar")
+        let stagingTree = stagingURL.appendingPathComponent("root", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: stagingURL) }
 
+        // Export the volume contents from the source engine as a tar stream.
         try runDockerCLI(
             docker,
             arguments: [
@@ -414,18 +417,48 @@ public struct MigrationEngine: Sendable {
                 "-v", "\(name):/migrate:ro", options.helperImage,
                 "tar", "-cf", "-", "-C", "/migrate", ".",
             ],
-            stdoutDestination: .file(stagingURL),
+            stdoutDestination: .file(stagingTar),
             failure: MigrationError.volumeCopyFailed(volume: name, stage: "source export", message: "")
         )
 
+        // Extract on the host, then copy the tree into a helper container whose
+        // filesystem has the target volume mounted. This avoids exec stdin
+        // entirely: `docker cp` uses PUT /containers/{id}/archive.
+        try FileManager.default.createDirectory(at: stagingTree, withIntermediateDirectories: true)
+        try runDockerCLI(
+            "/usr/bin/tar",
+            arguments: ["-xf", stagingTar.path, "-C", stagingTree.path],
+            failure: MigrationError.volumeCopyFailed(volume: name, stage: "host extract", message: "")
+        )
+
+        let helperName = "glassdock-migrate-helper-\(UUID().uuidString.prefix(8))"
+        var helperStarted = false
+        defer {
+            if helperStarted {
+                try? runDockerCLI(
+                    docker,
+                    arguments: [
+                        "--host", "unix://\(target.socketPath)", "rm", "-f", helperName,
+                    ],
+                    failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
+                )
+            }
+        }
         try runDockerCLI(
             docker,
             arguments: [
-                "--host", "unix://\(target.socketPath)", "run", "--rm", "-i",
-                "-v", "\(name):/migrate", options.helperImage,
-                "tar", "-xf", "-", "-C", "/migrate",
+                "--host", "unix://\(target.socketPath)", "run", "-d",
+                "--name", helperName, options.helperImage,
+                "sleep", "3600",
             ],
-            stdinSource: .file(stagingURL),
+            failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
+        )
+        helperStarted = true
+        try runDockerCLI(
+            docker,
+            arguments: [
+                "--host", "unix://\(target.socketPath)", "cp", "\(stagingTree.path)/.", "\(helperName):/migrate",
+            ],
             failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
         )
     }
@@ -630,7 +663,7 @@ public struct MigrationEngine: Sendable {
         throw MigrationError.dockerCLIMissing(options.dockerCLI)
     }
 
-    enum StagingSource {
+    enum StagingDestination {
         case file(URL)
         case none
     }
@@ -638,21 +671,12 @@ public struct MigrationEngine: Sendable {
     func runDockerCLI(
         _ dockerPath: String,
         arguments: [String],
-        stdinSource: StagingSource = .none,
-        stdoutDestination: StagingSource = .none,
+        stdoutDestination: StagingDestination = .none,
         failure: @autoclosure () -> MigrationError
     ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: dockerPath)
         process.arguments = arguments
-
-        switch stdinSource {
-        case .file(let url):
-            let handle = try FileHandle(forReadingFrom: url)
-            process.standardInput = handle
-        case .none:
-            break
-        }
 
         switch stdoutDestination {
         case .file(let url):
