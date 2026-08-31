@@ -6,6 +6,39 @@ import ContainerResource
 /// Propagation has no equivalent on Apple Container and is reported as "" — the
 /// same value the inspect route uses.
 enum VolumeMountEvents {
+    static func broadcastMounts(
+        for mounts: [DockerRuntimeMount], containerId: String, broadcaster: EventBroadcaster
+    ) async {
+        for mount in mounts where mount.volumeName != nil {
+            guard let name = mount.volumeName, !name.isEmpty else { continue }
+            await broadcaster.broadcast(
+                DockerEvent.make(
+                    type: "volume", action: "mount", actorID: name,
+                    attributes: [
+                        "driver": "local",
+                        "container": containerId,
+                        "destination": mount.target,
+                        "read/write": String(!mount.readOnly),
+                        "propagation": "",
+                    ]))
+        }
+    }
+
+    static func broadcastUnmounts(
+        for mounts: [DockerRuntimeMount], containerId: String, broadcaster: EventBroadcaster
+    ) async {
+        for mount in mounts where mount.volumeName != nil {
+            guard let name = mount.volumeName, !name.isEmpty else { continue }
+            await broadcaster.broadcast(
+                DockerEvent.make(
+                    type: "volume", action: "unmount", actorID: name,
+                    attributes: [
+                        "driver": "local",
+                        "container": containerId,
+                    ]))
+        }
+    }
+
     static func broadcastMounts(for snapshot: ContainerSnapshot, containerId: String, broadcaster: EventBroadcaster) async {
         for mount in volumeMounts(in: snapshot) {
             guard case .volume(let name, _, _, _) = mount.type else { continue }

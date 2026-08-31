@@ -10,8 +10,8 @@ private struct EventsQuery: Content {
 
 struct DockerEventFilter: Sendable {
     private static let allowedKeys: Set<String> = [
-        "container", "daemon", "event", "image", "label", "network", "plugin",
-        "scope", "type", "volume",
+        "config", "container", "daemon", "event", "image", "label", "network", "node",
+        "plugin", "scope", "secret", "service", "type", "volume",
     ]
 
     let values: [String: [String]]
@@ -58,7 +58,12 @@ struct DockerEventFilter: Sendable {
                 let action =
                     event.Action.split(separator: ":", maxSplits: 1).first.map(String.init)
                     ?? event.Action
-                return expected.contains(event.Action) || expected.contains(action)
+                let qualified = "\(event.Type):\(event.Action)"
+                let qualifiedPrefix = "\(event.Type):\(action)"
+                return expected.contains {
+                    $0 == event.Action || $0 == action || $0 == qualified
+                        || $0 == qualifiedPrefix
+                }
             case "scope":
                 return expected.contains(event.scope)
             case "label":
@@ -69,7 +74,7 @@ struct DockerEventFilter: Sendable {
                 let image = event.Actor.Attributes["image"] ?? event.from
                 return expected.contains { Self.matchesImage($0, actual: image) }
                     || (event.Type == "image" && Self.matchesResource(event, expected: expected))
-            case "network", "volume", "plugin", "daemon":
+            case "config", "network", "node", "plugin", "secret", "service", "volume", "daemon":
                 return event.Type == key && Self.matchesResource(event, expected: expected)
             default:
                 return false
@@ -78,10 +83,14 @@ struct DockerEventFilter: Sendable {
     }
 
     private static func matchesResource(_ event: DockerEvent, expected: [String]) -> Bool {
-        let name = event.Actor.Attributes["name"]
+        let names = [
+            event.Actor.Attributes["name"],
+            event.Actor.Attributes["container"],
+        ].compactMap { $0 }
         return expected.contains { value in
             event.Actor.ID == value || event.Actor.ID.hasPrefix(value)
-                || name == value || name == DockerContainerMetadataStore.normalized(value)
+                || names.contains(value)
+                || names.contains(DockerContainerMetadataStore.normalized(value))
         }
     }
 
@@ -145,41 +154,38 @@ extension EventsRoute {
         let response = Response(status: .ok)
         response.headers.add(name: .contentType, value: "application/json")
 
-        response.body = .init(asyncStream: { writer in
-            // Flush the response head immediately. Docker CLI opens /events
-            // before starting no-argument commands such as `docker stats`;
-            // without an initial body write, Vapor waits for the first real
-            // event and the CLI never proceeds to the command's API calls.
-            // JSON decoders accept this newline as leading whitespace.
-            var preamble = req.application.allocator.buffer(capacity: 1)
-            preamble.writeString("\n")
+        response.body = .init(managedAsyncStream: { writer in
             do {
-                try await writer.write(.buffer(preamble))
-            } catch {
-                return
-            }
+                try await DisconnectCoupledResponseStream.run(writer: writer) { writer in
+                    // Flush the response head immediately. Docker CLI opens
+                    // /events before starting no-argument commands such as
+                    // `docker stats`; without an initial body write, Vapor
+                    // waits for the first real event and the CLI never
+                    // proceeds to the command's API calls. JSON decoders
+                    // accept this newline as leading whitespace.
+                    try await writer.write(.buffer(ByteBuffer(string: "\n")))
 
-            for await event in stream {
-                if let until, event.timeNano > until { break }
-                guard filter.matches(event) else { continue }
-                if let json = try? JSONEncoder().encode(event) {
-                    var buffer = req.application.allocator.buffer(capacity: json.count + 1)
-                    buffer.writeBytes(json)
-                    buffer.writeString("\n")
-                    do {
+                    for await event in stream {
+                        try Task.checkCancellation()
+                        if let until, event.timeNano > until { break }
+                        guard filter.matches(event) else { continue }
+                        let json = try JSONEncoder().encode(event)
+                        var buffer = req.application.allocator.buffer(capacity: json.count + 1)
+                        buffer.writeBytes(json)
+                        buffer.writeString("\n")
+                        // DisconnectCoupledResponseStream serializes this
+                        // write with its heartbeat and cancels this operation
+                        // when the client closes a quiet connection.
                         try await writer.write(.buffer(buffer))
-                    } catch is IOError {
-                        req.logger.debug("Client disconnected (broken pipe)")
-                        break
-                    } catch let error as ChannelError where error == .ioOnClosedChannel {
-                        req.logger.debug("Client disconnected (closed channel)")
-                        break
-                    } catch {
-                        req.logger.warning("\(event) raised '\(error)'")
                     }
                 }
+            } catch is CancellationError {
+                // The response channel canceled the producer.
+            } catch is DisconnectCoupledResponseStream.ProducerError {
+                req.logger.debug("Client disconnected from event stream")
+            } catch {
+                req.logger.warning("Event stream terminated: \(error)")
             }
-            _ = try? await writer.write(.end)
         })
 
         return response

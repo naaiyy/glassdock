@@ -52,6 +52,19 @@ private final class GuestStreamRequestControl: @unchecked Sendable {
     func cancel() { lock.withLock { task?.cancel() } }
 }
 
+private final class GuestStreamCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+
+    func markCompleted() {
+        lock.withLock { completed = true }
+    }
+
+    func wasCompleted() -> Bool {
+        lock.withLock { completed }
+    }
+}
+
 final class GuestInputRelay: @unchecked Sendable {
     private static let maximumChunkSize = 256 * 1024
     private let lock = NSLock()
@@ -1021,6 +1034,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     private var starting: Set<String> = []
     private let starts = GuestStartGate()
     private var pendingPublications: Set<String> = []
+    private var mountedVolumeContainers: Set<String> = []
     private var eventMonitor: GuestRuntimeEventMonitor?
     private var reservedGuestPorts: Set<Int> = []
     private var exitCodes = GuestExitCodeIndex()
@@ -1111,7 +1125,18 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             "image.delete",
             ["reference": .string(Self.normalizedRegistryReference(reference)), "force": .bool(force)]
         )
-        return Self.dockerImageDelete(try decode(response, as: GuestImageDeletePayload.self))
+        let result = Self.dockerImageDelete(try decode(response, as: GuestImageDeletePayload.self))
+        for name in result.untagged {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "untag", actorID: name, attributes: ["name": name]))
+        }
+        for id in result.deleted {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "delete", actorID: id, attributes: ["name": reference]))
+        }
+        return result
     }
 
     func pruneImages(all: Bool) async throws -> DockerRuntimeImageDelete {
@@ -1126,7 +1151,22 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             )
         }
         let response = try await request("image.prune", payload)
-        return Self.dockerImageDelete(try decode(response, as: GuestImageDeletePayload.self))
+        let result = Self.dockerImageDelete(try decode(response, as: GuestImageDeletePayload.self))
+        for name in result.untagged {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "untag", actorID: name, attributes: ["name": name]))
+        }
+        for id in result.deleted {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "delete", actorID: id, attributes: [:]))
+        }
+        await broadcaster?.broadcast(
+            DockerEvent.make(
+                type: "image", action: "prune", actorID: "",
+                attributes: ["reclaimed": String(result.reclaimed)]))
+        return result
     }
 
     func tagImage(source: String, target: String) async throws {
@@ -1137,6 +1177,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 "target": .string(Self.normalizedRegistryReference(target)),
             ]
         )
+        await broadcaster?.broadcast(
+            DockerEvent.make(
+                type: "image", action: "tag", actorID: source,
+                attributes: ["name": Self.normalizedRegistryReference(target)]))
     }
 
     func pushImage(
@@ -1161,10 +1205,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     func exportImages(
         references: [String]
     ) async throws -> (firstChunk: Data, remaining: AsyncThrowingStream<Data, Error>) {
-        try await streamRequestWithFirstChunk(
+        let result = try await streamRequestWithFirstChunk(
             method: "image.export",
             payload: ["references": .array(references.map { .string(Self.normalizedRegistryReference($0)) })]
         )
+        for reference in references {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "save", actorID: reference,
+                    attributes: ["name": Self.normalizedRegistryReference(reference)]))
+        }
+        return result
     }
 
     func importImages(data: Data) async throws -> [DockerRuntimeImage] {
@@ -1182,7 +1233,16 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             data: data
         )
         let responsePayload: GuestImageImportPayload = try decode(response)
-        return responsePayload.images.map { DockerRuntimeImage(reference: $0.name, digest: $0.digest) }
+        let images = responsePayload.images.map {
+            DockerRuntimeImage(reference: $0.name, digest: $0.digest)
+        }
+        for image in images {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "image", action: "load", actorID: image.digest,
+                    attributes: ["name": image.reference]))
+        }
+        return images
     }
 
     func buildImage(context: Data, dockerfile: String, tags: [String]) async throws -> DockerRuntimeImage {
@@ -1462,6 +1522,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if let policy = update.restartPolicy {
             metadata[resolved]?.restartPolicy = policy
         }
+        await broadcastContainer("update", id: resolved)
         return (try? decode(response, as: GuestContainerUpdatePayload.self).warnings) ?? []
     }
 
@@ -1554,6 +1615,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 try? await engine.retainMemoryTarget(
                     id: resolved, bytes: PersistentEngine.publishedNetworkMemoryBytes
                 )
+            }
+            if metadata[resolved]?.state == .running {
+                await mountVolumes(id: resolved)
             }
         } catch {
             if reservedBindings != nil {
@@ -1732,6 +1796,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         exitCodes.record(id: id, code: exitCode)
         metadata[id]?.state = .exited
         metadata[id]?.exitCode = exitCode
+        await unmountVolumes(id: id)
         await engine.releaseMemoryTarget(id: id)
         return exitCode
     }
@@ -1758,6 +1823,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if hasPublishedPorts {
             try await portPublisher.remove(containerID: resolved)
         }
+        await unmountVolumes(id: resolved)
         releaseGuestPorts(containerID: resolved)
         pendingPublications.remove(resolved)
         manuallyStopped.remove(resolved)
@@ -1827,7 +1893,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     }
 
     func deleteNetwork(id: String) async throws {
+        let network = try? await inspectNetwork(id: id)
         _ = try await request("network.delete", ["id": .string(id)])
+        if let network {
+            await broadcaster?.broadcast(
+                DockerEvent.make(
+                    type: "network", action: "destroy", actorID: network.id,
+                    attributes: ["name": network.name, "type": network.driver]))
+        }
     }
 
     func createNetwork(
@@ -1870,7 +1943,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             ])
         }
         let response = try await request("network.create", payload)
-        return Self.dockerNetwork(try decode(response, as: GuestNetworkCreatePayload.self).network)
+        let network = Self.dockerNetwork(
+            try decode(response, as: GuestNetworkCreatePayload.self).network
+        )
+        await broadcaster?.broadcast(
+            DockerEvent.make(
+                type: "network", action: "create", actorID: network.id,
+                attributes: ["name": network.name, "type": network.driver]))
+        return network
     }
 
     func connectNetwork(
@@ -1906,6 +1986,15 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if let ipv4Address { payload["ipv4Address"] = .string(ipv4Address) }
         if let ipv6Address { payload["ipv6Address"] = .string(ipv6Address) }
         _ = try await request("network.connect", payload)
+        let network = try? await inspectNetwork(id: id)
+        var attributes = ["container": resolved]
+        if let network {
+            attributes["name"] = network.name
+            attributes["type"] = network.driver
+        }
+        await broadcaster?.broadcast(
+            DockerEvent.make(type: "network", action: "connect", actorID: id, attributes: attributes)
+        )
     }
 
     func disconnectNetwork(id: String, containerID: String, force: Bool) async throws {
@@ -1917,6 +2006,17 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 "containerId": .string(resolved),
                 "force": .bool(force),
             ]
+        )
+        let network = try? await inspectNetwork(id: id)
+        var attributes = ["container": resolved]
+        if let network {
+            attributes["name"] = network.name
+            attributes["type"] = network.driver
+        }
+        await broadcaster?.broadcast(
+            DockerEvent.make(
+                type: "network", action: "disconnect", actorID: id, attributes: attributes
+            )
         )
     }
 
@@ -2048,9 +2148,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     }
 
     func createExec(_ request: DockerRuntimeExecCreate) async throws -> String {
-        _ = try await resolve(request.containerID)
+        let containerID = try await resolve(request.containerID)
         let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         execs[id] = request
+        await broadcastContainer(
+            "exec_create: \(request.command.joined(separator: " "))",
+            id: containerID,
+            extra: ["execID": id]
+        )
         return id
     }
 
@@ -2092,6 +2197,11 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         )
         let connection = try await engine.readyConnection()
         try await engine.prepareForWork()
+        await broadcastContainer(
+            "exec_start: \(exec.command.joined(separator: " "))",
+            id: containerID,
+            extra: ["execID": id]
+        )
         do {
             let response = try await connection.request(
                 method: "container.exec", payload: .object(payload), onStream: collector.append
@@ -2130,6 +2240,12 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         if let user = exec.user, !user.isEmpty { payload["user"] = .string(user) }
         let connection = try await engine.readyConnection()
         try await engine.prepareForWork()
+        let completion = GuestStreamCompletion()
+        await broadcastContainer(
+            "exec_start: \(exec.command.joined(separator: " "))",
+            id: containerID,
+            extra: ["execID": id]
+        )
         let requestPayload: JSONValue = .object(payload)
         return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(64)) { continuation in
             let control = GuestStreamRequestControl()
@@ -2158,6 +2274,14 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     continuation.yield(
                         .init(stream: nil, data: Data(), exitCode: response.exitCode ?? -1)
                     )
+                    await broadcastContainer(
+                        "exec_die", id: containerID,
+                        extra: [
+                            "execID": id,
+                            "exitCode": String(response.exitCode ?? -1),
+                        ]
+                    )
+                    completion.markCompleted()
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -2165,9 +2289,16 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                 await engine.finishedWork()
             }
             control.set(request)
-            continuation.onTermination = { _ in
+            continuation.onTermination = { [weak self] _ in
                 control.cancel()
                 relay?.send(Data())
+                Task { [weak self] in
+                    if !completion.wasCompleted() {
+                        await self?.broadcastContainer(
+                            "exec_detach", id: containerID, extra: ["execID": id]
+                        )
+                    }
+                }
             }
         }
     }
@@ -2261,6 +2392,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             let requestPayload = JSONValue.object(payload)
             let writeGate = GuestRequestWriteGate()
             let control = GuestStreamRequestControl()
+            let completion = GuestStreamCompletion()
             let stream = AsyncThrowingStream<DockerRuntimeProcessFrame, Error>(
                 bufferingPolicy: .bufferingOldest(64)
             ) { continuation in
@@ -2290,6 +2422,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                         continuation.yield(
                             .init(stream: nil, data: Data(), exitCode: response.exitCode ?? -1)
                         )
+                        completion.markCompleted()
                         continuation.finish()
                     } catch {
                         writeGate.fail(error)
@@ -2303,6 +2436,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
                     control.cancel()
                     relay?.send(Data())
                     Task { [weak self] in
+                        if !completion.wasCompleted(), await self?.containerIsRunning(resolved) == true {
+                            await self?.broadcastContainer("detach", id: resolved)
+                        }
                         await self?.finishAttachment(id: resolved, token: attachmentToken)
                     }
                 }
@@ -2322,6 +2458,10 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
             await finishAttachment(id: resolved, token: attachmentToken)
             throw error
         }
+    }
+
+    private func containerIsRunning(_ id: String) -> Bool {
+        metadata[id]?.state == .running
     }
 
     private func finishAttachment(id: String, token: UUID) async {
@@ -2648,6 +2788,7 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         else { return }
         metadata[exit.id]?.state = .exited
         metadata[exit.id]?.exitCode = Int32(exit.exitCode)
+        await unmountVolumes(id: exit.id)
         await engine.releaseMemoryTarget(id: exit.id)
         pendingPublications.remove(exit.id)
         schedulePortTeardown(exit.id)
@@ -2842,6 +2983,9 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
         let response = try await request("container.list", [:])
         let payload: GuestContainerListPayload = try decode(response)
         payload.containers.forEach { hydrateMetadata(from: $0) }
+        for container in payload.containers where container.status == "running" {
+            mountedVolumeContainers.insert(container.id)
+        }
         for container in payload.containers
         where container.status == "stopped" || container.status == "exited" {
             if metadata[container.id]?.autoRemove == true {
@@ -3098,11 +3242,32 @@ actor GuestRuntime: DockerRuntimeRouteBackend, DockerRuntimeLogOptionsBackend,
     ) async {
         guard let broadcaster, let meta = metadata[id] else { return }
         await broadcaster.broadcast(
-            DockerEvent.simpleEvent(
-                id: id, type: "container", status: action,
+            DockerEvent.containerEvent(
+                action,
+                id: id,
                 image: meta.image, name: meta.name, labels: meta.labels,
                 extraAttributes: extra
             )
+        )
+    }
+
+    private func mountVolumes(id: String) async {
+        guard mountedVolumeContainers.insert(id).inserted,
+            let broadcaster,
+            let mounts = metadata[id]?.mounts
+        else { return }
+        await VolumeMountEvents.broadcastMounts(
+            for: mounts, containerId: id, broadcaster: broadcaster
+        )
+    }
+
+    private func unmountVolumes(id: String) async {
+        guard mountedVolumeContainers.remove(id) != nil,
+            let broadcaster,
+            let mounts = metadata[id]?.mounts
+        else { return }
+        await VolumeMountEvents.broadcastUnmounts(
+            for: mounts, containerId: id, broadcaster: broadcaster
         )
     }
 

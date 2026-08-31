@@ -1871,6 +1871,13 @@ struct DockerRuntimeRoutes: RouteCollection {
             throw Abort(.badRequest, reason: "Both w and h must be positive integers")
         }
         try await call { try await backend.resizeContainer(id: id, width: width, height: height) }
+        let container = try await call { try await backend.inspectContainer(id: id) }
+        await broadcastContainerEvent(
+            req,
+            container: container,
+            action: "resize",
+            extra: ["width": String(width), "height": String(height)]
+        )
         return Response(status: .ok)
     }
 
@@ -1888,6 +1895,7 @@ struct DockerRuntimeRoutes: RouteCollection {
                 throw Abort(.badRequest, reason: "Invalid restart signal: \(resolvedSignalText)")
             }
             try await stopAndWait(id: id, signal: signal, timeout: timeout)
+            await broadcastContainerEvent(req, container: container, action: "restart")
         }
         try await call { try await backend.startContainer(id: id) }
         return Response(status: .noContent)
@@ -1949,6 +1957,7 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         let timeout = req.query[Int.self, at: "t"] ?? container.stopTimeout ?? 10
         try await stopAndWait(id: id, signal: signal, timeout: timeout)
+        await broadcastContainerEvent(req, container: container, action: "stop")
         return Response(status: .noContent)
     }
 
@@ -2614,6 +2623,10 @@ struct DockerRuntimeRoutes: RouteCollection {
         }
         do {
             let tty = try await inspectContainer(id: id).tty
+            if replayLogs || streamOutput {
+                let container = try await inspectContainer(id: id)
+                await broadcastContainerEvent(req, container: container, action: "attach")
+            }
             if replayLogs && !streamOutput {
                 let output: DockerRuntimeProcessOutput
                 if let optionsBackend = backend as? any DockerRuntimeLogOptionsBackend {
@@ -2791,6 +2804,25 @@ struct DockerRuntimeRoutes: RouteCollection {
             case .invalidRequest(let message): throw Abort(.badRequest, reason: message)
             }
         }
+    }
+
+    private func broadcastContainerEvent(
+        _ req: Request,
+        container: DockerRuntimeContainer,
+        action: String,
+        extra: [String: String] = [:]
+    ) async {
+        guard let broadcaster = req.application.storage[EventBroadcasterKey.self] else { return }
+        await broadcaster.broadcast(
+            DockerEvent.containerEvent(
+                action,
+                id: container.id,
+                image: container.image,
+                name: container.name,
+                labels: container.labels,
+                extraAttributes: extra
+            )
+        )
     }
 
     /// Builds a streaming response under the resolve-before-commit contract:
