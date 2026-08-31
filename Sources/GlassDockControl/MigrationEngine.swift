@@ -448,7 +448,8 @@ public struct MigrationEngine: Sendable {
             docker,
             arguments: [
                 "--host", "unix://\(target.socketPath)", "run", "-d",
-                "--name", helperName, options.helperImage,
+                "--name", helperName,
+                "-v", "\(name):/migrate", options.helperImage,
                 "sleep", "3600",
             ],
             failure: MigrationError.volumeCopyFailed(volume: name, stage: "target import", message: "")
@@ -635,6 +636,19 @@ public struct MigrationEngine: Sendable {
             let response = try JSONDecoder().decode(CreateResponse.self, from: created.body)
             guard let identifier = response.Id, !identifier.isEmpty else {
                 throw ControlError.malformedResponse("create returned no container id")
+            }
+            // "Move" semantics: a running source container holds host ports the
+            // target copy needs. Stop the source before starting the copy.
+            let sourceIdentifier = (inspect["Id"] as? String) ?? ""
+            if !sourceIdentifier.isEmpty {
+                let stopped = try? source.post(
+                    "/containers/\(Self.pathSegment(sourceIdentifier))/stop"
+                )
+                if let stopped, !(200..<300).contains(stopped.status) && stopped.status != 304 {
+                    report.warnings.append(
+                        "\(displayName): could not stop the source container (status \(stopped.status)); the target copy may fail to publish its ports while the source is running."
+                    )
+                }
             }
             let started = try target.post("/containers/\(Self.pathSegment(identifier))/start")
             guard (200..<300).contains(started.status) || started.status == 304 else {
