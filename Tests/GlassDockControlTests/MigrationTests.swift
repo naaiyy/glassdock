@@ -300,6 +300,49 @@ struct MigrationTests {
         #expect(report.text().contains("planned (dry run)"))
     }
 
+    @Test("label filter matches key presence and exact values")
+    func labelFilter() {
+        let labeled = ["glassdock.migrate": "test", "team": "backend"]
+        #expect(MigrationContainerConverter.matchesLabelFilter(labeled, filter: nil))
+        #expect(MigrationContainerConverter.matchesLabelFilter(labeled, filter: ""))
+        #expect(MigrationContainerConverter.matchesLabelFilter(labeled, filter: "glassdock.migrate"))
+        #expect(MigrationContainerConverter.matchesLabelFilter(labeled, filter: "glassdock.migrate=test"))
+        #expect(MigrationContainerConverter.matchesLabelFilter(labeled, filter: "team=backend"))
+
+        #expect(!MigrationContainerConverter.matchesLabelFilter(labeled, filter: "glassdock.migrate=nope"))
+        #expect(!MigrationContainerConverter.matchesLabelFilter(labeled, filter: "missing"))
+        #expect(!MigrationContainerConverter.matchesLabelFilter(nil, filter: "glassdock.migrate"))
+        #expect(MigrationContainerConverter.matchesLabelFilter(nil, filter: nil))
+        #expect(!MigrationContainerConverter.matchesLabelFilter([:], filter: "glassdock.migrate"))
+    }
+
+    @Test("null and zero-valued host configuration produces no warnings")
+    func nullHostConfigFields() throws {
+        var warnings: [String] = []
+        let inspect = makeInspect(
+            config: ["Image": "tool"],
+            hostConfig: [
+                "Links": NSNull(),
+                "Devices": NSNull(),
+                "SecurityOpt": NSNull(),
+                "Dns": [String](),
+                "ExtraHosts": [],
+                "PidsLimit": 0,
+                "Privileged": false,
+            ]
+        )
+
+        _ = try #require(
+            MigrationContainerConverter.makeCreateRequest(
+                inspect: inspect,
+                migratedVolumeNames: [],
+                warnings: &warnings
+            )
+        )
+
+        #expect(warnings.isEmpty)
+    }
+
     @Test("migration event and report keep their JSON contract")
     func jsonContract() throws {
         let event = MigrationEvent(phase: .images, detail: "Migrated image nginx.")

@@ -82,6 +82,7 @@ public struct MigrationEngine: Sendable {
     struct SourceImageSummary: Decodable {
         let Id: String
         let RepoTags: [String]?
+        let Labels: [String: String]?
     }
 
     struct SourceContainerSummary: Decodable {
@@ -90,11 +91,13 @@ public struct MigrationEngine: Sendable {
         let Image: String
         let Created: Int?
         let State: String?
+        let Labels: [String: String]?
     }
 
     struct SourceVolume: Decodable {
         let Name: String
         let Driver: String
+        let Labels: [String: String]?
     }
 
     struct SourceVolumeList: Decodable {
@@ -107,6 +110,7 @@ public struct MigrationEngine: Sendable {
         let Scope: String?
         let Internal: Bool?
         let Options: [String: String]?
+        let Labels: [String: String]?
     }
 
     struct CreateResponse: Decodable {
@@ -174,7 +178,10 @@ public struct MigrationEngine: Sendable {
 
         let images = try source.json([SourceImageSummary].self, "/images/json?all=1")
         var references = Set<String>()
-        for image in images {
+        for image in images
+        where MigrationContainerConverter.matchesLabelFilter(
+            image.Labels, filter: options.filterLabel
+        ) {
             for tag in image.RepoTags ?? [] where !tag.hasPrefix("<none>") {
                 references.insert(tag)
             }
@@ -183,6 +190,11 @@ public struct MigrationEngine: Sendable {
 
         let containers = try source.json([SourceContainerSummary].self, "/containers/json?all=1")
         inventory.containerNames = containers.compactMap { container in
+            guard
+                MigrationContainerConverter.matchesLabelFilter(
+                    container.Labels, filter: options.filterLabel
+                )
+            else { return nil }
             let name = container.Names?.first?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
             if name.isEmpty { return nil }
             if !options.includeStoppedContainers && container.State != "running" { return nil }
@@ -190,10 +202,18 @@ public struct MigrationEngine: Sendable {
         }.sorted()
 
         let volumes = try source.json(SourceVolumeList.self, "/volumes").Volumes ?? []
-        inventory.volumeNames = volumes.filter { $0.Driver == "local" }.map(\.Name).sorted()
+        inventory.volumeNames =
+            volumes
+            .filter { $0.Driver == "local" }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
+            .map(\.Name).sorted()
 
         let networks = try source.json([SourceNetwork].self, "/networks")
-        inventory.networkNames = networks.filter { isMigratableNetwork($0) }.map(\.Name).sorted()
+        inventory.networkNames =
+            networks
+            .filter { isMigratableNetwork($0) }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
+            .map(\.Name).sorted()
 
         return inventory
     }
@@ -325,7 +345,10 @@ public struct MigrationEngine: Sendable {
         from source: DockerClient, to target: DockerClient, report: inout MigrationReport
     ) throws {
         let volumes = (try? source.json(SourceVolumeList.self, "/volumes").Volumes ?? []) ?? []
-        let localVolumes = volumes.filter { $0.Driver == "local" }
+        let localVolumes =
+            volumes
+            .filter { $0.Driver == "local" }
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
         let unsupported = volumes.filter { $0.Driver != "local" }
         for volume in unsupported {
             report.volumes.skipped.append(
@@ -413,7 +436,10 @@ public struct MigrationEngine: Sendable {
         from source: DockerClient, to target: DockerClient, report: inout MigrationReport
     ) throws {
         let networks = (try? source.json([SourceNetwork].self, "/networks")) ?? []
-        let migratable = networks.filter(isMigratableNetwork)
+        let migratable =
+            networks
+            .filter(isMigratableNetwork)
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
         emit(.init(phase: .networks, detail: "Recreating \(migratable.count) user-defined networks."))
 
         for network in migratable {
@@ -464,6 +490,7 @@ public struct MigrationEngine: Sendable {
         let summaries = try source.json([SourceContainerSummary].self, "/containers/json?all=1")
         let planned =
             summaries
+            .filter { MigrationContainerConverter.matchesLabelFilter($0.Labels, filter: options.filterLabel) }
             .filter { options.includeStoppedContainers || $0.State == "running" }
             .sorted { ($0.Created ?? 0) < ($1.Created ?? 0) }
 
