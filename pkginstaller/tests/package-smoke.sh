@@ -13,6 +13,7 @@ mkdir -p "${temporary_directory}/vmm" "${temporary_directory}/guest"
 printf 'int main(void) { return 0; }\n' \
     | /usr/bin/clang -arch arm64 -x c - -o "${temporary_directory}/fixture-binary"
 cp "${temporary_directory}/fixture-binary" "${temporary_directory}/glassdock"
+cp "${temporary_directory}/fixture-binary" "${temporary_directory}/glassdockctl"
 cp "${temporary_directory}/fixture-binary" "${temporary_directory}/vmm/glassdock-vmm"
 cp "${temporary_directory}/fixture-binary" "${temporary_directory}/vmm/libkrun.1.dylib"
 cp "${temporary_directory}/fixture-binary" "${temporary_directory}/vmm/gvproxy"
@@ -27,6 +28,7 @@ make -C "${installer_root}" \
     PACKAGE_IDENTIFIER=io.github.glassdock.pkg.test \
     PATHS_D_NAME=glassdock-package-test \
     DAEMON_SOURCE="${temporary_directory}/glassdock" \
+    GLASSDOCKCTL_SOURCE="${temporary_directory}/glassdockctl" \
     VMM_SOURCE_DIR="${temporary_directory}/vmm" \
     GUEST_SOURCE_DIR="${temporary_directory}/guest" \
     checksums
@@ -45,6 +47,7 @@ make -C "${installer_root}" \
     PACKAGE_IDENTIFIER=io.github.glassdock.pkg.test \
     PATHS_D_NAME=glassdock-package-test \
     DAEMON_SOURCE="${temporary_directory}/glassdock" \
+    GLASSDOCKCTL_SOURCE="${temporary_directory}/glassdockctl" \
     VMM_SOURCE_DIR="${temporary_directory}/vmm" \
     GUEST_SOURCE_DIR="${temporary_directory}/guest" \
     archive
