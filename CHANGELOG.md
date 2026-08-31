@@ -16,6 +16,13 @@ Glass Dock records user-visible changes in this file. The format follows
   `--running-only`, `--skip-images/volumes/networks/containers`, and `--json`.
 - Add a Migrate section to the menu-bar app: scan Docker, review the plan,
   run the migration with live progress, and copy the final report.
+- Complete Docker event stream parity: Moby-shaped events with the full
+  action taxonomy, actor attributes, and filter support (#28).
+- Enforce per-container CPU and memory limits, including `docker update`
+  (#29).
+- Relay Docker socket bind mounts so containers that mount
+  `/var/run/docker.sock` — testcontainers, Portainer, dockerd-style tools —
+  can reach the engine API (#31).
 - Bundle `glassdockctl` in the macOS package and runtime archive.
 
 ### Fixed
@@ -25,6 +32,7 @@ Glass Dock records user-visible changes in this file. The format follows
   instead of silently touching the container's writable layer.
 - Running source containers are stopped before their migrated copies start on
   Glass Dock, so published host ports are free.
+- Recover truncated guest data disks instead of failing daemon startup (#32).
 - Null-valued Docker HostConfig fields no longer produce spurious
   unsupported-option warnings during migration.
 - Cold-idle footprint benchmarks are captured after the guest finishes

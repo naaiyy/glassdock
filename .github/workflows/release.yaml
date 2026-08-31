@@ -86,7 +86,7 @@ jobs:
   build:
     name: Build, sign, and notarize
     needs: quality
-    runs-on: [self-hosted, macOS, ARM64, glassdock-vmm-builder]
+    runs-on: macos-26
     timeout-minutes: 90
     environment: release-signing
     permissions:
