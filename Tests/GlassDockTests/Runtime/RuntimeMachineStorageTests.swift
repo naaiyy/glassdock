@@ -49,6 +49,39 @@ struct RuntimeMachineStorageTests {
         #expect(quarantined.isEmpty)
     }
 
+    @Test("keeps the guest data disk at or above its ext4 geometry")
+    func restoresTruncatedDiskGeometry() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glassdock-vmm-storage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let disk = directory.appendingPathComponent("data.ext4")
+        let formatter = try EXT4.Formatter(
+            FilePath(disk.path),
+            minDiskSize: 64 * 1024 * 1024
+        )
+        try formatter.close()
+
+        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(disk.path))
+        let requiredSize =
+            UInt64(reader.superBlock.blocksCountLow)
+            * UInt64(reader.superBlock.blockSize)
+        let truncatedSize = requiredSize - UInt64(reader.superBlock.blockSize)
+        let handle = try FileHandle(forWritingTo: disk)
+        try handle.truncate(atOffset: truncatedSize)
+        try handle.close()
+
+        try RuntimeMachineStorage.prepareDataDisk(at: disk, size: 64 * 1024 * 1024)
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: disk.path)
+        let actualSize = attributes[.size] as! UInt64
+        #expect(actualSize >= requiredSize)
+        #expect(
+            try EXT4.EXT4Reader(blockDevice: FilePath(disk.path)).superBlock.blocksCountLow
+                == reader.superBlock.blocksCountLow
+        )
+    }
+
     @Test("preserves invalid storage and fails startup")
     func preservesInvalidDisk() throws {
         let directory = FileManager.default.temporaryDirectory
