@@ -3142,7 +3142,10 @@ func (b *Backend) ExportContainer(ctx context.Context, id string, stream StreamF
 }
 
 func (b *Backend) ArchiveContainer(ctx context.Context, request api.ContainerArchiveRequest, stream StreamFunc) error {
-	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-")
+	if !strings.HasPrefix(request.Path, "/") {
+		return errContainerPathMustBeAbsolute
+	}
+	root, cleanup, err := b.mountContainerRootWithMounts(ctx, request.ID, "glassdock-archive-")
 	if err != nil {
 		return err
 	}
@@ -3158,7 +3161,10 @@ func (b *Backend) ArchiveContainer(ctx context.Context, request api.ContainerArc
 }
 
 func (b *Backend) ArchiveInfo(ctx context.Context, request api.ContainerArchiveRequest) (api.ContainerArchivePath, error) {
-	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-info-")
+	if !strings.HasPrefix(request.Path, "/") {
+		return api.ContainerArchivePath{}, errContainerPathMustBeAbsolute
+	}
+	root, cleanup, err := b.mountContainerRootWithMounts(ctx, request.ID, "glassdock-archive-info-")
 	if err != nil {
 		return api.ContainerArchivePath{}, err
 	}
@@ -3191,7 +3197,10 @@ func (b *Backend) PutArchive(ctx context.Context, request api.ContainerArchivePu
 	if len(request.Data) == 0 {
 		return errors.New("archive data is empty")
 	}
-	root, cleanup, err := b.mountContainerRoot(ctx, request.ID, "glassdock-archive-put-")
+	if !strings.HasPrefix(request.Path, "/") {
+		return errContainerPathMustBeAbsolute
+	}
+	root, cleanup, err := b.mountContainerRootWithMounts(ctx, request.ID, "glassdock-archive-put-")
 	if err != nil {
 		return err
 	}
