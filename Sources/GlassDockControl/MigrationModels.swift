@@ -42,6 +42,28 @@ public struct MigrationOptions: Sendable, Equatable {
     }
 }
 
+extension MigrationInventory {
+    /// One-line human summary, for previews and confirmation dialogs.
+    public var summaryLine: String {
+        let parts = [
+            itemCount(imageReferences.count, "image"),
+            itemCount(volumeNames.count, "volume"),
+            itemCount(networkNames.count, "network"),
+            itemCount(containerNames.count, "container"),
+        ]
+        return parts.joined(separator: ", ")
+    }
+
+    public var isEmpty: Bool {
+        imageReferences.isEmpty && containerNames.isEmpty
+            && volumeNames.isEmpty && networkNames.isEmpty
+    }
+
+    private func itemCount(_ count: Int, _ label: String) -> String {
+        "\(count) \(label)\(count == 1 ? "" : "s")"
+    }
+}
+
 public enum MigrationPhase: String, Codable, Sendable {
     case inventory
     case images

@@ -16,6 +16,7 @@ PATHS_D_NAME ?= glassdock
 INSTALL_PATHS_D ?= 1
 
 DAEMON_SOURCE ?= ../.build/release/glassdock
+GLASSDOCKCTL_SOURCE ?= ../.build/release/glassdockctl
 VMM_SOURCE_DIR ?= ../VMM/out
 GUEST_SOURCE_DIR ?= ../Guest/out
 CODESIGN_IDENTITY ?=
@@ -63,6 +64,7 @@ prepare-root: validate-config
 copy-runtime: prepare-root
 	@for artifact in \
 		"$(DAEMON_SOURCE)" \
+		"$(GLASSDOCKCTL_SOURCE)" \
 		"$(VMM_SOURCE_DIR)/glassdock-vmm" \
 		"$(VMM_SOURCE_DIR)/libkrun.1.dylib" \
 		"$(VMM_SOURCE_DIR)/gvproxy" \
@@ -71,6 +73,7 @@ copy-runtime: prepare-root
 		[ -f "$$artifact" ] || { echo "runtime artifact not found: $$artifact" >&2; exit 1; }; \
 	done
 	@COPYFILE_DISABLE=1 cp -X "$(DAEMON_SOURCE)" "$(PRIVATE_BIN)/glassdock"
+	@COPYFILE_DISABLE=1 cp -X "$(GLASSDOCKCTL_SOURCE)" "$(PUBLIC_BIN)/glassdockctl"
 	@COPYFILE_DISABLE=1 cp -X "$(VMM_SOURCE_DIR)/glassdock-vmm" "$(VMM_SOURCE_DIR)/libkrun.1.dylib" \
 		"$(VMM_SOURCE_DIR)/gvproxy" "$(PRIVATE_BIN)/"
 	@COPYFILE_DISABLE=1 cp -X "$(GUEST_SOURCE_DIR)/glassdock-vmlinux" "$(GUEST_SOURCE_DIR)/glassdock-root.ext4" \
@@ -87,6 +90,7 @@ copy-runtime: prepare-root
 		-e 's|__SERVICE_LABEL__|$(SERVICE_LABEL)|g' \
 		Resources/LaunchAgent.plist.in > "$(SHARE_DIR)/$(SERVICE_LABEL).plist"
 	@chmod 0755 "$(PUBLIC_BIN)/glassdock" "$(PUBLIC_BIN)/glassdock-uninstall" \
+		"$(PUBLIC_BIN)/glassdockctl" \
 		"$(PRIVATE_BIN)/glassdock" "$(PRIVATE_BIN)/glassdock-vmm" "$(PRIVATE_BIN)/gvproxy"
 	@chmod 0644 "$(PRIVATE_BIN)/libkrun.1.dylib" "$(SHARE_DIR)/glassdock-vmlinux" \
 		"$(SHARE_DIR)/glassdock-root.ext4" "$(SHARE_DIR)/$(SERVICE_LABEL).plist" \
@@ -109,6 +113,8 @@ sign-runtime: copy-runtime
 			"$(PRIVATE_BIN)/glassdock-vmm"; \
 		codesign --force --sign "$(CODESIGN_IDENTITY)" --options runtime --timestamp \
 			--identifier io.github.glassdock.daemon "$(PRIVATE_BIN)/glassdock"; \
+		codesign --force --sign "$(CODESIGN_IDENTITY)" --options runtime --timestamp \
+			--identifier io.github.glassdock.glassdockctl "$(PUBLIC_BIN)/glassdockctl"; \
 		for artifact in libkrun.1.dylib gvproxy glassdock-vmm glassdock; do \
 			codesign --verify --strict --verbose=2 "$(PRIVATE_BIN)/$$artifact"; \
 		done; \

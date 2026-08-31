@@ -6,6 +6,35 @@ Glass Dock records user-visible changes in this file. The format follows
 
 ## [Unreleased]
 
+## [1.4.0]
+
+### Added
+
+- Add `glassdockctl migrate from-docker`: one-command migration of images,
+  named volumes, user-defined networks, and containers from an existing
+  Docker engine into Glass Dock, with `--dry-run`, `--filter-label`,
+  `--running-only`, `--skip-images/volumes/networks/containers`, and `--json`.
+- Add a Migrate section to the menu-bar app: scan Docker, review the plan,
+  run the migration with live progress, and copy the final report.
+- Bundle `glassdockctl` in the macOS package and runtime archive.
+
+### Fixed
+
+- Archive operations (`docker cp`) now apply the container's mounts: writes
+  and reads through named volumes and host binds observe the mounted content
+  instead of silently touching the container's writable layer.
+- Running source containers are stopped before their migrated copies start on
+  Glass Dock, so published host ports are free.
+- Null-valued Docker HostConfig fields no longer produce spurious
+  unsupported-option warnings during migration.
+- Cold-idle footprint benchmarks are captured after the guest finishes
+  booting, with a comparability policy for publishing resource results.
+
+### Changed
+
+- Refresh repo metadata and README: document migration and the native control
+  clients, correct inherited claims, and add a tap-ready Homebrew formula.
+
 ## [1.3.1]
 
 ### Added
