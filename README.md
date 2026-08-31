@@ -18,8 +18,6 @@
   - [Requirements 📋](#requirements-📋)
   - [Installation 🛠️](#installation-🛠️)
     - [Homebrew](#homebrew)
-      - [Stable Release](#stable-release)
-      - [Pre Release](#pre-release)
     - [GitHub Releases](#github-releases)
   - [Usage 🚀](#usage-🚀)
     - [Docker builds and Buildx](#docker-builds-and-buildx)
@@ -27,6 +25,8 @@
     - [Runtime and published-port recovery](#runtime-and-published-port-recovery)
     - [Volume sync mode](#volume-sync-mode)
     - [Engine resources](#engine-resources)
+  - [Migrating from Docker](#migrating-from-docker)
+  - [Runtime benchmarks](#runtime-benchmarks)
   - [Building from Source 🏗️](#building-from-source-🏗️)
     - [Prerequisites](#prerequisites)
     - [Build & Run](#build-run)
@@ -44,7 +44,8 @@ Glass Dock is a CLI/daemon that exposes a **Docker-compatible REST API** through
 
 It allows common Docker clients (like the Docker CLI) to interact with local containers on macOS using the Docker API surface 🐳💻.
 
-[**Podman Desktop Apple Container extension**](https://github.com/podman-desktop/extension-apple-container) uses Glass Dock to visualize Apple containers/images in [Podman Desktop](https://podman-desktop.io/).
+Glass Dock also ships native control clients: a SwiftUI menu-bar app, a
+[`glassdockctl` CLI](docs/CONTROL_CLIENTS.md), and a Raycast extension.
 
 ---
 
@@ -127,6 +128,8 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 - Uses containerd, overlayfs, runc, and Linux namespaces for containers
 - Supports create, start, stop, wait, remove, inspect, list, logs, and noninteractive exec
 - Supports containerd-backed image pull, list, inspect, tag, delete, and prune operations
+- Ships native control clients: a SwiftUI menu-bar app, a `glassdockctl` CLI, and a Raycast extension
+- Provides one-command migration from an existing Docker engine with `glassdockctl migrate from-docker`
 
 ---
 
@@ -142,17 +145,8 @@ DOCKER_HOST=unix://$HOME/.glassdock/container.sock docker images
 
 ### Homebrew
 
-After the `glassdock` formula is published to Homebrew, install it with:
-
-```shell
-brew install glassdock
-```
-
-To install the latest source revision after the formula is published, use:
-
-```shell
-brew install glassdock --HEAD
-```
+A Homebrew formula is planned. Until it is published, install from GitHub
+Releases or build from source.
 
 ### GitHub Releases
 
@@ -379,6 +373,40 @@ Ownership rules:
 
 ---
 
+## Migrating from Docker
+
+If you already use Docker Desktop or another local Docker engine, Glass Dock can
+import its images, named volumes, user-defined networks, and containers.
+
+Start Glass Dock first, then preview the migration plan:
+
+```bash
+glassdockctl migrate from-docker --dry-run
+```
+
+Run the migration:
+
+```bash
+glassdockctl migrate from-docker
+```
+
+Useful options:
+
+```bash
+glassdockctl migrate from-docker --source-host unix://$HOME/.docker/run/docker.sock
+glassdockctl migrate from-docker --running-only      # skip stopped containers
+glassdockctl migrate from-docker --skip-volumes      # skip named-volume data copy
+glassdockctl migrate from-docker --json              # machine-readable report
+```
+
+The command reads from the source Docker socket, recreates user-defined bridge
+networks, transfers images by reference (falling back to image archives for
+local-only images), copies named-volume data, and recreates containers from
+their inspect data. It reports migrated, skipped, and failed items, plus
+warnings for configuration that cannot be carried over exactly.
+
+---
+
 ## Runtime benchmarks
 
 Use the local benchmark harness to compare a changed Glass Dock build with
@@ -392,7 +420,9 @@ make benchmark
 
 The [benchmark guide](benchmarks/README.md) specifies the warm-up, order,
 correctness, cleanup, raw-data, statistics, and external-product configuration
-rules. Do not compare result values from different machines.
+rules, plus the comparability policy for publishing footprint and
+resource-sensitive results. Do not compare result values from different
+machines.
 
 ---
 
@@ -416,6 +446,10 @@ rules. Do not compare result values from different machines.
   relay. Swarm and plugin operations remain intentionally error-only because
   Glass Dock is a single-node runtime and does not execute Swarm schedulers or
   host plugin processes.
+- `glassdockctl migrate from-docker` works at the Docker API level. It migrates
+  images, named local volumes, user-defined bridge networks, and container
+  configuration. Unsupported container options are omitted and reported as
+  warnings; Swarm-only resources and non-local volume drivers are not migrated.
 - Build cache accounting and pruning use the guest BuildKit cache. The
   compatibility matrix defines full support for the regular Dockerfile workflow
   and does not include Swarm or Docker plugin hosting.
