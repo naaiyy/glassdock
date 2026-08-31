@@ -66,7 +66,12 @@ for path in "${host_bind_source}" "${excluded_host_bind_source}"; do
 done
 
 mkdir -p /run/containerd
-mount -t ext4 -o discard /dev/vdb /var/lib/containerd
+# Keep the raw ext4 image's logical length stable. libkrun exposes discard
+# requests as a backing-file resize, which can truncate the image below its
+# superblock geometry and prevent the next daemon/VM restart from mounting it.
+# The image is intentionally unjournaled, so leave the ext4 data mode at its
+# filesystem default instead of requesting the journal-only data=ordered mode.
+mount -t ext4 /dev/vdb /var/lib/containerd
 mount -t virtiofs glassdock-home /mnt/glassdock-host
 
 containerd --config /etc/containerd/config.toml >&2 &

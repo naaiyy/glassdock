@@ -31,6 +31,7 @@ enum RuntimeMachineStorage {
                     && reader.superBlock.defaultMountOpts == 0x40
                 let isUnjournaled = reader.superBlock.featureCompat & 0x4 == 0
                 if hasOrderedJournal || isUnjournaled {
+                    try restoreFilesystemGeometry(of: reader, at: url)
                     return
                 }
                 throw RuntimeMachineStorageError.incompatibleDataDisk
@@ -53,6 +54,23 @@ enum RuntimeMachineStorage {
             try? fileManager.removeItem(at: staging)
             throw error
         }
+    }
+
+    private static func restoreFilesystemGeometry(of reader: EXT4.EXT4Reader, at url: URL) throws {
+        let blockCount =
+            UInt64(reader.superBlock.blocksCountLow)
+            | (UInt64(reader.superBlock.blocksCountHigh) << 32)
+        let (requiredSize, overflow) = blockCount.multipliedReportingOverflow(
+            by: UInt64(reader.superBlock.blockSize)
+        )
+        guard !overflow else { return }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let currentSize = (attributes[.size] as? NSNumber)?.uint64Value,
+            currentSize < requiredSize
+        else { return }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: requiredSize)
     }
 }
 
