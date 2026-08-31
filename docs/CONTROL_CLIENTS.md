@@ -138,6 +138,7 @@ glassdockctl support-report --json
 glassdockctl daemon start --json
 glassdockctl daemon stop --json
 glassdockctl daemon restart --json
+glassdockctl migrate from-docker --json --dry-run
 glassdockctl containers list --json
 glassdockctl containers start CONTAINER --json
 glassdockctl containers stop CONTAINER --json
@@ -152,6 +153,12 @@ health field is empty because the current daemon does not report VM readiness.
 `support-report` returns the same snapshot, bounded managed log tails, and
 copy-ready text. Change the schema version when a client must change how it
 reads existing fields.
+
+`migrate from-docker` returns `schemaVersion: 1`, a `MigrationReport` with the
+source and target sockets, the source inventory, per-category item results
+(migrated, skipped, failed), and warnings. Progress events stream to stderr.
+`--dry-run` produces the plan without writing to the target engine. A nonzero
+exit code means at least one item failed.
 
 The menu app has no desktop window and no Dock item. Its transient status-item
 popover opens with a searchable container list. An in-place System destination
