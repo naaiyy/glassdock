@@ -12,7 +12,12 @@ struct UnixSocketHTTPClient: Sendable {
     var timeout: TimeInterval = 3
     var maximumResponseBytes = 4 * 1024 * 1024
 
-    func request(method: String, path: String) throws -> HTTPResult {
+    func request(
+        method: String,
+        path: String,
+        body: Data? = nil,
+        contentType: String? = nil
+    ) throws -> HTTPResult {
         guard !socketPath.isEmpty, socketPath.utf8.count < MemoryLayout<sockaddr_un>.size - 2 else {
             throw ControlError.invalidSocketPath(socketPath)
         }
@@ -48,8 +53,20 @@ struct UnixSocketHTTPClient: Sendable {
         }
         guard connected == 0 else { throw socketError("connect") }
 
-        let request = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        var request = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n"
+        if let body, !body.isEmpty {
+            request += "Content-Length: \(body.count)\r\n"
+            if let contentType {
+                request += "Content-Type: \(contentType)\r\n"
+            }
+        } else {
+            request += "Content-Length: 0\r\n"
+        }
+        request += "\r\n"
         try writeAll(Data(request.utf8), to: descriptor)
+        if let body, !body.isEmpty {
+            try writeAll(body, to: descriptor)
+        }
 
         var response = Data()
         var buffer = [UInt8](repeating: 0, count: 16_384)

@@ -7,7 +7,7 @@ struct GlassDockControlCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "glassdockctl",
         abstract: "Control the local GlassDock daemon and containers.",
-        subcommands: [Status.self, Support.self, Daemon.self, Containers.self, Logs.self]
+        subcommands: [Status.self, Support.self, Daemon.self, Containers.self, Logs.self, Migrate.self]
     )
 }
 
@@ -146,6 +146,77 @@ private struct Logs: AsyncParsableCommand {
         func run() async throws {
             let output = try await ControlClient().containerLogs(identifier: identifier)
             if json { try writeJSON(output) } else { print(output.text, terminator: "") }
+        }
+    }
+}
+
+private struct Migrate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "migrate",
+        abstract: "Migrate images, volumes, networks, and containers from Docker to Glass Dock.",
+        subcommands: [FromDocker.self]
+    )
+
+    struct FromDocker: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "from-docker",
+            abstract: "Copy the local Docker engine's images, volumes, networks, and containers into Glass Dock."
+        )
+
+        @Option(help: "Unix socket path of the source Docker engine.")
+        var sourceSocket: String?
+
+        @Option(help: "Unix socket path of the Glass Dock engine (default: the managed daemon socket).")
+        var targetSocket: String?
+
+        @Flag(help: "Skip image transfer.")
+        var skipImages = false
+
+        @Flag(help: "Skip named-volume data copy.")
+        var skipVolumes = false
+
+        @Flag(help: "Skip user-defined network recreation.")
+        var skipNetworks = false
+
+        @Flag(help: "Do not recreate containers.")
+        var skipContainers = false
+
+        @Flag(help: "Migrate only running containers.")
+        var runningOnly = false
+
+        @Flag(help: "Print the migration plan without changing anything.")
+        var dryRun = false
+
+        @Flag(help: "Write the stable JSON migration report.")
+        var json = false
+
+        func run() async throws {
+            let options = MigrationOptions(
+                sourceSocketPath: sourceSocket,
+                includeImages: !skipImages,
+                includeVolumes: !skipVolumes,
+                includeNetworks: !skipNetworks,
+                includeContainers: !skipContainers,
+                includeStoppedContainers: !runningOnly,
+                dryRun: dryRun
+            )
+            let engine = MigrationEngine(
+                options: options,
+                targetSocketPath: targetSocket
+            ) { event in
+                FileHandle.standardError.write(Data("[\(event.phase.rawValue)] \(event.detail)\n".utf8))
+            }
+            do {
+                let report = try await engine.run()
+                if json {
+                    try writeJSON(report)
+                } else {
+                    print(report.text())
+                }
+                if !report.succeeded { throw ExitCode(1) }
+            } catch let error as MigrationError {
+                throw ValidationError(error.localizedDescription)
+            }
         }
     }
 }
