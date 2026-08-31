@@ -1805,7 +1805,14 @@ struct DockerRuntimeRoutes: RouteCollection {
         guard !body.Image.isEmpty else { throw Abort(.badRequest, reason: "No image specified") }
         try Self.resources(body.HostConfig).validateForCreate()
         let image = try await call { try await backend.inspectImage(reference: body.Image) }
-        let resolvedMounts = try await call { try await mounts(from: body.HostConfig) }
+        let resolvedMounts:
+            (
+                mounts: [DockerRuntimeMount],
+                autoCreatedVolumes: [Volume],
+                anonymousVolumeNames: Set<String>
+            ) = try await call { [self] in
+                try await self.mounts(from: body.HostConfig)
+            }
         var mounts = resolvedMounts.mounts
         let imageVolumeTargets = try Self.imageVolumeTargets(image.config.volumes)
         var autoCreatedVolumes = resolvedMounts.autoCreatedVolumes
