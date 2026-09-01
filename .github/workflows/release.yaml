@@ -104,8 +104,29 @@ jobs:
         run: |
           set -euo pipefail
           container --version
-          container system start
-          container system status
+          # GitHub Actions macOS runners are not Aqua login sessions. The
+          # container CLI derives a user launchd domain in this context, so
+          # its first bootstrap fails before the API server can start.
+          sudo container system start --enable-kernel-install || true
+          plist="$(sudo find /var/root "${HOME}" -maxdepth 6 \
+            -path '*/com.apple.container/apiserver/apiserver.plist' \
+            2>/dev/null | head -1)"
+          [ -n "${plist}" ] || {
+            echo "apiserver.plist not found" >&2
+            exit 1
+          }
+          sudo launchctl bootstrap system "${plist}"
+          sudo container system start --enable-kernel-install
+          sudo container system status
+          sudo container system kernel set --recommended --force
+          kernel="$(sudo find /var/root "${HOME}" -maxdepth 6 \
+            -path '*/com.apple.container/kernels/default.kernel-arm64' \
+            -type f 2>/dev/null | head -1)"
+          [ -n "${kernel}" ] || {
+            echo "default Apple Container kernel not found" >&2
+            exit 1
+          }
+          printf 'KERNEL_PATH=%s\n' "${kernel}" >> "${GITHUB_ENV}"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
