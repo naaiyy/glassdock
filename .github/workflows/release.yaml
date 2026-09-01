@@ -121,7 +121,7 @@ jobs:
           sudo container system kernel set --recommended --force
           kernel="$(sudo find /var/root "${HOME}" -maxdepth 6 \
             -path '*/com.apple.container/kernels/default.kernel-arm64' \
-            -type f 2>/dev/null | head -1)"
+            2>/dev/null | head -1)"
           [ -n "${kernel}" ] || {
             echo "default Apple Container kernel not found" >&2
             exit 1
