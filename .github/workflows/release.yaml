@@ -159,6 +159,14 @@ jobs:
             existing+=("${item}")
           done < "${RUNNER_TEMP}/prior-keychains"
           security list-keychains -d user -s "${keychain}" "${existing[@]}"
+          application_identity=$(security find-identity -v -p codesigning "${keychain}" \
+            | awk '/Developer ID Application:/ {print $2; exit}')
+          installer_identity=$(security find-identity -v "${keychain}" \
+            | awk '/Developer ID Installer:/ {print $2; exit}')
+          test -n "${application_identity}"
+          test -n "${installer_identity}"
+          printf 'SIGNING_APPLICATION_IDENTITY=%s\n' "${application_identity}" >> "${GITHUB_ENV}"
+          printf 'SIGNING_INSTALLER_IDENTITY=%s\n' "${installer_identity}" >> "${GITHUB_ENV}"
           rm -f "${RUNNER_TEMP}/application.p12" "${RUNNER_TEMP}/installer.p12"
 
       - name: Prepare notarization key
@@ -173,8 +181,6 @@ jobs:
 
       - name: Build release artifacts
         env:
-          CODESIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
-          INSTALLER_SIGNING_IDENTITY: ${{ secrets.DEVELOPER_ID_INSTALLER }}
           APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
@@ -183,19 +189,18 @@ jobs:
           swift build -c release --arch arm64 --disable-index-store --product glassdockctl
           file .build/release/glassdockctl | grep -q arm64
           make release-artifacts BUILD_VERSION="${version}" \
-            CODESIGN_IDENTITY="${CODESIGN_IDENTITY}" \
-            INSTALLER_SIGNING_IDENTITY="${INSTALLER_SIGNING_IDENTITY}"
+            CODESIGN_IDENTITY="${SIGNING_APPLICATION_IDENTITY}" \
+            INSTALLER_SIGNING_IDENTITY="${SIGNING_INSTALLER_IDENTITY}"
 
       - name: Build and notarize menu-bar app
         env:
-          GLASSDOCK_SIGNING_IDENTITY: ${{ secrets.DEVELOPER_ID_APPLICATION }}
           APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           GLASSDOCK_RELEASE_APPROVED: YES
         run: |
           set -euo pipefail
           version=${RELEASE_TAG#v}
-          make menu-release \
+          GLASSDOCK_SIGNING_IDENTITY="${SIGNING_APPLICATION_IDENTITY}" make menu-release \
             APP_RELEASE_VERSION="${version}" \
             APP_BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
           bash scripts/notarize-menu-release.sh \
