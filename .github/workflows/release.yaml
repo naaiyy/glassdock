@@ -98,7 +98,14 @@ jobs:
           fetch-depth: 0
 
       - name: Install build and validation dependencies
-        run: HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install actionlint lld shellcheck xz
+        run: HOMEBREW_NO_REQUIRE_TAP_TRUST=1 brew install actionlint lld shellcheck xz container
+
+      - name: Start Apple Container
+        run: |
+          set -euo pipefail
+          container --version
+          container system start
+          container system status
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
