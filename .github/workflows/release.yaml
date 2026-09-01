@@ -180,6 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           version=${RELEASE_TAG#v}
+          swift build -c release --arch arm64 --disable-index-store --product glassdockctl
+          file .build/release/glassdockctl | grep -q arm64
           make release-artifacts BUILD_VERSION="${version}" \
             CODESIGN_IDENTITY="${CODESIGN_IDENTITY}" \
             INSTALLER_SIGNING_IDENTITY="${INSTALLER_SIGNING_IDENTITY}"
