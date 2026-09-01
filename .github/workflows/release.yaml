@@ -127,6 +127,14 @@ jobs:
             exit 1
           }
           printf 'KERNEL_PATH=%s\n' "${kernel}" >> "${GITHUB_ENV}"
+          wrapper_dir="${RUNNER_TEMP}/glassdock-container-bin"
+          mkdir -p "${wrapper_dir}"
+          container_bin="$(command -v container)"
+          printf '%s\n' '#!/bin/sh' \
+            "exec sudo \"${container_bin}\" \"\$@\"" \
+            > "${wrapper_dir}/container"
+          chmod 0755 "${wrapper_dir}/container"
+          printf '%s\n' "${wrapper_dir}" >> "${GITHUB_PATH}"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
