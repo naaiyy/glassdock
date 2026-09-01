@@ -116,6 +116,13 @@ test: lint-pipes
 control:
 	@$(SWIFT) build -c $(BUILD_CONFIGURATION) --product glassdockctl
 
+.PHONY: release-control
+release-control: BUILD_CONFIGURATION = release
+release-control:
+	@echo Building arm64 Glass Dock control client $(BUILD_VERSION)...
+	@$(SWIFT) build -c release --arch arm64 --disable-index-store --product glassdockctl
+	@file .build/release/glassdockctl | grep -q arm64
+
 .PHONY: menu-app
 menu-app:
 	@bash scripts/build-menu-app.sh $(BUILD_CONFIGURATION) $(BUILD_VERSION)
@@ -219,23 +226,23 @@ vmm:
 	@$(MAKE) -C VMM all
 
 .PHONY: installer
-installer: release guest-image vmm
+installer: release release-control guest-image vmm
 	@$(MAKE) -C pkginstaller BUILD_VERSION="$(BUILD_VERSION)" pkginstaller
 
 .PHONY: installer-signed
-installer-signed: release guest-image vmm
+installer-signed: release release-control guest-image vmm
 	@$(MAKE) -C pkginstaller BUILD_VERSION="$(BUILD_VERSION)" installer-signed
 
 .PHONY: installer-notarized
-installer-notarized: release guest-image vmm
+installer-notarized: release release-control guest-image vmm
 	@$(MAKE) -C pkginstaller BUILD_VERSION="$(BUILD_VERSION)" installer-notarized
 
 .PHONY: release-artifacts
-release-artifacts: release guest-image vmm
+release-artifacts: release release-control guest-image vmm
 	@$(MAKE) -C pkginstaller BUILD_VERSION="$(BUILD_VERSION)" release-artifacts
 
 .PHONY: release-artifacts-local
-release-artifacts-local: release guest-image vmm
+release-artifacts-local: release release-control guest-image vmm
 	@$(MAKE) -C pkginstaller BUILD_VERSION="$(BUILD_VERSION)" verify
 
 .PHONY: installer-test
