@@ -86,7 +86,7 @@ jobs:
   build:
     name: Build, sign, and notarize
     needs: quality
-    runs-on: macos-26
+    runs-on: [self-hosted, macOS, ARM64, glassdock-vmm-builder]
     timeout-minutes: 90
     environment: release-signing
     permissions:
@@ -104,37 +104,15 @@ jobs:
         run: |
           set -euo pipefail
           container --version
-          # GitHub Actions macOS runners are not Aqua login sessions. The
-          # container CLI derives a user launchd domain in this context, so
-          # its first bootstrap fails before the API server can start.
-          sudo container system start --enable-kernel-install || true
-          plist="$(sudo find /var/root "${HOME}" -maxdepth 6 \
-            -path '*/com.apple.container/apiserver/apiserver.plist' \
-            2>/dev/null | head -1)"
-          [ -n "${plist}" ] || {
-            echo "apiserver.plist not found" >&2
-            exit 1
-          }
-          sudo launchctl bootstrap system "${plist}"
-          sudo container system start --enable-kernel-install
-          sudo container system status
-          sudo container system kernel set --recommended --force
-          kernel="$(sudo find /var/root "${HOME}" -maxdepth 6 \
-            -path '*/com.apple.container/kernels/default.kernel-arm64' \
-            2>/dev/null | head -1)"
-          [ -n "${kernel}" ] || {
-            echo "default Apple Container kernel not found" >&2
+          container system start --enable-kernel-install
+          container system status
+          container system kernel set --recommended --force
+          kernel="${HOME}/Library/Application Support/com.apple.container/kernels/default.kernel-arm64"
+          [ -r "${kernel}" ] || {
+            echo "default Apple Container kernel is not readable: ${kernel}" >&2
             exit 1
           }
           printf 'KERNEL_PATH=%s\n' "${kernel}" >> "${GITHUB_ENV}"
-          wrapper_dir="${RUNNER_TEMP}/glassdock-container-bin"
-          mkdir -p "${wrapper_dir}"
-          container_bin="$(command -v container)"
-          printf '%s\n' '#!/bin/sh' \
-            "exec sudo \"${container_bin}\" \"\$@\"" \
-            > "${wrapper_dir}/container"
-          chmod 0755 "${wrapper_dir}/container"
-          printf '%s\n' "${wrapper_dir}" >> "${GITHUB_PATH}"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
