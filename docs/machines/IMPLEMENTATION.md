@@ -23,7 +23,17 @@ Create an Ubuntu desktop from Canonical's cloud image and checksum manifest:
 bash scripts/machines/create-ubuntu.sh 'Ubuntu Linux' 22222
 ```
 
-Choose an unused name and loopback SSH port. The local SSH key and cloud-init seed remain ignored. XFCE, LightDM, QGA, SPICE agents, Mesa, audio and WebDAV guest packages install at first boot. Windows installation uses an ARM64 Microsoft installer and requires the user to accept its terms and enter credentials. Guest-tool licenses are separate. No Windows activation or license entitlement is supplied.
+Choose an unused name and loopback SSH port. The local SSH key and cloud-init seed remain ignored. XFCE, Firefox, LightDM, QGA, SPICE agents, Mesa, audio and WebDAV guest packages install at first boot. Ubuntu's Firefox package installs Mozilla's official stable snap and registers the default browser alternative, so XFCE's browser launcher works. Earlier guests without a browser can be repaired inside Ubuntu with `sudo apt-get update && sudo apt-get install -y firefox`; the cloud-init seed does not retroactively update existing guests. Linux application builds must support ARM64 for this guest. Windows installation uses an ARM64 Microsoft installer and requires the user to accept its terms and enter credentials. Guest-tool licenses are separate. No Windows activation or license entitlement is supplied.
+
+Google Chrome is also available for Linux ARM64 from Google's official download service. It is an optional guest installation; Firefox remains the Ubuntu bootstrap browser. Inside Ubuntu:
+
+```sh
+curl -fL --retry 3 https://dl.google.com/linux/direct/google-chrome-stable_current_arm64.deb -o /var/tmp/google-chrome-arm64.deb
+test "$(dpkg-deb -f /var/tmp/google-chrome-arm64.deb Architecture)" = arm64
+sudo apt-get install -y /var/tmp/google-chrome-arm64.deb
+```
+
+The Chrome package registers its browser alternative and installs Google's update repository. Both browsers run with their normal sandboxes. Installing a browser does not make x86_64 Linux desktop applications compatible with the ARM64 guest.
 
 ## Stack and architecture
 
