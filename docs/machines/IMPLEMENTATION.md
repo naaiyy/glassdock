@@ -1,6 +1,6 @@
 # GlassDock Machines
 
-GlassDock Machines is the native Linux ARM64 and Windows ARM64 companion to the Docker-compatible daemon. Containers continue to use Apple Container/Containerization. Full machines use QEMU with Apple's Hypervisor.framework (HVF), because this stack supports Windows ARM, software TPM, SPICE, portable disks and saved RAM together. There is no VMPal code, Vercel Native, D3DMetal or decompiled iOS hypervisor in this implementation.
+GlassDock Machines is the native companion for Linux, Omarchy Quattro, Windows ARM64, and macOS on Apple Silicon. Containers continue to use Apple Container/Containerization. Linux and Windows machines use QEMU with Apple's Hypervisor.framework (HVF), because this stack supports Windows ARM, software TPM, SPICE, portable disks and saved RAM together. [macOS machines](MACOS.md) use Apple's Virtualization.framework, persistent Mac platform identity and a native display embedded in the same Machines window. The signed viewer owns macOS sessions; a local control endpoint exposes status and power actions to the CLI. There is no VMPal code, Vercel Native, D3DMetal or decompiled iOS hypervisor in this implementation.
 
 ## Build and run
 

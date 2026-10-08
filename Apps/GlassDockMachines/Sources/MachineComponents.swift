@@ -5,7 +5,7 @@ struct MachineEmblem: View {
     let system: MachineOS
     let size: CGFloat
     var body: some View {
-        Image(systemName: system.isLinux ? "terminal" : "desktopcomputer")
+        Image(systemName: system == .macos ? "apple.logo" : system.isLinux ? "terminal" : "desktopcomputer")
             .font(.system(size: size * 0.42, weight: .medium))
             .foregroundStyle(.secondary)
             .frame(width: size, height: size)
@@ -54,7 +54,7 @@ struct MachineSidebarRow: View {
     let state: MachineDisplayState
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: machine.operatingSystem.isLinux ? "terminal" : "desktopcomputer")
+            Image(systemName: machine.operatingSystem == .macos ? "apple.logo" : machine.operatingSystem.isLinux ? "terminal" : "desktopcomputer")
                 .foregroundStyle(.secondary).frame(width: 18).accessibilityHidden(true)
             Text(machine.name).lineLimit(1)
             Spacer(minLength: 6)

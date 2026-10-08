@@ -8,6 +8,7 @@ public enum QEMUArguments {
 
     public static func build(_ config: MachineConfiguration, bundle: URL, runtime: MachineRuntime) throws -> [String] {
         try config.validate()
+        guard config.operatingSystem != .macos else { throw MachineError.invalid("macOS uses Apple Virtualization.framework, not QEMU") }
         let socket = socketDirectory(id: config.id)
         func path(_ name: String) -> String { escaped(bundle.appendingPathComponent("state").appendingPathComponent(name).path) }
         var arguments = [

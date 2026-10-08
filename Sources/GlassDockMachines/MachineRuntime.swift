@@ -24,11 +24,14 @@ public struct MachineRuntime: Sendable {
         let installedNative = URL(fileURLWithPath: "/Applications/GlassDock Machines.app")
         let installedLibrary = installedNative.appendingPathComponent("Contents/Frameworks/qemu-aarch64-softmmu.framework/qemu-aarch64-softmmu")
         let defaultApp =
-            FileManager.default.fileExists(atPath: nativeLibrary.path)
+            (FileManager.default.fileExists(atPath: nativeLibrary.path)
+                || FileManager.default.isExecutableFile(atPath: native.appendingPathComponent("Contents/MacOS/glassdock-macos").path))
             ? native.path
-            : (FileManager.default.fileExists(atPath: developmentLibrary.path)
+            : ((FileManager.default.fileExists(atPath: developmentLibrary.path)
+                || FileManager.default.isExecutableFile(atPath: developmentNative.appendingPathComponent("Contents/MacOS/glassdock-macos").path))
                 ? developmentNative.path
-                : (FileManager.default.fileExists(atPath: installedLibrary.path)
+                : ((FileManager.default.fileExists(atPath: installedLibrary.path)
+                    || FileManager.default.isExecutableFile(atPath: installedNative.appendingPathComponent("Contents/MacOS/glassdock-macos").path))
                     ? installedNative.path
                     : (FileManager.default.fileExists(atPath: bundled.path) ? bundled.path : FileManager.default.currentDirectoryPath + "/.build/machines/UTM.app")))
         let app = URL(fileURLWithPath: environment["GLASSDOCK_VM_RUNTIME"] ?? defaultApp)
@@ -36,8 +39,9 @@ public struct MachineRuntime: Sendable {
         let launcher = helpers.appendingPathComponent("glassdock-qemu")
         let supervisor = helpers.appendingPathComponent("glassdock-vm-runner")
         let runtime = Self(app: app, launcher: launcher, supervisor: supervisor)
-        guard FileManager.default.isExecutableFile(atPath: launcher.path), FileManager.default.isExecutableFile(atPath: supervisor.path),
-            FileManager.default.fileExists(atPath: runtime.library("qemu-aarch64-softmmu").path)
+        let qemuReady = FileManager.default.isExecutableFile(atPath: launcher.path) && FileManager.default.fileExists(atPath: runtime.library("qemu-aarch64-softmmu").path)
+        let macOSReady = FileManager.default.isExecutableFile(atPath: runtime.macOSLauncher.path)
+        guard FileManager.default.isExecutableFile(atPath: supervisor.path), qemuReady || macOSReady
         else {
             throw MachineError.runtimeMissing(
                 "Build GlassDock Machines with scripts/machines/build-app.sh, or set GLASSDOCK_VM_RUNTIME and GLASSDOCK_VM_BIN to a prepared runtime and signed helpers.")
@@ -47,9 +51,12 @@ public struct MachineRuntime: Sendable {
 
     static func helperDirectory(app: URL, fallback: URL, overridden: Bool) -> URL {
         let bundled = app.appendingPathComponent("Contents/MacOS")
-        return !overridden && ["glassdock-qemu", "glassdock-vm-runner"].allSatisfy { FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path) }
+        return !overridden && FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent("glassdock-vm-runner").path)
+            && ["glassdock-qemu", "glassdock-macos"].contains { FileManager.default.isExecutableFile(atPath: bundled.appendingPathComponent($0).path) }
             ? bundled : fallback
     }
+
+    public var macOSLauncher: URL { supervisor.deletingLastPathComponent().appendingPathComponent("glassdock-macos") }
 
     public var firmware: URL { app.appendingPathComponent("Contents/Resources/qemu") }
     public func firmwareTemplates(for operatingSystem: MachineOS) -> (code: URL, variables: URL) {

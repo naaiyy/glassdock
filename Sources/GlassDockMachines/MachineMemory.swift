@@ -25,6 +25,7 @@ extension MachineStore {
             .filter { $0.pathExtension == "json" }.map { $0.deletingPathExtension().lastPathComponent }.sorted()
     }
     public func validateMemorySnapshot(_ id: UUID, name: String) throws {
+        guard try configuration(id).operatingSystem != .macos else { throw MachineError.invalid("Native macOS RAM checkpoints are unavailable; use stopped snapshots") }
         try validateMemoryName(name)
         let checkpoint = try JSONDecoder().decode(MachineMemoryCheckpoint.self, from: Data(contentsOf: memoryFile(id, name)))
         guard checkpoint.configuration == (try configuration(id)), checkpoint.runtimeVersion == (try runtime.tool("qemu-aarch64-softmmu", ["--version"])),
@@ -34,6 +35,7 @@ extension MachineStore {
         }
     }
     public func saveMemorySnapshot(_ id: UUID, name: String) throws {
+        guard try configuration(id).operatingSystem != .macos else { throw MachineError.invalid("Native macOS RAM checkpoints are unavailable; use stopped snapshots") }
         try validateMemoryName(name)
         let lock = try MachineLock(bundle: bundle(id), name: "session.lock")
         try withExtendedLifetime(lock) {
@@ -75,6 +77,7 @@ extension MachineStore {
         }
     }
     public func deleteMemorySnapshot(_ id: UUID, name: String) throws {
+        guard try configuration(id).operatingSystem != .macos else { throw MachineError.invalid("Native macOS RAM checkpoints are unavailable; use stopped snapshots") }
         try validateMemoryName(name)
         let lock = try MachineLock(bundle: bundle(id), name: "session.lock")
         try withExtendedLifetime(lock) {

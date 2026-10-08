@@ -4,10 +4,10 @@ import GlassDockMachines
 
 struct Machines: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "machines", abstract: "Manage Linux, Omarchy Quattro, and Windows ARM virtual machines.",
+        commandName: "machines", abstract: "Manage Linux, Omarchy Quattro, Windows, and macOS ARM virtual machines.",
         subcommands: [
             List.self, Create.self, Configure.self, Start.self, Stop.self, PowerOff.self, Pause.self, Resume.self, Clone.self, Snapshot.self, Restore.self, Snapshots.self,
-            Export.self, Import.self, Exec.self, Logs.self, Media.self, Memory.self,
+            Export.self, Import.self, Exec.self, Logs.self, Media.self, Memory.self, RestoreImage.self, Desktop.self,
         ])
 
     struct Location: ParsableArguments {
@@ -32,23 +32,40 @@ struct Machines: ParsableCommand {
     struct Create: ParsableCommand {
         @OptionGroup var location: Location
         @Argument var name: String
-        @Option(help: "linux, windows, or omarchy (Quattro ARM64)") var os: String = "linux"
+        @Option(help: "linux, windows, omarchy (Quattro), or macos (Apple Silicon)") var os: String = "linux"
         @Option var cpus: Int = 4
         @Option var memory: Int = 4096
         @Option var sshPort: Int?
         @Option var diskSize: Int = 64
+        @Option(help: "Local Apple Silicon IPSW restore image for macOS.") var ipsw: String?
         @Option(help: "Existing disk image to import and flatten.") var disk: String?
         @Option(help: "ARM64 installation ISO.") var iso: String?
         @Option(help: "Cloud-init seed ISO.") var seed: String?
         @Option(help: "Prepared Omarchy ARM64 factory guest folder (scripts/machines/prepare-omarchy.sh).") var omarchyGuest: String?
         func run() throws {
-            guard let operatingSystem = MachineOS(rawValue: os) else { throw ValidationError("Choose linux, windows, or omarchy") }
+            guard let operatingSystem = MachineOS(rawValue: os) else { throw ValidationError("Choose linux, windows, omarchy, or macos") }
             var config = MachineConfiguration(name: name, operatingSystem: operatingSystem, cpuCount: cpus, memoryMiB: memory, diskGiB: diskSize)
             config.sshPort = sshPort
             let created = try location.store().create(
                 config, disk: disk.map { URL(fileURLWithPath: $0) }, media: iso.map { URL(fileURLWithPath: $0) }, seed: seed.map { URL(fileURLWithPath: $0) },
-                omarchyGuest: omarchyGuest.map { URL(fileURLWithPath: $0) })
+                omarchyGuest: omarchyGuest.map { URL(fileURLWithPath: $0) }, macOSRestoreImage: ipsw.map { URL(fileURLWithPath: $0) })
             print(created.id.uuidString)
+        }
+    }
+    struct RestoreImage: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Print Apple's latest compatible macOS IPSW download URL and version.")
+        func run() throws {
+            let runtime = try MachineRuntime.discover()
+            print(try MachineRuntime.execute(runtime.macOSLauncher, ["latest"]), terminator: "")
+        }
+    }
+    struct Desktop: ParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Show the embedded macOS desktop in Machines.")
+        @OptionGroup var target: Target
+        func run() throws {
+            let (store, id) = try target.resolved()
+            guard try store.configuration(id).operatingSystem == .macos else { throw ValidationError("Use the Machines viewer for QEMU guests") }
+            try store.control(id).command("glassdock-show")
         }
     }
     struct Configure: ParsableCommand {
@@ -174,7 +191,10 @@ struct Machines: ParsableCommand {
         @OptionGroup var target: Target
         @Argument(parsing: .remaining, help: "Guest executable followed by its arguments.") var command: [String]
         func run() throws {
-            let (_, id) = try target.resolved()
+            let (store, id) = try target.resolved()
+            guard try store.configuration(id).operatingSystem != .macos else {
+                throw ValidationError("Native macOS has no QEMU guest agent. Use SSH after enabling Remote Login in the guest.")
+            }
             guard let path = command.first else { throw ValidationError("Specify a guest executable") }
             let result = try GuestAgent(id: id).execute(path: path, arguments: Array(command.dropFirst()))
             FileHandle.standardOutput.write(Data(result.stdout.utf8))

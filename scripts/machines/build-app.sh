@@ -8,8 +8,14 @@ cat > "$runtime_dir/hypervisor.entitlements" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>
 PLIST
+cat > "$runtime_dir/virtualization.entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>
+PLIST
 # Installation and signing precede running a guest with Hypervisor.framework.
 if [[ -z "${GLASSDOCK_VM_RUNTIME_SOURCE:-}" ]]; then bash "$root_dir/scripts/machines/install-runtime.sh"; fi
+swift build --package-path "$root_dir" --product glassdock-macos
 swift build --package-path "$root_dir" --product glassdockctl
 swift build --package-path "$root_dir" --product glassdock-vm-runner
 swift build --package-path "$root_dir" --product glassdock-qemu
@@ -56,11 +62,14 @@ sign_development_binary() {
   chmod 755 "$staged"
   if [[ "$(basename "$binary")" == "glassdock-qemu" ]]; then
     codesign --force --sign - --entitlements "$runtime_dir/hypervisor.entitlements" "$staged"
+  elif [[ "$(basename "$binary")" == "glassdock-macos" ]]; then
+    codesign --force --sign - --entitlements "$runtime_dir/virtualization.entitlements" "$staged"
   else
     codesign --force --sign - "$staged"
   fi
   mv -f "$staged" "$binary"
 }
+sign_development_binary "$core_bin/glassdock-macos"
 sign_development_binary "$core_bin/glassdockctl"
 sign_development_binary "$core_bin/glassdock-vm-runner"
 sign_development_binary "$core_bin/glassdock-qemu"
@@ -79,11 +88,14 @@ install_binary() {
   fi
   if [[ "$name" == "glassdock-qemu" ]]; then
     codesign --force --sign - --entitlements "$runtime_dir/hypervisor.entitlements" "$staged"
+  elif [[ "$name" == "glassdock-macos" || "$name" == "GlassDockMachinesApp" ]]; then
+    codesign --force --sign - --entitlements "$runtime_dir/virtualization.entitlements" "$staged"
   else
     codesign --force --sign - "$staged"
   fi
   mv -f "$staged" "$app/Contents/MacOS/$name"
 }
+install_binary "$core_bin/glassdock-macos" glassdock-macos
 install_binary "$ui_bin/GlassDockMachinesApp" GlassDockMachinesApp
 install_binary "$core_bin/glassdock-qemu" glassdock-qemu
 install_binary "$core_bin/glassdock-vm-runner" glassdock-vm-runner

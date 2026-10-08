@@ -1,14 +1,15 @@
 import Foundation
 
 public enum MachineOS: String, Codable, CaseIterable, Sendable {
-    case linux, windows, omarchy
+    case linux, windows, omarchy, macos
 
-    public var isLinux: Bool { self != .windows }
+    public var isLinux: Bool { self == .linux || self == .omarchy }
     public var displayName: String {
         switch self {
         case .linux: "Linux"
         case .windows: "Windows"
         case .omarchy: "Omarchy Quattro"
+        case .macos: "macOS"
         }
     }
 }
@@ -41,6 +42,7 @@ public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
         self.memoryMiB = memoryMiB
         self.diskGiB = diskGiB
         macAddress = Self.newMAC()
+        if operatingSystem == .macos { audioEnabled = true }
         if operatingSystem == .omarchy {
             graphics = .virgl
             audioEnabled = true
@@ -70,6 +72,14 @@ public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
             if let omarchyBoot { try omarchyBoot.validate() }
         } else if omarchyBoot != nil {
             throw MachineError.invalid("Omarchy boot artifacts require the Omarchy operating system")
+        }
+        if operatingSystem == .macos {
+            guard cpuCount >= 2, memoryMiB >= 4096, diskGiB >= 64, graphics == .basic else {
+                throw MachineError.invalid("macOS requires Apple graphics, at least 2 CPUs, 4096 MiB RAM, and 64 GiB disk")
+            }
+            guard sshPort == nil, !seedMedia, usbEnabled != true else {
+                throw MachineError.invalid("macOS uses native NAT networking and input; QEMU SSH forwarding, seed ISOs, and USB forwarding are unavailable")
+            }
         }
         if operatingSystem == .windows && (memoryMiB < 4096 || cpuCount < 2 || diskGiB < 64) {
             throw MachineError.invalid("Windows requires at least 2 CPUs, 4096 MiB RAM, and 64 GiB disk")

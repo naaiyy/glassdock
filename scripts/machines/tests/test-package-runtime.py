@@ -43,7 +43,7 @@ class PackagingTests(unittest.TestCase):
             server = source / 'Contents/MacOS/glassdock-render-server'
             server.write_bytes(b'new-server')
             held = []
-            for name in ['glassdock-qemu', 'glassdock-vm-runner', 'GlassDockMachinesApp', 'glassdock-render-server']:
+            for name in ['glassdock-qemu', 'glassdock-vm-runner', 'glassdock-macos', 'GlassDockMachinesApp', 'glassdock-render-server']:
                 binary = app / 'Contents/MacOS' / name
                 binary.write_bytes(b'original-helper')
                 binary.chmod(0o755)
@@ -54,7 +54,10 @@ class PackagingTests(unittest.TestCase):
                 if args[0] == 'lipo': return 'arm64\n'
                 if '-L' in args: return 'binary:\n'
                 return 'cmd LC_RPATH\n path /old/runtime (offset 12)\n'
+            signed = {}
             def run(args, **kwargs):
+                if args[0] == 'codesign' and '--verify' not in args:
+                    signed[pathlib.Path(args[-1]).name] = args
                 if args[0] == 'ditto':
                     shutil.copytree(args[1], args[2], dirs_exist_ok=True)
                 elif args[0] in ['codesign', 'install_name_tool'] and '--verify' not in args:
@@ -71,6 +74,11 @@ class PackagingTests(unittest.TestCase):
                 for stream, original in held:
                     self.assertEqual(stream.read(), original)
                 self.assertIn(b'-modified', (app / 'Contents/MacOS/glassdock-qemu').read_bytes())
+                for name in ['.GlassDockMachinesApp-staged', '.glassdock-macos-staged', app.name]:
+                    arguments = signed[name]
+                    self.assertIn('--entitlements', arguments)
+                    entitlements = pathlib.Path(arguments[arguments.index('--entitlements') + 1])
+                    self.assertEqual(entitlements.name, 'virtualization.entitlements')
             finally:
                 for stream, _ in held: stream.close()
 

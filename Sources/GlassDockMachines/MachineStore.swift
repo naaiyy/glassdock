@@ -55,8 +55,17 @@ public struct MachineStore: Sendable {
         try encoder.encode(configuration).write(to: location.appendingPathComponent("machine.json"), options: .atomic)
     }
 
-    public func create(_ input: MachineConfiguration, disk: URL? = nil, media: URL? = nil, seed: URL? = nil, omarchyGuest: URL? = nil) throws -> MachineConfiguration {
+    public func create(_ input: MachineConfiguration, disk: URL? = nil, media: URL? = nil, seed: URL? = nil, omarchyGuest: URL? = nil, macOSRestoreImage: URL? = nil) throws
+        -> MachineConfiguration
+    {
         var config = input
+        if config.operatingSystem == .macos {
+            guard let macOSRestoreImage, disk == nil, media == nil, seed == nil, omarchyGuest == nil else {
+                throw MachineError.invalid("macOS requires a local Apple IPSW restore image")
+            }
+            return try createMacOS(config, restoreImage: macOSRestoreImage)
+        }
+        guard macOSRestoreImage == nil else { throw MachineError.invalid("IPSW restore images require macOS") }
         if config.operatingSystem == .omarchy {
             guard let omarchyGuest, disk == nil, media == nil, seed == nil else {
                 throw MachineError.invalid("Omarchy requires a prepared factory guest folder; run scripts/machines/prepare-omarchy.sh")
@@ -104,6 +113,33 @@ public struct MachineStore: Sendable {
         }
     }
 
+    private func createMacOS(_ input: MachineConfiguration, restoreImage: URL) throws -> MachineConfiguration {
+        var config = input
+        config.installationMedia = true
+        try config.validate()
+        guard fm.isExecutableFile(atPath: runtime.macOSLauncher.path) else {
+            throw MachineError.runtimeMissing("Build the signed glassdock-macos helper with scripts/machines/build-app.sh")
+        }
+        let values = try restoreImage.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? 0) > 0 else { throw MachineError.invalid("Choose a local Apple IPSW file") }
+        let free = (try fm.attributesOfFileSystem(forPath: root.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
+        guard free >= UInt64(values.fileSize ?? 0) + 22 * 1024 * 1024 * 1024 else {
+            throw MachineError.invalid("macOS installation needs space for the IPSW plus at least 22 GiB on the library volume. Free storage before retrying.")
+        }
+        let lock = try MachineLock(bundle: root)
+        return try withExtendedLifetime(lock) {
+            guard !fm.fileExists(atPath: bundle(config.id).path) else { throw MachineError.invalid("Machine already exists") }
+            let stage = root.appendingPathComponent(".create-" + UUID().uuidString)
+            try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? fm.removeItem(at: stage) }
+            try save(config, at: stage)
+            try MachineRuntime.execute(runtime.macOSLauncher, ["prepare", stage.path, restoreImage.path])
+            try MacOSGuest.validateState(at: stage.appendingPathComponent("state"), installed: false)
+            try fm.moveItem(at: stage, to: bundle(config.id))
+            return config
+        }
+    }
+
     public func configure(_ id: UUID, cpuCount: Int? = nil, memoryMiB: Int? = nil, graphics: MachineGraphics? = nil, audioEnabled: Bool? = nil, usbEnabled: Bool? = nil) throws {
         let lock = try MachineLock(bundle: bundle(id))
         try withExtendedLifetime(lock) {
@@ -120,6 +156,7 @@ public struct MachineStore: Sendable {
         let lock = try MachineLock(bundle: bundle(id))
         try withExtendedLifetime(lock) {
             var config = try configuration(id)
+            guard config.operatingSystem != .macos else { throw MachineError.invalid("macOS uses an IPSW during first installation; ISO mounting is unavailable") }
             if let installation {
                 guard !installation || fm.fileExists(atPath: bundle(id).appendingPathComponent("state/install.iso").path) else {
                     throw MachineError.invalid("This machine has no installation media")
@@ -148,6 +185,10 @@ public struct MachineStore: Sendable {
 
     public func shutdown(_ id: UUID) throws {
         let qmp = try control(id)
+        if try configuration(id).operatingSystem == .macos {
+            try qmp.command("system_powerdown")
+            return
+        }
         let state = (try qmp.command("query-status")["return"] as? [String: Any])?["status"] as? String
         // A paused CPU cannot process the ACPI shutdown request.
         if state == "paused" { try qmp.command("cont") }
@@ -174,7 +215,8 @@ public struct MachineStore: Sendable {
         throw MachineError.command("Machine has not stopped; inspect its supervisor log")
     }
     public func start(_ id: UUID, memorySnapshot: String? = nil) throws {
-        _ = try configuration(id)
+        let config = try configuration(id)
+        guard config.operatingSystem != .macos || memorySnapshot == nil else { throw MachineError.invalid("Native macOS RAM checkpoints are unavailable; use stopped snapshots") }
         try checkStopped(id)
         // Release before the supervisor obtains the lifetime lock.
         if let memorySnapshot { try validateMemorySnapshot(id, name: memorySnapshot) }
@@ -294,6 +336,7 @@ public struct MachineStore: Sendable {
             try fm.createDirectory(at: stage, withIntermediateDirectories: false)
             defer { try? fm.removeItem(at: stage) }
             try copyState(from: bundle(id).appendingPathComponent("state"), to: stage.appendingPathComponent("state"))
+            if config.operatingSystem == .macos { try MacOSGuest.newIdentity(at: stage.appendingPathComponent("state")) }
             // TPM persistent state is deliberately preserved so encrypted disks remain usable.
             // OS identity/licensing must be generalized inside Windows separately.
             try save(config, at: stage)
@@ -311,9 +354,11 @@ public struct MachineStore: Sendable {
             defer { try? fm.removeItem(at: stage) }
             try copyState(from: bundle(id).appendingPathComponent("state"), to: machine.appendingPathComponent("state"))
             let config = try configuration(id)
+            guard !compact || config.operatingSystem != .macos else { throw MachineError.invalid("macOS uses a native raw disk; QCOW2 compaction is unavailable") }
             // Ejected installers remain available locally, but are not part of
             // the exported installed system or its storage requirements.
-            for (mounted, filename) in [(config.installationMedia, "install.iso"), (config.seedMedia, "seed.iso")] where !mounted {
+            for (mounted, filename) in [(config.installationMedia, config.operatingSystem == .macos ? "restore.ipsw" : "install.iso"), (config.seedMedia, "seed.iso")]
+            where !mounted {
                 let media = machine.appendingPathComponent("state/\(filename)")
                 if fm.fileExists(atPath: media.path) { try fm.removeItem(at: media) }
             }
