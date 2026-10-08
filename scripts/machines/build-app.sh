@@ -74,6 +74,9 @@ install_binary() {
   staged="$(mktemp "$app/Contents/MacOS/.binary.XXXXXX")"
   cp "$source" "$staged"
   chmod 755 "$staged"
+  if [[ "$name" == "GlassDockMachinesApp" ]]; then
+    bash "$root_dir/scripts/stamp-app-sdk.sh" "$staged"
+  fi
   if [[ "$name" == "glassdock-qemu" ]]; then
     codesign --force --sign - --entitlements "$runtime_dir/hypervisor.entitlements" "$staged"
   else

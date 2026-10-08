@@ -32,7 +32,8 @@ public final class MenuModel: ObservableObject {
         self.client = client
         self.launchMachines =
             launchMachines ?? {
-                guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.glassdock.machines"), NSWorkspace.shared.open(url) else {
+                let preview = ProcessInfo.processInfo.environment["GLASSDOCK_MACHINES_APP"].map { URL(fileURLWithPath: $0) }
+                guard let url = preview ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.glassdock.machines"), NSWorkspace.shared.open(url) else {
                     throw NSError(
                         domain: "GlassDockMachines", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "Build or install Glass Dock Machines, then open it once before launching it from the menu bar."])
