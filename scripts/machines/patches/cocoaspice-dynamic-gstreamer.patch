@@ -1,0 +1,27 @@
+diff --git a/Package.swift b/Package.swift
+index 5ff5d1f..0478f52 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -39,7 +39,7 @@ let package = Package(
+             exclude: [
+                 "ExternalHeaders",
+                 "CSUSBDevice.m",
+-                "CSUSBManager.m"],
++                "CSUSBManager.m", "gst_ios_init.m"],
+             cSettings: [
+                 .headerSearchPath("ExternalHeaders"),
+                 .headerSearchPath("ExternalHeaders/glib-2.0"),
+diff --git a/Sources/CocoaSpice/CSMain.m b/Sources/CocoaSpice/CSMain.m
+index bbee095..5ea61b1 100644
+--- a/Sources/CocoaSpice/CSMain.m
++++ b/Sources/CocoaSpice/CSMain.m
+@@ -91,7 +91,8 @@ void *spice_main_loop(void *args) {
+     CSMain *self = (__bridge_transfer CSMain *)args;
+     
+     pthread_setname_np("SPICE Main Loop");
+-    gst_ios_init();
++    // macOS development runtime uses dynamic GStreamer, not iOS static plugins.
++    gst_init(NULL, NULL);
+     
+     g_main_context_ref(self->_main_context);
+     g_main_context_push_thread_default(self->_main_context);

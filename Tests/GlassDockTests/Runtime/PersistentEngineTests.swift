@@ -175,15 +175,19 @@ struct PersistentEngineTests {
 
     @Test("replaces a terminal guest connection before the next request")
     func replacesTerminalConnection() async throws {
-        let machine = FakeEngineMachineHost()
+        // Readiness may retry a refused or slow handshake without starting
+        // another VM generation. Exercise those retries deliberately.
+        let machine = FakeEngineMachineHost(failedConnections: 2)
         let engine = PersistentEngine(machine: machine)
 
         let first = try await engine.readyConnection()
+        let initialConnections = await machine.connectCount
         await first.close()
         let second = try await engine.readyConnection()
 
         #expect(first !== second)
-        #expect(await machine.connectCount == 2)
+        #expect(await machine.connectCount >= initialConnections + 1)
+        #expect(await machine.startCount == 2)
         #expect(await machine.stopCount == 1)
         await engine.shutdown()
     }

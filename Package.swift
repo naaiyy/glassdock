@@ -7,12 +7,16 @@ let buildVersion = ProcessInfo.processInfo.environment["BUILD_VERSION"] ?? "unsp
 let buildTime = ProcessInfo.processInfo.environment["BUILD_TIME"] ?? "unspecified"
 let dockerEngineApiMinVersion = ProcessInfo.processInfo.environment["DOCKER_ENGINE_API_MIN_VERSION"] ?? "v1.32"
 let dockerEngineApiMaxVersion = ProcessInfo.processInfo.environment["DOCKER_ENGINE_API_MAX_VERSION"] ?? "v1.51"
+let machineFrameworks = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent(".build/machines/UTM.app/Contents/Frameworks").path
 let package = Package(
     name: "GlassDock",
     platforms: [
         .macOS(.v15)
     ],
     products: [
+        .library(name: "GlassDockMachines", targets: ["GlassDockMachines"]),
+        .executable(name: "glassdock-qemu", targets: ["glassdock-qemu"]),
+        .executable(name: "glassdock-vm-runner", targets: ["glassdock-vm-runner"]),
         .library(name: "GlassDockControl", targets: ["GlassDockControl"]),
         .library(name: "GlassDockMenuKit", targets: ["GlassDockMenuKit"]),
         .executable(name: "glassdock", targets: ["GlassDock"]),
@@ -20,6 +24,7 @@ let package = Package(
         .executable(name: "GlassDockMenu", targets: ["GlassDockMenu"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20"),
         .package(url: "https://github.com/apple/container.git", exact: "1.2.2"),
         .package(url: "https://github.com/apple/containerization.git", exact: "0.40.1"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.121.3"),
@@ -29,6 +34,9 @@ let package = Package(
         .package(url: "https://github.com/facebook/zstd.git", exact: "1.5.7"),
     ],
     targets: [
+        .target(name: "GlassDockMachines", dependencies: [.product(name: "ZIPFoundation", package: "ZIPFoundation")]),
+        .executableTarget(name: "glassdock-qemu", linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", machineFrameworks])]),
+        .executableTarget(name: "glassdock-vm-runner", dependencies: ["GlassDockMachines"]),
         .target(
             name: "GlassDockControl"
         ),
@@ -60,6 +68,7 @@ let package = Package(
             name: "glassdockctl",
             dependencies: [
                 "GlassDockControl",
+                "GlassDockMachines",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
@@ -69,12 +78,13 @@ let package = Package(
         ),
         .target(
             name: "GlassDockMenuKit",
-            dependencies: ["GlassDockControl"]
+            dependencies: ["GlassDockControl", "GlassDockMachines"]
         ),
         .testTarget(
             name: "GlassDockTests",
             dependencies: [
                 .target(name: "GlassDock"),
+                "GlassDockMachines",
                 .product(name: "ContainerAPIClient", package: "container"),
                 .product(name: "VaporTesting", package: "vapor"),
                 .product(name: "libzstd", package: "zstd"),

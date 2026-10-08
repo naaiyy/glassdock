@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Upstream source inventory for the verified development runtime, not a release security audit or source artifact checksum lock",
+  "upstreamManifest": "https://github.com/utmapp/UTM/blob/v5.0.5/patches/sources",
+  "runtime": {
+    "version": "5.0.5",
+    "sha256": "713afe73c711f01344b8766654be531cd391ed2e30931206f43b5159f143764f"
+  },
+  "cocoaSpice": {
+    "repository": "https://github.com/utmapp/CocoaSpice",
+    "commit": "127033fa3e59cd49678f49ed54f8adfc060afb56"
+  },
+  "components": {
+    "pkg_config": {
+      "src": "https://pkgconfig.freedesktop.org/releases/pkg-config-0.29.2.tar.gz"
+    },
+    "ffi": {
+      "src": "https://github.com/libffi/libffi/releases/download/v3.5.0/libffi-3.5.0.tar.gz"
+    },
+    "iconv": {
+      "src": "http://ftp.gnu.org/gnu/libiconv/libiconv-1.16.tar.gz"
+    },
+    "gettext": {
+      "src": "http://ftp.gnu.org/gnu/gettext/gettext-0.22.5.tar.gz"
+    },
+    "png": {
+      "src": "https://ftp.osuosl.org/pub/blfs/conglomeration/libpng/libpng-1.6.48.tar.xz"
+    },
+    "jpeg_turbo": {
+      "src": "https://ftp.osuosl.org/pub/blfs/conglomeration/libjpeg-turbo/libjpeg-turbo-1.5.3.tar.gz"
+    },
+    "glib": {
+      "src": "https://download.gnome.org/sources/glib/2.83/glib-2.83.0.tar.xz"
+    },
+    "gpg_error": {
+      "src": "https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.38.tar.gz"
+    },
+    "gcrypt": {
+      "src": "https://www.gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.8.4.tar.gz"
+    },
+    "pixman": {
+      "src": "https://www.cairographics.org/releases/pixman-0.38.0.tar.gz"
+    },
+    "openssl": {
+      "src": "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1b/openssl-1.1.1b.tar.gz"
+    },
+    "tpms": {
+      "src": "https://github.com/osy/libtpms/releases/download/v0.9.6/libtpms-0.9.6.tar.gz"
+    },
+    "swtpm": {
+      "src": "https://github.com/utmapp/swtpm/releases/download/v0.8.99/swtpm-0.8.99.tar.gz"
+    },
+    "opus": {
+      "src": "https://archive.mozilla.org/pub/opus/opus-1.3.tar.gz"
+    },
+    "zstd": {
+      "src": "https://github.com/facebook/zstd/releases/download/v1.5.2/zstd-1.5.2.tar.gz"
+    },
+    "spice_protocol": {
+      "src": "https://www.spice-space.org/download/releases/spice-protocol-0.14.4.tar.xz"
+    },
+    "spice_server": {
+      "src": "https://www.spice-space.org/download/releases/spice-server/spice-0.14.3.tar.bz2"
+    },
+    "usb": {
+      "src": "https://github.com/libusb/libusb/releases/download/v1.0.25/libusb-1.0.25.tar.bz2"
+    },
+    "usbredir": {
+      "src": "https://www.spice-space.org/download/usbredir/usbredir-0.14.0.tar.xz"
+    },
+    "slirp": {
+      "src": "https://github.com/utmapp/libslirp/releases/download/v4.9.1-release-mirror/libslirp-v4.9.1.tar.gz"
+    },
+    "qemu": {
+      "src": "https://github.com/utmapp/qemu/releases/download/v10.0.12-utm/qemu-10.0.12-utm.tar.xz"
+    },
+    "json_glib": {
+      "src": "https://download.gnome.org/sources/json-glib/1.10/json-glib-1.10.0.tar.xz"
+    },
+    "gst": {
+      "src": "https://gstreamer.freedesktop.org/src/gstreamer/gstreamer-1.19.1.tar.xz"
+    },
+    "gst_base": {
+      "src": "https://gstreamer.freedesktop.org/src/gst-plugins-base/gst-plugins-base-1.19.1.tar.xz"
+    },
+    "gst_good": {
+      "src": "https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.19.1.tar.xz"
+    },
+    "xml2": {
+      "src": "http://xmlsoft.org/sources/libxml2-2.9.12.tar.gz"
+    },
+    "soup": {
+      "src": "https://download.gnome.org/sources/libsoup/3.6/libsoup-3.6.0.tar.xz"
+    },
+    "phodav": {
+      "src": "https://download.gnome.org/sources/phodav/3.0/phodav-3.0.tar.xz"
+    },
+    "spice_client": {
+      "src": "https://www.spice-space.org/download/gtk/spice-gtk-0.42.tar.xz"
+    },
+    "libucontext": {
+      "repo": "https://github.com/utmapp/libucontext.git",
+      "commit": "9b1d8f01a6e99166f9808c79966abe10786de8b6"
+    },
+    "webkit": {
+      "repo": "https://github.com/utmapp/WebKit.git",
+      "commit": "ed78ab6e1a37f4f11583a0bd038f22ec91f3ff10",
+      "subdirs": "Source/ThirdParty/ANGLE Configurations Tools/ccache"
+    },
+    "epoxy": {
+      "repo": "https://github.com/utmapp/libepoxy.git",
+      "commit": "bf98587477fe68d07b93319ece7b40a7d0e2eabe"
+    },
+    "vulkan_loader": {
+      "repo": "https://github.com/osy/Vulkan-Loader.git",
+      "commit": "6df86907be582927507637f3f6003ea58bc34517"
+    },
+    "virglrenderer": {
+      "repo": "https://github.com/utmapp/virglrenderer.git",
+      "commit": "482f9d8b8c2d2288efa10a027116216909d2c226"
+    },
+    "mesa": {
+      "repo": "https://gitlab.freedesktop.org/osy/mesa.git",
+      "commit": "79bc850d884a1307356ff61c017e58901b90c7e2"
+    },
+    "moltenvk": {
+      "repo": "https://github.com/utmapp/MoltenVK.git",
+      "commit": "ef1c5461774f5fbd224ddcfd91fd2c0ea23f0384"
+    },
+    "llvm15": {
+      "src": "https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz"
+    },
+    "dxmt": {
+      "repo": "https://github.com/utmapp/dxmt.git",
+      "commit": "bcdcf6da89af6c9fedeb2fc92b4367b23d5d6ed6"
+    }
+  },
+  "excluded": {
+    "D3DMETAL": "Proprietary Apple framework is not used and must not be redistributed with this bootstrap",
+    "HYPERVISOR": "iOS decompiled hypervisor is not needed for macOS; use the public macOS Hypervisor.framework"
+  },
+  "releaseGates": [
+    "Build only the required components from source",
+    "Verify source artifact hashes and preserve upstream patches/build flags",
+    "Review old dependency versions before shipping",
+    "Include all license notices and corresponding source as required",
+    "Use portable relative framework paths; remove development UTM.app symlink"
+  ]
+}

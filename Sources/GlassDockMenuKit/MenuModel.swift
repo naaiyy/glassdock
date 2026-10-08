@@ -26,9 +26,25 @@ public final class MenuModel: ObservableObject {
     @Published public var errorMessage: String?
 
     private let client: ControlClient
+    private let launchMachines: () throws -> Void
 
-    public init(client: ControlClient = ControlClient()) {
+    public init(client: ControlClient = ControlClient(), launchMachines: (() throws -> Void)? = nil) {
         self.client = client
+        self.launchMachines =
+            launchMachines ?? {
+                guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.glassdock.machines"), NSWorkspace.shared.open(url) else {
+                    throw NSError(
+                        domain: "GlassDockMachines", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Build or install Glass Dock Machines, then open it once before launching it from the menu bar."])
+                }
+            }
+    }
+
+    public func openMachines() {
+        do {
+            try launchMachines()
+            errorMessage = nil
+        } catch { errorMessage = error.localizedDescription }
     }
 
     public var statusLabel: String { snapshot?.daemon.state.rawValue.capitalized ?? "Checking" }

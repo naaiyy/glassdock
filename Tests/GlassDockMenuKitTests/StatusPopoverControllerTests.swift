@@ -30,6 +30,27 @@ struct StatusPopoverControllerTests {
         #expect(model.selectedSection == .containers)
     }
 
+    @Test("machines opens the companion without controlling the container daemon")
+    func opensMachines() {
+        var launches = 0
+        let model = MenuModel(launchMachines: { launches += 1 })
+        model.errorMessage = "Previous error"
+        model.openMachines()
+        #expect(launches == 1)
+        #expect(model.errorMessage == nil)
+        #expect(model.snapshot == nil)
+        #expect(model.selectedSection == .containers)
+    }
+
+    @Test("missing machine companion reports a recoverable launch error")
+    func reportsMissingCompanion() {
+        let model = MenuModel(launchMachines: {
+            throw NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: "Machine app is missing"])
+        })
+        model.openMachines()
+        #expect(model.errorMessage == "Machine app is missing")
+    }
+
     @Test("status-item activation toggles one anchored popover")
     func togglesPopover() {
         let popover = TestPopover()
