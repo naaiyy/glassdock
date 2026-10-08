@@ -8,7 +8,7 @@ struct UbuntuDesktopProvisioningTests {
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let script = try String(contentsOf: root.appendingPathComponent("scripts/machines/create-ubuntu.sh"), encoding: .utf8)
-        let start = try #require(script.range(of: "python3 - \"$key.pub\" \"$seed_dir\" <<'PY'\n"))
+        let start = try #require(script.range(of: "python3 - \"$key.pub\" \"$seed_dir\" \"$root_dir/scripts/machines/guest/display-refresh.py\" <<'PY'\n"))
         let end = try #require(script.range(of: "\nPY\n", range: start.upperBound..<script.endIndex))
         let renderer = String(script[start.upperBound..<end.lowerBound])
         let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -19,7 +19,7 @@ struct UbuntuDesktopProvisioningTests {
         let input = Pipe()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-", key.path, fixture.path]
+        process.arguments = ["python3", "-", key.path, fixture.path, root.appendingPathComponent("scripts/machines/guest/display-refresh.py").path]
         process.standardInput = input
         try process.run()
         try input.fileHandleForWriting.write(contentsOf: Data(renderer.utf8))
@@ -32,5 +32,7 @@ struct UbuntuDesktopProvisioningTests {
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         // XFCE includes a generic browser launcher, but does not itself install a browser.
         #expect(packages.contains("firefox"))
+        #expect(packages.contains("xcvt"))
+        #expect(userData.contains("/etc/xdg/autostart/glassdock-display-refresh.desktop"))
     }
 }

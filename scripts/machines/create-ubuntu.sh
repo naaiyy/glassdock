@@ -28,11 +28,12 @@ key="$runtime_dir/seed/id_ed25519"
 [[ -f "$key" ]] || ssh-keygen -q -t ed25519 -N '' -C glassdock-development-guest -f "$key"
 seed_dir="$(mktemp -d "$runtime_dir/seed/cloud-init.XXXXXX")"
 trap 'rm -rf "$seed_dir"' EXIT
-python3 - "$key.pub" "$seed_dir" <<'PY'
+python3 - "$key.pub" "$seed_dir" "$root_dir/scripts/machines/guest/display-refresh.py" <<'PY'
 from pathlib import Path
-import sys,uuid
+import sys,uuid,base64
 key = Path(sys.argv[1]).read_text().strip().replace("'", "''")
 root = Path(sys.argv[2])
+refresh = base64.b64encode(Path(sys.argv[3]).read_bytes()).decode()
 (root/'meta-data').write_text(f'instance-id: glassdock-{uuid.uuid4()}\nlocal-hostname: glassdock-linux\n')
 (root/'network-config').write_text('version: 2\nethernets:\n  guest:\n    match:\n      name: "en*"\n    dhcp4: true\n    optional: true\n')
 (root/'user-data').write_text(f'''#cloud-config
@@ -42,8 +43,19 @@ users:
     shell: /bin/bash
     ssh_authorized_keys:
       - '{key}'
-packages: [qemu-guest-agent, spice-vdagent, xfce4, firefox, mousepad, lightdm, xserver-xorg, mesa-utils, davfs2, spice-webdavd, linux-generic, alsa-utils, pulseaudio]
+packages: [qemu-guest-agent, spice-vdagent, xfce4, firefox, mousepad, lightdm, xserver-xorg, mesa-utils, davfs2, spice-webdavd, linux-generic, alsa-utils, pulseaudio, x11-xserver-utils, xcvt]
 write_files:
+  - path: /usr/local/bin/glassdock-display-refresh
+    permissions: '0755'
+    encoding: b64
+    content: {refresh}
+  - path: /etc/xdg/autostart/glassdock-display-refresh.desktop
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name=GlassDock display timing
+      Exec=/usr/local/bin/glassdock-display-refresh
+      OnlyShowIn=XFCE;
   - path: /etc/lightdm/lightdm.conf.d/50-glassdock.conf
     content: |
       [Seat:*]
