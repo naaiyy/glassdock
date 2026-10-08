@@ -6,7 +6,8 @@ import SwiftUI
 struct MachinesApplication: App {
     var body: some Scene {
         WindowGroup("Glass Dock Machines") { MachineLibraryView() }
-            .defaultSize(width: 1100, height: 760)
+            .defaultSize(width: 1180, height: 780)
+            .windowResizability(.contentMinSize)
     }
 }
 
@@ -28,134 +29,142 @@ struct MachineLibraryView: View {
     @State private var shareReadOnly = true
     @State private var usbRequest = 0
     private func store() throws -> MachineStore { try MachineStore(root: MachineStore.defaultRoot, runtime: MachineRuntime.discover()) }
+    @State private var searchText = ""
+    @State private var showingInspector = false
+    @State private var confirmingShutdown = false
+    @State private var pendingRestore: (id: UUID, name: String, memory: Bool)?
+    @State private var pendingCheckpointDeletion: (id: UUID, name: String)?
+    private func displayState(_ machine: MachineConfiguration) -> MachineDisplayState { MachineDisplayState(status: status[machine.id]) }
+    private var currentMachine: MachineConfiguration? { machines.first { $0.id == selected } }
+    private var filteredMachines: [MachineConfiguration] {
+        machines.filter { searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText) }
+    }
+
     var body: some View {
         NavigationSplitView {
-            List(machines, selection: $selected) { machine in
-                HStack(spacing: 12) {
-                    Image(systemName: machine.operatingSystem == .linux ? "terminal" : "desktopcomputer").font(.title2)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(machine.name).font(.headline)
-                        Text(status[machine.id] ?? "Checking…").font(.caption).foregroundStyle(.secondary)
-                    }
-                }.padding(.vertical, 6).tag(machine.id)
-            }
-            .navigationTitle("Machines")
-            .navigationSplitViewColumnWidth(min: 200, ideal: 250)
-            .toolbar {
-                Button {
-                    creating = true
-                } label: {
-                    Label("New Machine", systemImage: "plus")
+            List(selection: $selected) {
+                ForEach(filteredMachines) { machine in
+                    MachineSidebarRow(machine: machine, state: displayState(machine))
+                        .tag(machine.id)
                 }
-                Button(action: importMachine) { Label("Import", systemImage: "square.and.arrow.down") }
-                Button(action: refresh) { Label("Refresh", systemImage: "arrow.clockwise") }
+            }
+            .overlay {
+                if !searchText.isEmpty && filteredMachines.isEmpty {
+                    ContentUnavailableView.search(text: searchText)
+                }
+            }
+            .searchable(text: $searchText, placement: .sidebar, prompt: "Find a machine")
+            .navigationTitle("Machines")
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Spacer()
+                    Button(action: importMachine) { Image(systemName: "square.and.arrow.down") }
+                        .buttonStyle(.borderless).help("Import Machine…").accessibilityLabel("Import Machine")
+                }.font(.caption).padding(16)
+            }
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        creating = true
+                    } label: {
+                        Label("New Machine", systemImage: "plus")
+                    }
+                    .keyboardShortcut("n", modifiers: .command).help("New Machine")
+                    .disabled(working)
+                }
             }
         } detail: {
-            if let machine = machines.first(where: { $0.id == selected }) {
-                VStack(spacing: 0) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(machine.name).font(.title2.bold())
-                            Text("\(machine.cpuCount) CPUs · \(machine.memoryMiB / 1024) GB memory · \(machine.diskGiB) GB disk").font(.caption).foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Spacer()
-                        Menu {
-                            Toggle("Match Mac typing (US guest)", isOn: $matchMacTyping)
-                            Toggle("Share text clipboard", isOn: $shareClipboard)
-                            Divider()
-                            Button("Share Folder…", action: chooseSharedFolder)
-                            Toggle("Shared folder is read only", isOn: $shareReadOnly).disabled(sharedDirectory == nil)
-                            Button("Stop Sharing Folder") { sharedDirectory = nil }.disabled(sharedDirectory == nil)
-                            Button("USB Devices…") { usbRequest += 1 }.disabled(machine.usbEnabled != true)
-                        } label: {
-                            Label("Input", systemImage: "keyboard")
-                        }
-                        .menuStyle(.borderlessButton).fixedSize()
-                        .help("Mac typing translates letters and punctuation to a US guest. Command-V types clipboard text directly, without guest tools.")
-                        Menu {
-                            Button("Settings…") { editing = machine }
-                            Button("Clone") { perform { _ = try store().clone(machine.id, name: machine.name + " Copy") } }
-                            Button("Create Snapshot") { perform { try store().snapshot(machine.id, name: "snapshot-" + String(Int(Date().timeIntervalSince1970))) } }
-                            Menu("Restore Snapshot") {
-                                ForEach(savedSnapshots, id: \.self) { name in
-                                    Button(name) { perform { try store().restore(machine.id, name: name) } }
-                                }
-                            }.disabled(savedSnapshots.isEmpty)
-                            Button("Export ZIP…") { exportMachine(machine) }
-                            Button("Export Folder…") { exportFolder(machine) }
-                            Divider()
-                            Button(machine.installationMedia ? "Eject Installation ISO" : "Mount Installation ISO") {
-                                perform { try store().setMediaMounted(machine.id, installation: !machine.installationMedia) }
-                            }
-                            Button(machine.seedMedia ? "Eject Guest Tools / Seed ISO" : "Mount Guest Tools / Seed ISO") {
-                                perform { try store().setMediaMounted(machine.id, seed: !machine.seedMedia) }
-                            }
-                        } label: {
-                            Label("Manage", systemImage: "ellipsis.circle")
-                        }
-                        .menuStyle(.borderlessButton).fixedSize()
-                        .disabled(status[machine.id] != "stopped" || working)
-                        Menu {
-                            Button("Save Memory Checkpoint") { perform { try store().saveMemorySnapshot(machine.id, name: "memory-" + String(Int(Date().timeIntervalSince1970))) } }
-                                .disabled(!["running", "paused"].contains(status[machine.id] ?? "") || machine.graphics != .basic)
-                            Menu("Restore Memory") {
-                                ForEach(memorySnapshots, id: \.self) { name in
-                                    Button(name) {
-                                        perform {
-                                            if try store().status(machine.id) == "stopped" {
-                                                try store().start(machine.id, memorySnapshot: name)
-                                            } else {
-                                                try store().restoreMemorySnapshot(machine.id, name: name)
-                                            }
-                                        }
-                                    }
-                                }
-                            }.disabled(memorySnapshots.isEmpty)
-                            Menu("Delete Memory Checkpoint") {
-                                ForEach(memorySnapshots, id: \.self) { name in Button(name) { perform { try store().deleteMemorySnapshot(machine.id, name: name) } } }
-                            }.disabled(memorySnapshots.isEmpty)
-                        } label: {
-                            Label("Memory", systemImage: "memorychip")
-                        }
-                        .menuStyle(.borderlessButton).fixedSize().disabled(working)
-                        Button("Logs", systemImage: "doc.text") {
-                            if let store = try? store() { NSWorkspace.shared.open(store.bundle(machine.id).appendingPathComponent("supervisor.log")) }
-                        }.help("Open the machine supervisor log")
-                        if status[machine.id] == "running" || status[machine.id] == "paused" {
-                            Button(status[machine.id] == "paused" ? "Resume" : "Pause", systemImage: status[machine.id] == "paused" ? "play" : "pause") {
-                                let command = status[machine.id] == "paused" ? "cont" : "stop"
-                                perform { try store().control(machine.id).command(command) }
-                            }.disabled(working)
-                        }
-                        if working { ProgressView().controlSize(.small) }
-                        Button("Start", systemImage: "play.fill") { perform { try store().start(machine.id) } }
-                            .disabled(status[machine.id] != "stopped" || working)
-                        Button("Shut Down", systemImage: "power") { perform { try store().shutdown(machine.id) } }
-                            .disabled(!["running", "paused", "prelaunch"].contains(status[machine.id] ?? "") || working)
-                    }.padding(20)
-                    Divider()
-                    if status[machine.id] == "running" || status[machine.id] == "paused" || status[machine.id] == "prelaunch" {
-                        DesktopView(
-                            socket: QEMUArguments.socketDirectory(id: machine.id).appendingPathComponent("spice.sock"), shareClipboard: shareClipboard,
-                            matchMacTyping: matchMacTyping, sharedDirectory: sharedDirectory, shareReadOnly: shareReadOnly, usbRequest: usbRequest
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .id("\(machine.id)-\(sessions[machine.id] ?? "")")
-                    } else if status[machine.id] == "busy" {
-                        ContentUnavailableView("Machine is busy", systemImage: "hourglass", description: Text("Wait for the current archive or state operation to finish."))
-                    } else if status[machine.id] == "starting or unavailable" {
-                        ContentUnavailableView(
-                            "Waiting for machine control", systemImage: "hourglass",
-                            description: Text("The machine is starting or its control connection is unavailable. Check its logs if this continues."))
-                    } else {
-                        ContentUnavailableView("Machine is stopped", systemImage: "desktopcomputer", description: Text("Start this machine to open its desktop."))
+            Group {
+                if let machine = currentMachine {
+                    machineDetail(machine)
+                        .navigationTitle(machine.name)
+                        .navigationSubtitle(displayState(machine).title)
+                } else {
+                    ContentUnavailableView {
+                        Label("A space for every system", systemImage: "desktopcomputer")
+                    } description: {
+                        Text("Run Linux and Windows alongside your Mac. Create a machine or import an existing one to get started.")
+                    } actions: {
+                        Button("New Machine", systemImage: "plus") { creating = true }
+                            .modifier(MachineStartAppearance())
+                        Button("Import Machine…", action: importMachine)
                     }
                 }
-            } else {
-                ContentUnavailableView("Your Linux and Windows machines", systemImage: "desktopcomputer", description: Text("Select a machine from the library."))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .toolbar {
+                if let machine = currentMachine {
+                    if #available(macOS 26, *) {
+                        ToolbarItemGroup(placement: .primaryAction) { machineToolbarControls(machine) }
+                            .sharedBackgroundVisibility(.visible)
+                    } else {
+                        ToolbarItemGroup(placement: .primaryAction) { machineToolbarControls(machine) }
+                    }
+                }
             }
         }
+        .inspector(isPresented: $showingInspector) {
+            if let machine = currentMachine {
+                machineInspector(machine)
+                    .toolbar {
+                        if showingInspector {
+                            ToolbarItem {
+                                Button {
+                                    showingInspector = false
+                                } label: {
+                                    Label("Hide Inspector", systemImage: "sidebar.right")
+                                }
+                                .help("Hide Inspector")
+                            }
+                        }
+                    }
+            }
+        }
+        .inspectorColumnWidth(min: 250, ideal: 280, max: 340)
+        .tint(.gray)
+        .confirmationDialog("Shut down this machine?", isPresented: $confirmingShutdown, titleVisibility: .visible) {
+            if let machine = currentMachine {
+                Button("Shut Down", role: .destructive) { perform { try store().shutdown(machine.id) } }
+            }
+        } message: {
+            Text("Save your work in the guest before shutting down.")
+        }
+        .confirmationDialog("Restore this checkpoint?", isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } }), titleVisibility: .visible) {
+            if let restore = pendingRestore {
+                Button("Restore “\(restore.name)”", role: .destructive) {
+                    perform {
+                        if restore.memory {
+                            if try store().status(restore.id) == "stopped" {
+                                try store().start(restore.id, memorySnapshot: restore.name)
+                            } else {
+                                try store().restoreMemorySnapshot(restore.id, name: restore.name)
+                            }
+                        } else {
+                            try store().restore(restore.id, name: restore.name)
+                        }
+                    }
+                    pendingRestore = nil
+                }
+            }
+        } message: {
+            Text("Changes since this checkpoint will be replaced. Save or export anything you want to keep first.")
+        }
+        .confirmationDialog(
+            "Delete this memory checkpoint?", isPresented: Binding(get: { pendingCheckpointDeletion != nil }, set: { if !$0 { pendingCheckpointDeletion = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let checkpoint = pendingCheckpointDeletion {
+                Button("Delete “\(checkpoint.name)”", role: .destructive) {
+                    perform { try store().deleteMemorySnapshot(checkpoint.id, name: checkpoint.name) }
+                    pendingCheckpointDeletion = nil
+                }
+            }
+        } message: {
+            Text("This checkpoint cannot be recovered after deletion.")
+        }
+        .frame(minWidth: 760, minHeight: 520)
         .sheet(isPresented: $creating) {
             MachineEditor { config, disk, iso in
                 creating = false
@@ -178,6 +187,7 @@ struct MachineLibraryView: View {
             shareReadOnly = true
             usbRequest = 0
             savedSnapshots = []
+            memorySnapshots = []
             refresh()
         }
         .alert("Machine operation failed", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
@@ -193,6 +203,163 @@ struct MachineLibraryView: View {
             }
         }
     }
+    @ViewBuilder private func machineToolbarControls(_ machine: MachineConfiguration) -> some View {
+        if working { ProgressView().controlSize(.small).accessibilityLabel("Working") }
+        if displayState(machine).canStart {
+            Button("Start", systemImage: "play.fill") { perform { try store().start(machine.id) } }
+                .disabled(working).help("Start Machine")
+        } else if displayState(machine).showsDesktop {
+            if displayState(machine).canPause {
+                Button(status[machine.id] == "paused" ? "Resume" : "Pause", systemImage: status[machine.id] == "paused" ? "play" : "pause") {
+                    perform { try store().control(machine.id).command(status[machine.id] == "paused" ? "cont" : "stop") }
+                }.disabled(working)
+            }
+            Button("Shut Down", systemImage: "power") { confirmingShutdown = true }.disabled(working)
+        }
+        machineActions(machine)
+        if !showingInspector {
+            Button {
+                showingInspector = true
+            } label: {
+                Label("Show Inspector", systemImage: "sidebar.right")
+            }
+            .help("Show Sharing Controls")
+        }
+    }
+
+    @ViewBuilder
+    private func machineDetail(_ machine: MachineConfiguration) -> some View {
+        if displayState(machine).showsDesktop {
+            DesktopView(
+                socket: QEMUArguments.socketDirectory(id: machine.id).appendingPathComponent("spice.sock"), shareClipboard: shareClipboard,
+                matchMacTyping: matchMacTyping, sharedDirectory: sharedDirectory, shareReadOnly: shareReadOnly, usbRequest: usbRequest
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .id("\(machine.id)-\(sessions[machine.id] ?? "")")
+        } else {
+            ScrollView {
+                VStack(spacing: 28) {
+                    MachineEmblem(system: machine.operatingSystem, size: 88)
+                    VStack(spacing: 8) {
+                        Text(machine.name).font(.largeTitle.weight(.semibold)).textSelection(.enabled)
+                        Text(machine.operatingSystem == .linux ? "Linux · ARM64" : "Windows · ARM64")
+                            .font(.title3).foregroundStyle(.secondary)
+                        MachineStatus(value: status[machine.id])
+                    }
+                    ViewThatFits {
+                        HStack(spacing: 12) { resourceTiles(machine) }
+                        VStack(spacing: 12) { resourceTiles(machine) }
+                    }
+                    .frame(maxWidth: 560)
+                    if displayState(machine).canStart {
+                        VStack(spacing: 12) {
+                            Button("Start Machine", systemImage: "play.fill") { perform { try store().start(machine.id) } }
+                                .modifier(MachineStartAppearance()).controlSize(.large).disabled(working)
+                        }
+                    } else {
+                        ProgressView()
+                        Text(
+                            status[machine.id] == "busy"
+                                ? "An archive or state operation is in progress." : "Waiting for the machine’s control connection. Open Logs if this continues."
+                        )
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                }
+                .padding(40)
+                .frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.center)
+        }
+    }
+
+    @ViewBuilder private func resourceTiles(_ machine: MachineConfiguration) -> some View {
+        ResourceTile(title: "Processors", value: "\(machine.cpuCount) cores", symbol: "cpu")
+        ResourceTile(title: "Memory", value: "\(machine.memoryMiB / 1024) GB", symbol: "memorychip")
+        ResourceTile(title: "Storage", value: "\(machine.diskGiB) GB", symbol: "internaldrive")
+    }
+
+    private func machineInspector(_ machine: MachineConfiguration) -> some View {
+        Form {
+            Section("Input") {
+                Toggle("Mac keyboard", isOn: $matchMacTyping)
+                    .help("Translate Mac typing to a US guest layout. Command-V types clipboard text directly.")
+                Toggle("Clipboard", isOn: $shareClipboard)
+                    .help("Share text with the guest. Requires guest tools.")
+            }
+            Section("Folder") {
+                if let directory = sharedDirectory {
+                    Label(directory.lastPathComponent, systemImage: "folder")
+                        .lineLimit(2).help(directory.path)
+                    Toggle("Read only", isOn: $shareReadOnly)
+                    Button("Stop Sharing", systemImage: "xmark.circle", role: .destructive) { sharedDirectory = nil }
+                } else {
+                    Button("Share Folder…", systemImage: "folder.badge.plus", action: chooseSharedFolder)
+                        .help("Choose a folder for this guest. Sharing starts read only and ends when you switch machines.")
+                }
+            }
+            Section("Devices") {
+                Button("USB Devices…", systemImage: "cable.connector") { usbRequest += 1 }
+                    .disabled(machine.usbEnabled != true || !displayState(machine).canPause)
+                    .help(machine.usbEnabled == true ? "Attach or detach a USB device while the machine is running." : "Enable USB forwarding in machine settings first.")
+            }
+        }.formStyle(.grouped)
+    }
+
+    private func machineActions(_ machine: MachineConfiguration) -> some View {
+        Menu {
+            Menu {
+                Button("Settings…", systemImage: "gearshape") { editing = machine }
+                Button("Clone", systemImage: "plus.square.on.square") { perform { _ = try store().clone(machine.id, name: machine.name + " Copy") } }
+                Button("Create Snapshot", systemImage: "camera") { perform { try store().snapshot(machine.id, name: "snapshot-" + String(Int(Date().timeIntervalSince1970))) } }
+                Menu("Restore Snapshot", systemImage: "clock.arrow.circlepath") {
+                    ForEach(savedSnapshots, id: \.self) { name in
+                        Button(name) { pendingRestore = (machine.id, name, false) }
+                    }
+                }.disabled(savedSnapshots.isEmpty)
+                Button("Export ZIP…", systemImage: "square.and.arrow.up") { exportMachine(machine) }
+                Button("Export Folder…", systemImage: "folder") { exportFolder(machine) }
+                Divider()
+                Button(machine.installationMedia ? "Eject Installer" : "Mount Installer", systemImage: machine.installationMedia ? "eject" : "opticaldisc") {
+                    perform { try store().setMediaMounted(machine.id, installation: !machine.installationMedia) }
+                }
+                Button(machine.seedMedia ? "Eject Guest Tools" : "Mount Guest Tools", systemImage: machine.seedMedia ? "eject" : "opticaldisc") {
+                    perform { try store().setMediaMounted(machine.id, seed: !machine.seedMedia) }
+                }
+            } label: {
+                Label("Configuration & Archives", systemImage: "gearshape").labelStyle(.titleAndIcon)
+            }
+            .disabled(!displayState(machine).canStart || working)
+            Menu {
+                Button("Save Checkpoint", systemImage: "memorychip") {
+                    perform { try store().saveMemorySnapshot(machine.id, name: "memory-" + String(Int(Date().timeIntervalSince1970))) }
+                }
+                .disabled(!displayState(machine).canPause || machine.graphics != .basic)
+                Menu("Restore Checkpoint", systemImage: "clock.arrow.circlepath") {
+                    ForEach(memorySnapshots, id: \.self) { name in
+                        Button(name) {
+                            pendingRestore = (machine.id, name, true)
+                        }
+                    }
+                }.disabled(memorySnapshots.isEmpty)
+                Menu("Delete Checkpoint", systemImage: "trash") {
+                    ForEach(memorySnapshots, id: \.self) { name in Button(name, role: .destructive) { pendingCheckpointDeletion = (machine.id, name) } }
+                }.disabled(memorySnapshots.isEmpty)
+            } label: {
+                Label("Memory Checkpoints", systemImage: "memorychip").labelStyle(.titleAndIcon)
+            }
+            .disabled(working)
+            Button {
+                if let store = try? store() { NSWorkspace.shared.open(store.bundle(machine.id).appendingPathComponent("supervisor.log")) }
+            } label: {
+                Label("Logs", systemImage: "doc.text").labelStyle(.titleAndIcon)
+            }.help("Open the machine supervisor log")
+        } label: {
+            Label("Machine Actions", systemImage: "ellipsis")
+        }
+        .help("Machine Actions")
+        .disabled(working)
+    }
+
     private func refresh() {
         guard !refreshing else { return }
         refreshing = true

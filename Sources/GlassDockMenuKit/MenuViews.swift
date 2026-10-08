@@ -17,21 +17,13 @@ public struct StatusPopoverView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
 
-            Divider()
-
             if model.presentedContainer != nil {
                 ContainerLogSurface(model: model)
             } else {
                 VStack(spacing: 10) {
-                    Picker("View", selection: $model.selectedSection) {
-                        ForEach(MenuSection.allCases, id: \.self) { section in
-                            Text(section.rawValue).tag(section)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
+                    PopoverNavigation(selection: $model.selectedSection)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
 
                     if let error = model.errorMessage {
                         ErrorBanner(message: error) { model.errorMessage = nil }
@@ -49,12 +41,12 @@ public struct StatusPopoverView: View {
                 }
             }
 
-            Divider()
             PopoverFooter(model: model, closePopover: closePopover)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
         }
-        .frame(width: 480, height: 680)
+        .frame(width: 420, height: 480)
+        .tint(.gray)
         .onExitCommand(perform: closePopover)
         .task {
             if model.snapshot == nil {
@@ -66,67 +58,16 @@ public struct StatusPopoverView: View {
 
 private struct PopoverHeader: View {
     @ObservedObject var model: MenuModel
-
     var body: some View {
-        HStack(spacing: 11) {
-            Image(systemName: model.statusSymbol)
-                .font(.title2)
-                .foregroundStyle(statusColor)
-                .frame(width: 28, height: 28)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Glass Dock \(model.statusLabel)")
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        HStack {
+            Label("Engine \(model.statusLabel.lowercased())", systemImage: model.statusSymbol)
+                .font(.callout.weight(.medium)).foregroundStyle(.secondary)
+            Spacer()
+            if let snapshot = model.snapshot, snapshot.daemon.healthy {
+                Text("\(snapshot.containers.filter(\.isRunning).count) running")
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    .accessibilityLabel("\(snapshot.containers.filter(\.isRunning).count) containers running")
             }
-            .accessibilityElement(children: .combine)
-
-            Spacer(minLength: 8)
-
-            if model.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Refreshing Glass Dock")
-            }
-
-            Button {
-                Task {
-                    if model.selectedSection == .system {
-                        await model.refreshSupportReport()
-                    } else {
-                        await model.refresh()
-                    }
-                }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.borderless)
-            .keyboardShortcut("r", modifiers: .command)
-            .help("Refresh")
-            .accessibilityLabel("Refresh Glass Dock")
-        }
-    }
-
-    private var subtitle: String {
-        let containers = model.snapshot?.containers ?? []
-        let counts = "\(containers.filter(\.isRunning).count) running, \(containers.count) total"
-        if let version = model.snapshot?.daemon.version {
-            return "Version \(version) · \(counts)"
-        }
-        return model.snapshot?.daemon.message ?? counts
-    }
-
-    private var statusColor: Color {
-        switch model.snapshot?.daemon.state {
-        case .running: .green
-        case .unhealthy: .orange
-        case .starting: .blue
-        case .stopped, nil: .secondary
         }
     }
 }
@@ -212,10 +153,13 @@ private struct ContainerRow: View {
                 Text(container.name)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
-                Text("\(container.image) · \(container.status)")
+                    .help(container.name)
+                Text(container.image)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(container.image)
+                Text(container.status).font(.caption2).foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 6)
@@ -227,7 +171,7 @@ private struct ContainerRow: View {
             .help("Show logs for \(container.name)")
 
             if container.isRunning {
-                Button("Stop", role: .destructive) {
+                Button("Stop", systemImage: "stop", role: .destructive) {
                     Task { await model.perform(.stopContainer(container.id)) }
                 }
                 .controlSize(.small)
@@ -241,7 +185,7 @@ private struct ContainerRow: View {
             }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 9)
+        .padding(.vertical, 12)
         .frame(minHeight: 52)
         .accessibilityElement(children: .contain)
     }
@@ -526,9 +470,9 @@ private struct SystemSurface: View {
                         ])
                     }
 
-                    SystemGroup(title: "Build", systemImage: "hammer") {
+                    SystemGroup(title: "About Glass Dock", systemImage: "info.circle") {
                         InfoGrid(rows: [
-                            ("Version", snapshot.daemon.version ?? "Not reported"),
+                            ("Engine version", snapshot.daemon.version ?? "Not reported"),
                             ("Docker API", snapshot.daemon.apiVersion ?? "Not reported"),
                             ("Git commit", snapshot.daemon.gitCommit ?? "Not reported"),
                             ("Build time", snapshot.daemon.buildTime ?? "Not reported"),
@@ -724,7 +668,7 @@ private struct ErrorBanner: View {
             Text(message)
                 .font(.caption)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(3)
+                .textSelection(.enabled)
             Button(action: dismiss) {
                 Image(systemName: "xmark")
                     .frame(width: 20, height: 20)
@@ -743,15 +687,41 @@ private struct PopoverFooter: View {
     let closePopover: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            lifecycleControls
-            Spacer(minLength: 8)
-            Button("Machines", systemImage: "desktopcomputer") { model.openMachines() }
-                .help("Open Linux and Windows machines")
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .keyboardShortcut("q", modifiers: .command)
+        HStack(spacing: 12) {
+            Button("Machines", systemImage: "desktopcomputer") {
+                model.openMachines()
+                if model.errorMessage == nil { closePopover() }
+            }
+            .modifier(PopoverGlassControl())
+            .help("Open Linux and Windows machines")
+            Spacer()
+            if model.isLoading {
+                ProgressView().controlSize(.mini).accessibilityLabel("Refreshing")
+            }
+            Button {
+                Task {
+                    if model.selectedSection == .system { await model.refreshSupportReport() } else { await model.refresh() }
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh Glass Dock")
+            .keyboardShortcut("r", modifiers: .command)
+            Menu {
+                lifecycleControls
+                Button("About Glass Dock", systemImage: "info.circle") { model.selectedSection = .system }
+                Divider()
+                Button("Quit Glass Dock") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut("q", modifiers: .command)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Glass Dock Actions")
+            .accessibilityLabel("Glass Dock Actions")
         }
-        .font(.caption)
+        .controlSize(.regular)
     }
 
     @ViewBuilder
@@ -764,17 +734,58 @@ private struct PopoverFooter: View {
                     .help("This app will not stop or restart the current daemon.")
             case .managedLaunchAgent:
                 if snapshot.daemon.state == .stopped {
-                    Button("Start Glass Dock") { Task { await model.perform(.startDaemon) } }
+                    Button("Start Glass Dock", systemImage: "play") { Task { await model.perform(.startDaemon) } }
                 } else {
-                    Button("Restart") { Task { await model.perform(.restartDaemon) } }
-                    Button("Stop", role: .destructive) { Task { await model.perform(.stopDaemon) } }
+                    Button("Restart", systemImage: "arrow.clockwise") { Task { await model.perform(.restartDaemon) } }
+                    Button("Stop", systemImage: "stop", role: .destructive) { Task { await model.perform(.stopDaemon) } }
                 }
             case .none:
-                Button("Start Glass Dock") { Task { await model.perform(.startDaemon) } }
+                Button("Start Glass Dock", systemImage: "play") { Task { await model.perform(.startDaemon) } }
             }
         } else {
             Text("Checking control…")
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct PopoverGlassControl: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content.buttonStyle(.glass)
+        } else {
+            content.buttonStyle(.bordered)
+        }
+    }
+}
+
+private struct PopoverNavigation: View {
+    @Binding var selection: MenuSection
+
+    var body: some View {
+        if #available(macOS 26, *) {
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    ForEach(MenuSection.allCases, id: \.self) { section in
+                        Button {
+                            selection = section
+                        } label: {
+                            Text(section.rawValue).frame(maxWidth: .infinity).padding(.vertical, 4)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .glassEffect(.regular.tint(selection == section ? Color.gray.opacity(0.25) : nil).interactive(), in: Capsule())
+                        .font(.callout.weight(selection == section ? .semibold : .regular))
+                        .accessibilityAddTraits(selection == section ? [.isSelected] : [])
+                    }
+                }
+            }
+        } else {
+            Picker("View", selection: $selection) {
+                ForEach(MenuSection.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden()
         }
     }
 }

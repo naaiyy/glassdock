@@ -63,12 +63,14 @@ private final class AppKitStatusPopoverPresenter: NSObject, StatusPopoverPresent
         }
 
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 480, height: 680)
+        popover.contentSize = NSSize(width: 420, height: 480)
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
     }
 
     var isShown: Bool { popover.isShown }
+
+    func keepOpenForPreview() { popover.behavior = .applicationDefined }
 
     func install<Content: View>(content: Content) {
         popover.contentViewController = NSHostingController(rootView: content)
@@ -98,8 +100,9 @@ public final class StatusPopoverController {
     private let popover: any StatusPopoverPresenting
     private let applicationFocus: any ApplicationFocusControlling
 
-    public convenience init(model: MenuModel) {
+    public convenience init(model: MenuModel, preview: Bool = false) {
         let presenter = AppKitStatusPopoverPresenter()
+        if preview { presenter.keepOpenForPreview() }
         self.init(popover: presenter, applicationFocus: ApplicationFocusController())
         presenter.onToggle = { [weak self] in self?.togglePopover() }
         presenter.onClose = { [weak self] in self?.didClosePopover() }

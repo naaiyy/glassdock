@@ -26,7 +26,7 @@ private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let controller = StatusPopoverController(model: model)
+        let controller = StatusPopoverController(model: model, preview: arguments.contains("--preview"))
         popoverController = controller
 
         if arguments.contains("--show-popover") {
