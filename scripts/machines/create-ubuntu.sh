@@ -42,7 +42,7 @@ users:
     shell: /bin/bash
     ssh_authorized_keys:
       - '{key}'
-packages: [qemu-guest-agent, spice-vdagent, xfce4, mousepad, lightdm, xserver-xorg, mesa-utils, davfs2, spice-webdavd, linux-generic, alsa-utils, pulseaudio]
+packages: [qemu-guest-agent, spice-vdagent, xfce4, firefox, mousepad, lightdm, xserver-xorg, mesa-utils, davfs2, spice-webdavd, linux-generic, alsa-utils, pulseaudio]
 write_files:
   - path: /etc/lightdm/lightdm.conf.d/50-glassdock.conf
     content: |
