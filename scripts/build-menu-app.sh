@@ -27,6 +27,7 @@ cp "$root_dir/Apps/GlassDockMenu/Info.plist" "$output_dir/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $bundle_version" "$output_dir/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$output_dir/Contents/Info.plist"
 cp "$binary_path" "$output_dir/Contents/MacOS/GlassDockMenu"
+bash "$root_dir/scripts/stamp-app-sdk.sh" "$output_dir/Contents/MacOS/GlassDockMenu"
 bash "$root_dir/scripts/generate-app-icon.sh" "$output_dir/Contents/Resources/AppIcon.icns" >/dev/null
 cp "$root_dir/Apps/GlassDockMenu/PrivacyInfo.xcprivacy" "$output_dir/Contents/Resources/PrivacyInfo.xcprivacy"
 xattr -cr "$output_dir"

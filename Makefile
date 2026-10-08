@@ -108,9 +108,13 @@ help:
 	@echo "  help             - Show this help message"
 
 .PHONY: test
-test: lint-pipes
+test: lint-pipes app-sdk-test
 	@$(SWIFT) test -c $(BUILD_CONFIGURATION) $(TEST_SWIFT_FLAGS) \
 		--experimental-maximum-parallelization-width $(TEST_PARALLELISM)
+
+.PHONY: app-sdk-test
+app-sdk-test:
+	@bash scripts/tests/app-sdk-test.sh
 
 .PHONY: control
 control:
