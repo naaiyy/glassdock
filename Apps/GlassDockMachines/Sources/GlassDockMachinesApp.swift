@@ -4,14 +4,18 @@ import SwiftUI
 
 @main
 struct MachinesApplication: App {
+    @NSApplicationDelegateAdaptor(MachinesAppDelegate.self) private var delegate
+    @StateObject private var nativeHost = NativeMacHost.shared
     var body: some Scene {
-        WindowGroup("Glass Dock Machines") { MachineLibraryView() }
+        WindowGroup("Glass Dock Machines", id: "machines") { MachineLibraryView().environmentObject(nativeHost) }
             .defaultSize(width: 1180, height: 780)
             .windowResizability(.contentMinSize)
     }
 }
 
 struct MachineLibraryView: View {
+    @EnvironmentObject private var nativeHost: NativeMacHost
+    @Environment(\.openWindow) private var openWindow
     @State private var machines: [MachineConfiguration] = []
     @State private var selected: UUID?
     @State private var sessions: [UUID: String] = [:]
@@ -84,7 +88,7 @@ struct MachineLibraryView: View {
                     ContentUnavailableView {
                         Label("A space for every system", systemImage: "desktopcomputer")
                     } description: {
-                        Text("Run Linux and Windows alongside your Mac. Create a machine or import an existing one to get started.")
+                        Text("Run Linux, Windows, and macOS alongside your Mac. Create a machine or import an existing one to get started.")
                     } actions: {
                         Button("New Machine", systemImage: "plus") { creating = true }
                             .modifier(MachineStartAppearance())
@@ -169,7 +173,9 @@ struct MachineLibraryView: View {
             MachineEditor { config, disk, iso in
                 creating = false
                 perform {
-                    if config.operatingSystem == .omarchy {
+                    if config.operatingSystem == .macos {
+                        _ = try store().create(config, macOSRestoreImage: iso)
+                    } else if config.operatingSystem == .omarchy {
                         _ = try store().create(config, omarchyGuest: disk)
                     } else {
                         _ = try store().create(config, disk: disk, media: iso)
@@ -187,7 +193,13 @@ struct MachineLibraryView: View {
                 }
             }
         }
-        .onChange(of: selected) { _, value in
+        .onChange(of: sharedDirectory) { _, _ in updateNativeShare() }
+        .onChange(of: shareReadOnly) { _, _ in updateNativeShare() }
+        .onChange(of: selected) { previous, value in
+            if let previous, sharedDirectory != nil, ["running", "paused"].contains(status[previous] ?? ""), machines.first(where: { $0.id == previous })?.operatingSystem == .macos
+            {
+                perform { try store().control(previous).command("glassdock-share") }
+            }
             shareClipboard = false
             sharedDirectory = nil
             shareReadOnly = true
@@ -201,7 +213,16 @@ struct MachineLibraryView: View {
         } message: {
             Text(error ?? "")
         }
+        .onReceive(nativeHost.$requestedMachine) { value in
+            if let value { selected = value }
+        }
+        .onReceive(nativeHost.$failure) { value in
+            if let value { error = value }
+        }
         .task {
+            nativeHost.openLibraryWindow = { openWindow(id: "machines") }
+            if let requested = nativeHost.requestedMachine { selected = requested }
+            do { try nativeHost.handleStartup(store: store()) } catch { self.error = error.localizedDescription }
             refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -212,7 +233,7 @@ struct MachineLibraryView: View {
     @ViewBuilder private func machineToolbarControls(_ machine: MachineConfiguration) -> some View {
         if working { ProgressView().controlSize(.small).accessibilityLabel("Working") }
         if displayState(machine).canStart {
-            Button("Start", systemImage: "play.fill") { perform { try store().start(machine.id) } }
+            Button("Start", systemImage: "play.fill") { startMachine(machine) }
                 .disabled(working).help("Start Machine")
         } else if displayState(machine).showsDesktop {
             if displayState(machine).canPause {
@@ -235,7 +256,16 @@ struct MachineLibraryView: View {
 
     @ViewBuilder
     private func machineDetail(_ machine: MachineConfiguration) -> some View {
-        if displayState(machine).showsDesktop {
+        if machine.operatingSystem == .macos, let session = nativeHost.sessions[machine.id] {
+            NativeMacDesktopView(session: session).frame(maxWidth: .infinity, maxHeight: .infinity).id(machine.id)
+        } else if machine.operatingSystem == .macos && displayState(machine).showsDesktop {
+            VStack(spacing: 20) {
+                MachineEmblem(system: .macos, size: 88)
+                Text("This machine is running in another Machines window.").foregroundStyle(.secondary)
+                Button("Show Machine", systemImage: "macwindow") { perform { try store().control(machine.id).command("glassdock-show") } }
+                    .modifier(MachineStartAppearance())
+            }.padding(40)
+        } else if displayState(machine).showsDesktop {
             DesktopView(
                 socket: QEMUArguments.socketDirectory(id: machine.id).appendingPathComponent("spice.sock"), shareClipboard: shareClipboard,
                 matchMacTyping: matchMacTyping, sharedDirectory: sharedDirectory, shareReadOnly: shareReadOnly, usbRequest: usbRequest
@@ -259,7 +289,7 @@ struct MachineLibraryView: View {
                     .frame(maxWidth: 560)
                     if displayState(machine).canStart {
                         VStack(spacing: 12) {
-                            Button("Start Machine", systemImage: "play.fill") { perform { try store().start(machine.id) } }
+                            Button("Start Machine", systemImage: "play.fill") { startMachine(machine) }
                                 .modifier(MachineStartAppearance()).controlSize(.large).disabled(working)
                         }
                     } else {
@@ -286,15 +316,19 @@ struct MachineLibraryView: View {
 
     private func machineInspector(_ machine: MachineConfiguration) -> some View {
         Form {
-            Section("Input") {
-                Toggle("Mac keyboard", isOn: $matchMacTyping)
-                    .help("Translate Mac typing to a US guest layout. Command-V types clipboard text directly.")
-                Toggle("Clipboard", isOn: $shareClipboard)
-                    .disabled(machine.operatingSystem == .omarchy)
-                    .help(
-                        machine.operatingSystem == .omarchy
-                            ? "Wayland clipboard sync is not available. Enable Mac keyboard and use Command-V to type text into Omarchy."
-                            : "Share text with the guest. Requires guest tools.")
+            if machine.operatingSystem != .macos {
+                Section("Input") {
+                    Toggle("Mac keyboard", isOn: $matchMacTyping)
+                        .help("Translate Mac typing to a US guest layout. Command-V types clipboard text directly.")
+                    Toggle("Clipboard", isOn: $shareClipboard)
+                        .disabled(machine.operatingSystem == .omarchy)
+                        .help(
+                            machine.operatingSystem == .omarchy
+                                ? "Wayland clipboard sync is not available. Enable Mac keyboard and use Command-V to type text into Omarchy."
+                                : "Share text with the guest. Requires guest tools.")
+                }
+            } else {
+                Section("Input") { Text("Native Mac keyboard and trackpad. Clipboard sync is unavailable.").foregroundStyle(.secondary) }
             }
             Section("Folder") {
                 if let directory = sharedDirectory {
@@ -304,13 +338,16 @@ struct MachineLibraryView: View {
                     Button("Stop Sharing", systemImage: "xmark.circle", role: .destructive) { sharedDirectory = nil }
                 } else {
                     Button("Share Folder…", systemImage: "folder.badge.plus", action: chooseSharedFolder)
+                        .disabled(machine.operatingSystem == .macos && !displayState(machine).canPause)
                         .help("Choose a folder for this guest. Sharing starts read only and ends when you switch machines.")
                 }
             }
-            Section("Devices") {
-                Button("USB Devices…", systemImage: "cable.connector") { usbRequest += 1 }
-                    .disabled(machine.usbEnabled != true || !displayState(machine).canPause)
-                    .help(machine.usbEnabled == true ? "Attach or detach a USB device while the machine is running." : "Enable USB forwarding in machine settings first.")
+            if machine.operatingSystem != .macos {
+                Section("Devices") {
+                    Button("USB Devices…", systemImage: "cable.connector") { usbRequest += 1 }
+                        .disabled(machine.usbEnabled != true || !displayState(machine).canPause)
+                        .help(machine.usbEnabled == true ? "Attach or detach a USB device while the machine is running." : "Enable USB forwarding in machine settings first.")
+                }
             }
         }.formStyle(.grouped)
     }
@@ -329,11 +366,13 @@ struct MachineLibraryView: View {
                 Button("Export ZIP…", systemImage: "square.and.arrow.up") { exportMachine(machine) }
                 Button("Export Folder…", systemImage: "folder") { exportFolder(machine) }
                 Divider()
-                Button(machine.installationMedia ? "Eject Installer" : "Mount Installer", systemImage: machine.installationMedia ? "eject" : "opticaldisc") {
-                    perform { try store().setMediaMounted(machine.id, installation: !machine.installationMedia) }
-                }
-                Button(machine.seedMedia ? "Eject Guest Tools" : "Mount Guest Tools", systemImage: machine.seedMedia ? "eject" : "opticaldisc") {
-                    perform { try store().setMediaMounted(machine.id, seed: !machine.seedMedia) }
+                if machine.operatingSystem != .macos {
+                    Button(machine.installationMedia ? "Eject Installer" : "Mount Installer", systemImage: machine.installationMedia ? "eject" : "opticaldisc") {
+                        perform { try store().setMediaMounted(machine.id, installation: !machine.installationMedia) }
+                    }
+                    Button(machine.seedMedia ? "Eject Guest Tools" : "Mount Guest Tools", systemImage: machine.seedMedia ? "eject" : "opticaldisc") {
+                        perform { try store().setMediaMounted(machine.id, seed: !machine.seedMedia) }
+                    }
                 }
             } label: {
                 Label("Configuration & Archives", systemImage: "gearshape").labelStyle(.titleAndIcon)
@@ -343,7 +382,7 @@ struct MachineLibraryView: View {
                 Button("Save Checkpoint", systemImage: "memorychip") {
                     perform { try store().saveMemorySnapshot(machine.id, name: "memory-" + String(Int(Date().timeIntervalSince1970))) }
                 }
-                .disabled(!displayState(machine).canPause || machine.graphics != .basic)
+                .disabled(!displayState(machine).canPause || machine.graphics != .basic || machine.operatingSystem == .macos)
                 Menu("Restore Checkpoint", systemImage: "clock.arrow.circlepath") {
                     ForEach(memorySnapshots, id: \.self) { name in
                         Button(name) {
@@ -357,7 +396,7 @@ struct MachineLibraryView: View {
             } label: {
                 Label("Memory Checkpoints", systemImage: "memorychip").labelStyle(.titleAndIcon)
             }
-            .disabled(working)
+            .disabled(working || machine.operatingSystem == .macos)
             Button {
                 if let store = try? store() { NSWorkspace.shared.open(store.bundle(machine.id).appendingPathComponent("supervisor.log")) }
             } label: {
@@ -368,6 +407,15 @@ struct MachineLibraryView: View {
         }
         .help("Machine Actions")
         .disabled(working)
+    }
+
+    private func startMachine(_ machine: MachineConfiguration) {
+        if machine.operatingSystem == .macos {
+            do { try nativeHost.start(store: store(), id: machine.id) } catch { self.error = error.localizedDescription }
+            refresh()
+        } else {
+            perform { try store().start(machine.id) }
+        }
     }
 
     private func refresh() {
@@ -405,6 +453,16 @@ struct MachineLibraryView: View {
             }
         }
     }
+    private func updateNativeShare() {
+        guard let machine = currentMachine, machine.operatingSystem == .macos, displayState(machine).canPause else { return }
+        let directory = sharedDirectory
+        let readOnly = shareReadOnly
+        perform {
+            var arguments: [String: Any] = [:]
+            if let directory { arguments = ["path": directory.path, "read-only": readOnly] }
+            try store().control(machine.id).command("glassdock-share", arguments: arguments)
+        }
+    }
     private func chooseSharedFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -435,6 +493,7 @@ struct MachineLibraryView: View {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = machine.name + ".glassvm.zip"
         let compact = NSButton(checkboxWithTitle: "Compact disk for export (takes longer)", target: nil, action: nil)
+        compact.isEnabled = machine.operatingSystem != .macos
         compact.state = .off
         compact.sizeToFit()
         panel.accessoryView = compact

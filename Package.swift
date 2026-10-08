@@ -15,6 +15,7 @@ let package = Package(
     ],
     products: [
         .library(name: "GlassDockMachines", targets: ["GlassDockMachines"]),
+        .executable(name: "glassdock-macos", targets: ["glassdock-macos"]),
         .executable(name: "glassdock-qemu", targets: ["glassdock-qemu"]),
         .executable(name: "glassdock-vm-runner", targets: ["glassdock-vm-runner"]),
         .library(name: "GlassDockControl", targets: ["GlassDockControl"]),
@@ -36,6 +37,7 @@ let package = Package(
     targets: [
         .target(name: "GlassDockMachines", dependencies: [.product(name: "ZIPFoundation", package: "ZIPFoundation")]),
         .executableTarget(name: "glassdock-qemu", linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", machineFrameworks])]),
+        .executableTarget(name: "glassdock-macos", dependencies: ["GlassDockMachines"], swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(name: "glassdock-vm-runner", dependencies: ["GlassDockMachines"]),
         .target(
             name: "GlassDockControl"

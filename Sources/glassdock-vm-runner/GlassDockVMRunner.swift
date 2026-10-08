@@ -18,6 +18,28 @@ struct MachineSupervisor {
         let bin = URL(fileURLWithPath: args[0]).deletingLastPathComponent()
         let runtime = MachineRuntime(app: URL(fileURLWithPath: args[3]), launcher: bin.appendingPathComponent("glassdock-qemu"), supervisor: URL(fileURLWithPath: args[0]))
         let store = try MachineStore(root: URL(fileURLWithPath: args[1]), runtime: runtime)
+        let config = try store.configuration(id)
+        if config.operatingSystem == .macos {
+            guard args.count == 4 else { throw MachineError.invalid("macOS RAM checkpoints are unavailable") }
+            let native = Process()
+            guard FileManager.default.isExecutableFile(atPath: runtime.app.appendingPathComponent("Contents/MacOS/GlassDockMachinesApp").path) else {
+                throw MachineError.runtimeMissing("Build the native Machines viewer before starting macOS")
+            }
+            native.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            native.arguments = ["-n", "--env", "GLASSDOCK_VM_LIBRARY=\(store.root.path)", runtime.app.path, "--args", "--start-macos", id.uuidString]
+            try native.run()
+            native.waitUntilExit()
+            guard native.terminationStatus == 0 else { throw MachineError.command("Native macOS helper exited with status \(native.terminationStatus)") }
+            // Keep the launcher alive until the viewer has acquired the lock and
+            // exposed its endpoint; otherwise callers can mistake open's exit
+            // for a failed VM process before the app has initialized.
+            let deadline = Date().addingTimeInterval(20)
+            while Date() < deadline {
+                if let control = try? store.control(id), (try? control.command("query-status")) != nil { return }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            throw MachineError.command("The native Machines viewer did not expose its control endpoint")
+        }
         let bundle = store.bundle(id)
         let lock = try MachineLock(bundle: bundle)
         try withExtendedLifetime(lock) {

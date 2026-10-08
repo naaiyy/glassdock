@@ -86,6 +86,7 @@ for executable in (app/'Contents/MacOS').iterdir():
     if '@executable_path/../Frameworks' not in output:
         subprocess.run(['install_name_tool','-add_rpath','@executable_path/../Frameworks',str(staged_executable)],check=True)
     args=['codesign','--force','--sign','-']
+    if executable.name in ('glassdock-macos','GlassDockMachinesApp'):args+=['--entitlements',str(pathlib.Path(__file__).resolve().parents[2]/'.build/machines/virtualization.entitlements')]
     if executable.name=='glassdock-qemu':args+=['--entitlements',str(pathlib.Path(__file__).resolve().parents[2]/'.build/machines/hypervisor.entitlements')]
     subprocess.run(args+[str(staged_executable)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     staged_executable.replace(executable)
@@ -104,6 +105,6 @@ for root in (app/'Contents/MacOS', firmware):
                 for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
             files[str(path.relative_to(app/'Contents'))]=digest.hexdigest()
 (resources/'runtime-artifacts.json').write_text(json.dumps({'schemaVersion':1,'provenance':source.name,'frameworks':manifest,'files':files},indent=2)+'\n')
-subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)
+subprocess.run(['codesign','--force','--sign','-','--entitlements',str(pathlib.Path(__file__).resolve().parents[2]/'.build/machines/virtualization.entitlements'),str(app)],check=True)
 subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
 print('Packaged '+str(len(seen))+' ARM64 frameworks; strict signature verification passed.')

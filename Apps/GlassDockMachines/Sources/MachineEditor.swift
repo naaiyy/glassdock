@@ -35,6 +35,7 @@ struct MachineEditor: View {
                             Text("Linux ARM64").tag(MachineOS.linux)
                             Text("Windows ARM64").tag(MachineOS.windows)
                             Text("Omarchy Quattro ARM64").tag(MachineOS.omarchy)
+                            Text("macOS (Apple Silicon)").tag(MachineOS.macos)
                         }
                     }
                 }
@@ -45,19 +46,25 @@ struct MachineEditor: View {
                 }
                 Section("Display & Devices") {
                     Picker("Graphics", selection: $configuration.graphics) {
-                        Text("Basic display").tag(MachineGraphics.basic)
+                        Text(configuration.operatingSystem == .macos ? "Apple virtual display" : "Basic display").tag(MachineGraphics.basic)
                         if configuration.operatingSystem.isLinux { Text("VirGL (Linux)").tag(MachineGraphics.virgl) }
                         if configuration.operatingSystem == .windows { Text("Neptune / DXMT (experimental)").tag(MachineGraphics.neptune) }
                     }
                     Toggle("Audio output", isOn: Binding(get: { configuration.audioEnabled == true }, set: { configuration.audioEnabled = $0 }))
-                    Toggle("USB forwarding", isOn: Binding(get: { configuration.usbEnabled == true }, set: { configuration.usbEnabled = $0 }))
+                    Toggle("USB forwarding", isOn: Binding(get: { configuration.usbEnabled == true }, set: { configuration.usbEnabled = $0 })).disabled(
+                        configuration.operatingSystem == .macos)
                     if configuration.graphics == .neptune {
                         Text("Requires the signed Triton ARM64 guest driver. Direct3D compatibility is experimental.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if !existing {
                     Section {
-                        if configuration.operatingSystem == .omarchy {
+                        if configuration.operatingSystem == .macos {
+                            HStack {
+                                LabeledContent("macOS restore image", value: iso?.lastPathComponent ?? "Choose Apple IPSW")
+                                Button("Choose…") { iso = chooseFile() }.accessibilityLabel("Choose macOS IPSW Restore Image")
+                            }
+                        } else if configuration.operatingSystem == .omarchy {
                             HStack {
                                 LabeledContent("Omarchy guest", value: disk?.lastPathComponent ?? "Choose prepared factory folder")
                                 Button("Choose…") { disk = chooseFile(directory: true) }.accessibilityLabel("Choose Omarchy Factory Guest Folder")
@@ -77,7 +84,11 @@ struct MachineEditor: View {
                     } header: {
                         Text("Installation")
                     } footer: {
-                        if configuration.operatingSystem == .omarchy {
+                        if configuration.operatingSystem == .macos {
+                            Text(
+                                "Choose an Apple IPSW compatible with this Mac. The first start installs macOS, then opens Setup Assistant. Use glassdockctl machines restore-image to find Apple's latest compatible download."
+                            )
+                        } else if configuration.operatingSystem == .omarchy {
                             Text("Run scripts/machines/prepare-omarchy.sh, then choose its guest folder. Omarchy creates your account on first boot.")
                         } else {
                             Text("Choose ARM64 media. Files are copied into the machine. Windows requires installation and a suitable license.")
@@ -98,6 +109,14 @@ struct MachineEditor: View {
                     configuration.diskGiB = max(64, configuration.diskGiB)
                     configuration.audioEnabled = true
                 }
+                if os == .macos {
+                    configuration.name = "macOS"
+                    configuration.memoryMiB = max(4096, configuration.memoryMiB)
+                    configuration.diskGiB = max(64, configuration.diskGiB)
+                    configuration.audioEnabled = true
+                    configuration.usbEnabled = false
+                    configuration.sshPort = nil
+                }
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.callout)
@@ -115,7 +134,9 @@ struct MachineEditor: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(configuration.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!existing && configuration.operatingSystem == .omarchy && disk == nil))
+                .disabled(
+                    configuration.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (!existing && ((configuration.operatingSystem == .omarchy && disk == nil) || (configuration.operatingSystem == .macos && iso == nil))))
             }.padding(20)
         }
         .frame(width: 560, height: existing ? 520 : 720)

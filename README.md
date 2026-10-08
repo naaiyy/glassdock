@@ -49,9 +49,11 @@ Glass Dock also ships native control clients: a SwiftUI menu-bar app, a
 [`glassdockctl` CLI](docs/CONTROL_CLIENTS.md), and a Raycast extension.
 
 [GlassDock Machines](docs/machines/IMPLEMENTATION.md) adds a SwiftUI companion
-for Linux ARM64 and Windows ARM64 VMs, with QEMU/HVF, SPICE desktops, clones,
-stopped snapshots, compatible RAM checkpoints and checked export/import. See
-its implementation notes for source builds, tested capabilities and limitations.
+for Linux, Omarchy Quattro, Windows ARM64, and [macOS on Apple Silicon](docs/machines/MACOS.md).
+Desktops are embedded in the app: QEMU/HVF and SPICE run Linux/Windows, while
+Apple Virtualization runs macOS. Machines support clones, stopped snapshots and
+checked export/import; QEMU basic graphics also supports compatible RAM checkpoints.
+See the implementation notes for source builds, tested capabilities and limitations.
 
 ---
 

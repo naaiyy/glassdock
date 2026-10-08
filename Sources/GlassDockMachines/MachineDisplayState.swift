@@ -1,7 +1,7 @@
 /// Maps runtime status to presentation and permitted library actions.
 /// An unavailable control connection must never be presented as a stopped VM.
 public enum MachineDisplayState: Equatable, Sendable {
-    case checking, stopped, running, paused, starting, busy, unavailable
+    case checking, stopped, running, paused, starting, installing, busy, unavailable
     case other(String)
 
     public init(status: String?) {
@@ -10,6 +10,7 @@ public enum MachineDisplayState: Equatable, Sendable {
         case "stopped": self = .stopped
         case "running": self = .running
         case "paused": self = .paused
+        case "installing": self = .installing
         case "prelaunch": self = .starting
         case "busy": self = .busy
         case "starting or unavailable": self = .unavailable
@@ -24,6 +25,7 @@ public enum MachineDisplayState: Equatable, Sendable {
         case .running: "Running"
         case .paused: "Paused"
         case .starting: "Starting"
+        case .installing: "Installing macOS"
         case .busy: "Busy"
         case .unavailable: "Connecting…"
         case .other(let value): value.capitalized

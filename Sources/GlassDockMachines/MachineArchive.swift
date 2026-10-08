@@ -102,7 +102,8 @@ extension MachineStore {
             try fm.createDirectory(at: machine, withIntermediateDirectories: false)
             try fm.copyItem(at: bundle(id).appendingPathComponent("state"), to: machine.appendingPathComponent("state"))
             let config = try configuration(id)
-            for (mounted, filename) in [(config.installationMedia, "install.iso"), (config.seedMedia, "seed.iso")] where !mounted {
+            for (mounted, filename) in [(config.installationMedia, config.operatingSystem == .macos ? "restore.ipsw" : "install.iso"), (config.seedMedia, "seed.iso")]
+            where !mounted {
                 let media = machine.appendingPathComponent("state/\(filename)")
                 if fm.fileExists(atPath: media.path) { try fm.removeItem(at: media) }
             }
@@ -162,17 +163,24 @@ extension MachineStore {
         guard manifest.schemaVersion == 1, manifest.files == (try hashes(at: machine)) else { throw MachineError.invalid("Archive integrity check failed") }
         var config = try JSONDecoder().decode(MachineConfiguration.self, from: Data(contentsOf: machine.appendingPathComponent("machine.json")))
         try config.validate()
+        let macOSFiles = MacOSGuest.bootFiles + [MacOSGuest.installedMarker, "restore.ipsw"]
         let expected = Set(
-            [
-                "machine.json", "state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2", "state/install.iso", "state/seed.iso", "state/console.log",
-                "state/omarchy-console.log",
-            ]
-                + OmarchyGuest.bootFiles.map { "state/" + $0 })
-        guard manifest.files.keys.allSatisfy({ expected.contains($0) || $0.hasPrefix("state/tpm/") }),
-            ["state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2"].allSatisfy({ manifest.files[$0] != nil }),
-            !config.installationMedia || manifest.files["state/install.iso"] != nil, !config.seedMedia || manifest.files["state/seed.iso"] != nil
-        else {
-            throw MachineError.invalid("Archive contains missing or unsupported machine state")
+            config.operatingSystem == .macos
+                ? ["machine.json"] + macOSFiles.map { "state/" + $0 }
+                : [
+                    "machine.json", "state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2", "state/install.iso", "state/seed.iso", "state/console.log",
+                    "state/omarchy-console.log",
+                ] + OmarchyGuest.bootFiles.map { "state/" + $0 })
+        let required = config.operatingSystem == .macos ? MacOSGuest.bootFiles.map { "state/" + $0 } : ["state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2"]
+        guard manifest.files.keys.allSatisfy({ expected.contains($0) || (config.operatingSystem != .macos && $0.hasPrefix("state/tpm/")) }),
+            required.allSatisfy({ manifest.files[$0] != nil }),
+            !config.installationMedia || manifest.files[config.operatingSystem == .macos ? "state/restore.ipsw" : "state/install.iso"] != nil,
+            !config.seedMedia || manifest.files["state/seed.iso"] != nil
+        else { throw MachineError.invalid("Archive contains missing or unsupported machine state") }
+        if config.operatingSystem == .macos {
+            try MacOSGuest.validateState(at: machine.appendingPathComponent("state"), installed: !config.installationMedia)
+            let size = try machine.appendingPathComponent("state/disk.raw").resourceValues(forKeys: [.fileSizeKey]).fileSize
+            guard size == config.diskGiB * 1024 * 1024 * 1024 else { throw MachineError.invalid("macOS disk size does not match its configuration") }
         }
         if config.operatingSystem == .omarchy {
             guard config.omarchyBoot != nil, OmarchyGuest.bootFiles.allSatisfy({ manifest.files["state/" + $0] != nil }) else {
@@ -181,7 +189,7 @@ extension MachineStore {
         } else if OmarchyGuest.bootFiles.contains(where: { manifest.files["state/" + $0] != nil }) {
             throw MachineError.invalid("Unexpected Omarchy boot artifacts")
         }
-        for disk in ["disk.qcow2", "uefi-vars.qcow2"] {
+        for disk in config.operatingSystem == .macos ? [] : ["disk.qcow2", "uefi-vars.qcow2"] {
             let info = try runtime.tool("qemu-img", ["info", "--output=json", machine.appendingPathComponent("state/\(disk)").path])
             let object = try JSONSerialization.jsonObject(with: Data(info.utf8)) as? [String: Any]
             guard object?["format"] as? String == "qcow2", object?["backing-filename"] == nil,
