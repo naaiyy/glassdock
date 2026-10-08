@@ -32,21 +32,23 @@ extension MachineStore {
         try encoder.encode(manifest).write(to: directory.appendingPathComponent("manifest.json"), options: .atomic)
     }
     func hashes(at directory: URL) throws -> [String: String] {
+        // URL enumerators resolve /var aliases even when Foundation keeps the
+        // input URL as /var. Use the enumerator's relative paths directly.
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey]) else {
+        guard let enumerator = fm.enumerator(atPath: directory.path) else {
             throw MachineError.invalid("Cannot enumerate archive state")
         }
         var result: [String: String] = [:]
         var entries = 0
-        for case let file as URL in enumerator {
+        for case let relative as String in enumerator {
+            let file = directory.appendingPathComponent(relative)
             entries += 1
             guard entries <= 65536 else { throw MachineError.invalid("VM archive has too many entries") }
             let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey])
             guard values.isSymbolicLink != true else { throw MachineError.invalid("VM archives cannot contain symbolic links") }
             guard values.isRegularFile == true || values.isDirectory == true else { throw MachineError.invalid("VM archives require regular files and directories") }
             guard result.count < 65536 else { throw MachineError.invalid("VM archive has too many files") }
-            guard values.isRegularFile == true, file != directory.appendingPathComponent("manifest.json") else { continue }
-            let relative = String(file.path.dropFirst(directory.path.count + 1))
+            guard values.isRegularFile == true, relative != "manifest.json" else { continue }
             let input = try FileHandle(forReadingFrom: file)
             defer { try? input.close() }
             var hash = SHA256()
@@ -160,12 +162,24 @@ extension MachineStore {
         guard manifest.schemaVersion == 1, manifest.files == (try hashes(at: machine)) else { throw MachineError.invalid("Archive integrity check failed") }
         var config = try JSONDecoder().decode(MachineConfiguration.self, from: Data(contentsOf: machine.appendingPathComponent("machine.json")))
         try config.validate()
-        let expected: Set<String> = ["machine.json", "state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2", "state/install.iso", "state/seed.iso", "state/console.log"]
+        let expected = Set(
+            [
+                "machine.json", "state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2", "state/install.iso", "state/seed.iso", "state/console.log",
+                "state/omarchy-console.log",
+            ]
+                + OmarchyGuest.bootFiles.map { "state/" + $0 })
         guard manifest.files.keys.allSatisfy({ expected.contains($0) || $0.hasPrefix("state/tpm/") }),
             ["state/disk.qcow2", "state/uefi-code.fd", "state/uefi-vars.qcow2"].allSatisfy({ manifest.files[$0] != nil }),
             !config.installationMedia || manifest.files["state/install.iso"] != nil, !config.seedMedia || manifest.files["state/seed.iso"] != nil
         else {
             throw MachineError.invalid("Archive contains missing or unsupported machine state")
+        }
+        if config.operatingSystem == .omarchy {
+            guard config.omarchyBoot != nil, OmarchyGuest.bootFiles.allSatisfy({ manifest.files["state/" + $0] != nil }) else {
+                throw MachineError.invalid("Archive is missing paired Omarchy boot artifacts")
+            }
+        } else if OmarchyGuest.bootFiles.contains(where: { manifest.files["state/" + $0] != nil }) {
+            throw MachineError.invalid("Unexpected Omarchy boot artifacts")
         }
         for disk in ["disk.qcow2", "uefi-vars.qcow2"] {
             let info = try runtime.tool("qemu-img", ["info", "--output=json", machine.appendingPathComponent("state/\(disk)").path])
