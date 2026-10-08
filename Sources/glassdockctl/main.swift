@@ -7,7 +7,7 @@ struct GlassDockControlCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "glassdockctl",
         abstract: "Control the local GlassDock daemon and containers.",
-        subcommands: [Status.self, Support.self, Daemon.self, Containers.self, Logs.self, Migrate.self]
+        subcommands: [Status.self, Support.self, Daemon.self, Containers.self, Logs.self, Migrate.self, Machines.self]
     )
 }
 

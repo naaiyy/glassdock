@@ -746,6 +746,8 @@ private struct PopoverFooter: View {
         HStack(spacing: 8) {
             lifecycleControls
             Spacer(minLength: 8)
+            Button("Machines", systemImage: "desktopcomputer") { model.openMachines() }
+                .help("Open Linux and Windows machines")
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q", modifiers: .command)
         }

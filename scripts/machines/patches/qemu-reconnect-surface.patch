@@ -1,0 +1,14 @@
+--- a/ui/spice-display.c
++++ b/ui/spice-display.c
+@@ -1037,8 +1037,9 @@
+     if (!ssd->iosurface) {
+         return -1;
+     }
+-    if (pipe(fds) < 0) {
+-        error_report("spice_iosurface_create_fd: failed to create pipe");
++    /* Clients peek this ID: the descriptor can be replayed on reconnect. */
++    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
++        error_report("spice_iosurface_create_fd: failed to create socketpair");
+         return -1;
+     }
+     if (ssd->surface_send_fd > -1) {

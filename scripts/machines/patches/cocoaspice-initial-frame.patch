@@ -1,0 +1,182 @@
+diff --git a/Sources/CocoaSpice/CSConnection.m b/Sources/CocoaSpice/CSConnection.m
+index 936842d..6924495 100644
+--- a/Sources/CocoaSpice/CSConnection.m
++++ b/Sources/CocoaSpice/CSConnection.m
+@@ -114,8 +114,8 @@ static void cs_display_monitors(SpiceChannel *channel, GParamSpec *pspec,
+     assert(display);
+     
+     SPICE_DEBUG("[CocoaSpice] display %ld now has %d monitors", display.channelID, cfgs->len);
+-    if (cfgs->len > 0) {
+-        g_assert(cfgs->len == 1);
++    if (cfgs->len > 0 || spice_display_channel_get_gl_scanout(SPICE_DISPLAY_CHANNEL(channel))) {
++        g_assert(cfgs->len <= 1);
+         if (display.hasInitialConfig) {
+             [self.delegate spiceDisplayUpdated:self display:display];
+         } else {
+@@ -123,6 +123,7 @@ static void cs_display_monitors(SpiceChannel *channel, GParamSpec *pspec,
+             display.hasInitialConfig = YES;
+         }
+     } else {
++        display.hasInitialConfig = NO;
+         [self.delegate spiceDisplayDestroyed:self display:display];
+     }
+     
+@@ -197,6 +198,8 @@ static void cs_channel_new(SpiceSession *s, SpiceChannel *channel, gpointer data
+         [self.mutableChannels addObject:display];
+         g_signal_connect_after(channel, "notify::monitors",
+                                G_CALLBACK(cs_display_monitors), (__bridge void *)self);
++        g_signal_connect_after(channel, "notify::gl-scanout",
++                               G_CALLBACK(cs_display_monitors), (__bridge void *)self);
+         display.isEnabled = YES;
+         // find and connect to any existing cursor channel
+         for (CSChannel *candidate in self.channels) {
+diff --git a/Sources/CocoaSpice/CSDisplay+Protected.h b/Sources/CocoaSpice/CSDisplay+Protected.h
+index 1f32a84..23aa501 100644
+--- a/Sources/CocoaSpice/CSDisplay+Protected.h
++++ b/Sources/CocoaSpice/CSDisplay+Protected.h
+@@ -24,7 +24,6 @@ NS_ASSUME_NONNULL_BEGIN
+ @interface CSDisplay ()
+ 
+ /// True if currently rendering from GL backend
+-@property (nonatomic, readonly) BOOL isGLEnabled;
+ 
+ /// SPICE display channel
+ @property (nonatomic, nullable, readonly) SpiceDisplayChannel *channel;
+diff --git a/Sources/CocoaSpice/CSDisplay.m b/Sources/CocoaSpice/CSDisplay.m
+index 95fca04..6a9267e 100644
+--- a/Sources/CocoaSpice/CSDisplay.m
++++ b/Sources/CocoaSpice/CSDisplay.m
+@@ -1,3 +1,5 @@
++#include <sys/socket.h>
++#include <errno.h>
+ //
+ // Copyright © 2022 osy. All rights reserved.
+ //
+@@ -72,6 +74,16 @@
+ 
+ @implementation CSDisplay
+ 
++// Non-destructive read lets the server replay one live surface to a new viewer.
++// The pipe fallback retains compatibility with the verified bootstrap runtime.
++static ssize_t cs_read_surface_id(int fd, IOSurfaceID *surfaceid) {
++    ssize_t result = recv(fd, surfaceid, sizeof(*surfaceid), MSG_PEEK);
++    if (result < 0 && errno == ENOTSOCK) {
++        result = read(fd, surfaceid, sizeof(*surfaceid));
++    }
++    return result;
++}
++
+ #pragma mark - Display events
+ 
+ static void cs_primary_create(SpiceChannel *channel, gint format,
+@@ -86,7 +98,7 @@ static void cs_primary_create(SpiceChannel *channel, gint format,
+     self.canvasStride = stride;
+     self.canvasData = imgdata;
+     
+-    cs_update_monitor_area(channel, NULL, data);
++    cs_update_monitor_area(SPICE_CHANNEL(channel), NULL, data);
+ }
+ 
+ static void cs_primary_destroy(SpiceDisplayChannel *channel, gpointer data) {
+@@ -163,6 +175,11 @@ static void cs_update_monitor_area(SpiceChannel *channel, GParamSpec *pspec, gpo
+     //}
+     g_assert(monitors->len <= 1);
+     if (monitors->len == 0) {
++        // Windows GL scanout may have no MonitorsConfig. Its surface
++        // dimensions are sufficient until an explicit head config arrives.
++        if (self.isGLEnabled && !CGRectIsEmpty(self.canvasArea)) {
++            goto whole;
++        }
+         SPICE_DEBUG("[CocoaSpice] update monitor: no monitor %d", (int)self.monitorID);
+         self.ready = NO;
+         if (spice_channel_test_capability(SPICE_CHANNEL(self.channel),
+@@ -174,6 +191,11 @@ static void cs_update_monitor_area(SpiceChannel *channel, GParamSpec *pspec, gpo
+         goto whole;
+     }
+     c = &g_array_index(monitors, SpiceDisplayMonitorConfig, 0);
++    // A dormant firmware head may report a zero-sized monitor even though
++    // the accelerated adapter has already published its real GL surface.
++    if (self.isGLEnabled && !CGRectIsEmpty(self.canvasArea) && (c->width == 0 || c->height == 0)) {
++        goto whole;
++    }
+     
+     if (c->surface_id != 0) {
+         g_warning("FIXME: only support monitor config with primary surface 0, "
+@@ -214,6 +236,7 @@ static void cs_gl_scanout(SpiceDisplayChannel *channel, GParamSpec *pspec, gpoin
+     self.isGLEnabled = YES;
+ 
+     [self rebuildScanoutTextureWithScanout:*scanout];
++    cs_update_monitor_area(SPICE_CHANNEL(channel), NULL, data);
+ }
+ 
+ static void cs_gl_draw(SpiceDisplayChannel *channel,
+@@ -264,8 +287,13 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
+                 }
+             }
+         } else {
++            // Initial canvas upload requires vertices for CSMetalRenderer's source.
++            [self rebuildDisplayVertices];
+             [self rebuildCanvasTexture];
+         }
++        if (self.isGLEnabled) {
++            cs_update_monitor_area(SPICE_CHANNEL(self.channel), NULL, (__bridge void *)self);
++        }
+         [self rebuildDisplayVertices];
+     }];
+     // possibly retrigger cursor rebuild
+@@ -415,6 +443,11 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
+                               primary.stride, primary.shmid, primary.data, (__bridge void *)self);
+             cs_mark(self.spiceChannel, primary.marked, (__bridge void *)self);
+         }
++        // A running guest can publish GL scanout before this wrapper exists.
++        // Adopt its initial surface just as we adopt the initial primary canvas.
++        if (spice_display_channel_get_gl_scanout(channel)) {
++            cs_gl_scanout(channel, NULL, (__bridge void *)self);
++        }
+     }
+     return self;
+ }
+@@ -447,11 +480,11 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
+         self.visibleArea = visible;
+     }
+     self.displaySize = self.visibleArea.size;
++    self.ready = YES;
++    [self rebuildDisplayVertices];
+     if (!self.isGLEnabled) {
+         [self rebuildCanvasTexture];
+     }
+-    [self rebuildDisplayVertices];
+-    self.ready = YES;
+ }
+ 
+ - (void)rebuildScanoutTextureWithScanout:(SpiceGlScanout)scanout {
+@@ -472,7 +505,7 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
+         return;
+     }
+ 
+-    if (read(scanout.fd, &iosurfaceid, sizeof(iosurfaceid)) != sizeof(iosurfaceid)) {
++    if (cs_read_surface_id(scanout.fd, &iosurfaceid) != sizeof(iosurfaceid)) {
+         SPICE_DEBUG("[CocoaSpice] Failed to read scanout fd: %d", scanout.fd);
+         perror("read");
+         return;
+@@ -481,6 +514,8 @@ static void cs_gl_draw(SpiceDisplayChannel *channel,
+         SPICE_DEBUG("[CocoaSpice] Failed to lookup surface: %d", iosurfaceid);
+         return;
+     }
++    // Expose surface dimensions before a renderer supplies its Metal device.
++    self.canvasArea = CGRectMake(0, 0, scanout.width, scanout.height);
+     if (self.device) {
+         [self rebuildScanoutTextureWithSurface:iosurface width:scanout.width height:scanout.height];
+         [self rebuildDisplayVertices];
+diff --git a/Sources/CocoaSpice/include/CSDisplay.h b/Sources/CocoaSpice/include/CSDisplay.h
+index 33e4bfc..c82f701 100644
+--- a/Sources/CocoaSpice/include/CSDisplay.h
++++ b/Sources/CocoaSpice/include/CSDisplay.h
+@@ -31,6 +31,7 @@ NS_ASSUME_NONNULL_BEGIN
+ /// This implements the `CSRenderSource` protocol which can be used to render to a Metal device.
+ /// Note: multiple monitors on a single display channel is not supported.
+ @interface CSDisplay : CSChannel <CSRenderSource>
++@property (nonatomic, readonly) BOOL isGLEnabled;
+ 
+ /// The current size of the display.
+ /// You can add an observer on this property to detect when the display resolution changes.

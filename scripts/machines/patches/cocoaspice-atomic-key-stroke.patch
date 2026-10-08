@@ -1,0 +1,81 @@
+diff --git a/Sources/CocoaSpice/CSInput.m b/Sources/CocoaSpice/CSInput.m
+index ae10d95..063820f 100644
+--- a/Sources/CocoaSpice/CSInput.m
++++ b/Sources/CocoaSpice/CSInput.m
+@@ -114,21 +114,41 @@
+     }];
+ }
+ 
++- (void)sendStroke:(int)scancode shift:(BOOL)shift control:(BOOL)control alt:(BOOL)alt {
++    [CSMain.sharedInstance asyncWith:^{
++        if (!self.channel || self.disableInputs) return;
++        // One protocol operation: do not reschedule individual edges or apply
++        // the separate asynchronous key-state guard to a complete text chord.
++        if (control) spice_inputs_channel_key_press(self.channel, 0x1d);
++        if (alt) spice_inputs_channel_key_press(self.channel, 0x38);
++        if (shift) spice_inputs_channel_key_press(self.channel, 0x2a);
++        spice_inputs_channel_key_press(self.channel, scancode);
++        spice_inputs_channel_key_release(self.channel, scancode);
++        if (shift) spice_inputs_channel_key_release(self.channel, 0x2a);
++        if (alt) spice_inputs_channel_key_release(self.channel, 0x38);
++        if (control) spice_inputs_channel_key_release(self.channel, 0x1d);
++    }];
++}
++
++- (void)resetKeyboard {
++    [CSMain.sharedInstance asyncWith:^{
++        if (!self.channel) return;
++        for (int code = 1; code <= 0x58; code++) spice_inputs_channel_key_release(self.channel, code);
++        const int extended[] = {0x11c, 0x11d, 0x135, 0x138, 0x147, 0x149, 0x14b, 0x14d, 0x14f, 0x150, 0x151, 0x153, 0x15b, 0x15c};
++        for (int i = 0; i < sizeof(extended) / sizeof(extended[0]); i++) spice_inputs_channel_key_release(self.channel, extended[i]);
++        memset(self->_key_state, 0, sizeof(self->_key_state));
++    }];
++}
++
+ - (void)releaseKeys {
+-    uint32_t i, b;
+-    
+-    SPICE_DEBUG("%s", __FUNCTION__);
+-    for (i = 0; i < SPICE_N_ELEMENTS(self->_key_state); i++) {
+-        if (!self->_key_state[i]) {
+-            continue;
+-        }
+-        for (b = 0; b < 32; b++) {
+-            unsigned int scancode = i * 32 + b;
+-            if (scancode != 0) {
+-                [self sendKey:kCSInputKeyRelease code:scancode];
++    // The key-state bitset is owned by the SPICE context, not the UI thread.
++    [CSMain.sharedInstance asyncWith:^{
++        for (uint32_t code = 1; code < 512; code++) {
++            if (self->_key_state[code / 32] & (1u << (code % 32))) {
++                [self sendKey:kCSInputKeyRelease code:code];
+             }
+         }
+-    }
++    }];
+ }
+ 
+ - (CSInputKeyLock)keyLock {
+diff --git a/Sources/CocoaSpice/include/CSInput.h b/Sources/CocoaSpice/include/CSInput.h
+index f3c8e55..11f402f 100644
+--- a/Sources/CocoaSpice/include/CSInput.h
++++ b/Sources/CocoaSpice/include/CSInput.h
+@@ -106,12 +106,18 @@ NS_ASSUME_NONNULL_BEGIN
+ /// @param scancode PC XT (set 1) scancode
+ - (void)sendKey:(CSInputKey)type code:(int)scancode;
+ 
++/// Sends one complete chord atomically on the SPICE context. Never leaves a printable key held.
++- (void)sendStroke:(int)scancode shift:(BOOL)shift control:(BOOL)control alt:(BOOL)alt NS_SWIFT_NAME(sendStroke(code:shift:control:alt:));
++
+ /// Sends a single pause key event
+ ///
+ /// This key event is special and requires a special handler.
+ /// @param type Event type
+ - (void)sendPause:(CSInputKey)type;
+ 
++/// Releases stale guest keys after reconnecting, even if the previous client held them.
++- (void)resetKeyboard;
++
+ /// Reset key state by making sure all keys in pressed state are released
+ - (void)releaseKeys;
+ 

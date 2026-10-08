@@ -1,0 +1,73 @@
+{
+  "platform": "Apple M4 Pro, 4 CPUs / 4 GiB per guest",
+  "runtime": "Independent source build",
+  "linux": {
+    "basic": {
+      "runs": [
+        [
+          847,
+          440,
+          1486
+        ],
+        [
+          921,
+          479,
+          1554
+        ],
+        [
+          923,
+          491,
+          1555
+        ]
+      ],
+      "medianFPS": [
+        921,
+        479,
+        1554
+      ]
+    },
+    "virgl": {
+      "runs": [
+        [
+          562,
+          533,
+          578
+        ],
+        [
+          543,
+          511,
+          587
+        ],
+        [
+          543,
+          548,
+          566
+        ]
+      ],
+      "medianFPS": [
+        543,
+        533,
+        578
+      ]
+    }
+  },
+  "windows": {
+    "1": {
+      "runsFPS": [
+        589.74,
+        590.32,
+        596.17
+      ],
+      "medianFPS": 590.32
+    },
+    "5": {
+      "runsFPS": [
+        3896.48,
+        3326.9,
+        3839.38
+      ],
+      "medianFPS": 3839.38
+    },
+    "workload": "800x600 RGBA clear plus synchronous staging readback; validated pixel per frame; not a gaming benchmark"
+  }
+}

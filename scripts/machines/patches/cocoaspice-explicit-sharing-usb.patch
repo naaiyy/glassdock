@@ -1,0 +1,56 @@
+diff --git a/Package.swift b/Package.swift
+index 5ff5d1f..3aaeded 100644
+--- a/Package.swift
++++ b/Package.swift
+@@ -24,7 +24,7 @@ let package = Package(
+         .target(
+             name: "CocoaSpice",
+             dependencies: ["CocoaSpiceRenderer"],
+-            exclude: ["ExternalHeaders"],
++            exclude: ["ExternalHeaders", "gst_ios_init.m"],
+             cSettings: [
+                 .define("WITH_USB_SUPPORT"),
+                 .headerSearchPath("ExternalHeaders"),
+diff --git a/Sources/CocoaSpice/CSSession+Sharing.m b/Sources/CocoaSpice/CSSession+Sharing.m
+index fb35c12..c51b439 100644
+--- a/Sources/CocoaSpice/CSSession+Sharing.m
++++ b/Sources/CocoaSpice/CSSession+Sharing.m
+@@ -27,6 +27,10 @@ static const NSString *const kDefaultShareReadme =
+ 
+ @implementation CSSession (Sharing)
+ 
++- (void)clearSharedDirectory {
++    g_object_set(self.session, "shared-dir", NULL, "share-dir-ro", TRUE, NULL);
++}
++
+ - (void)setSharedDirectory:(NSString *)path readOnly:(BOOL)readOnly {
+     g_object_set(self.session, "shared-dir", [path cStringUsingEncoding:NSUTF8StringEncoding], NULL);
+     g_object_set(self.session, "share-dir-ro", readOnly, NULL);
+diff --git a/Sources/CocoaSpice/CSSession.m b/Sources/CocoaSpice/CSSession.m
+index 92707b1..ed6ea44 100644
+--- a/Sources/CocoaSpice/CSSession.m
++++ b/Sources/CocoaSpice/CSSession.m
+@@ -312,7 +312,8 @@ static void cs_channel_destroy(SpiceSession *session, SpiceChannel *channel,
+         
+         // g_get_user_special_dir(G_USER_DIRECTORY_PUBLIC_SHARE) returns NULL so we replace it with a valid value here
+-        [self createDefaultShareReadme];
++        // No default host folder is created or exposed.
+-        [self setSharedDirectory:self.defaultPublicShare.path readOnly:NO];
++        // GlassDock requires an explicitly selected folder; never share ~/Documents/Public.
++        g_object_set(session, "shared-dir", NULL, "share-dir-ro", TRUE, NULL);
+         
+         SPICE_DEBUG("[CocoaSpice] %s:%d", __FUNCTION__, __LINE__);
+         g_signal_connect(session, "channel-new",
+diff --git a/Sources/CocoaSpice/include/CSSession+Sharing.h b/Sources/CocoaSpice/include/CSSession+Sharing.h
+index 326947a..4a09463 100644
+--- a/Sources/CocoaSpice/include/CSSession+Sharing.h
++++ b/Sources/CocoaSpice/include/CSSession+Sharing.h
+@@ -30,6 +30,8 @@ NS_ASSUME_NONNULL_BEGIN
+ /// Change the current shared directory
+ /// @param path Local path to share (must be readable)
+ /// @param readOnly Share as read-only to the server
++- (void)clearSharedDirectory;
++
+ - (void)setSharedDirectory:(NSString *)path readOnly:(BOOL)readOnly;
+ 
+ @end

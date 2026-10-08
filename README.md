@@ -48,6 +48,11 @@ It allows common Docker clients (like the Docker CLI) to interact with local con
 Glass Dock also ships native control clients: a SwiftUI menu-bar app, a
 [`glassdockctl` CLI](docs/CONTROL_CLIENTS.md), and a Raycast extension.
 
+[GlassDock Machines](docs/machines/IMPLEMENTATION.md) adds a SwiftUI companion
+for Linux ARM64 and Windows ARM64 VMs, with QEMU/HVF, SPICE desktops, clones,
+stopped snapshots, compatible RAM checkpoints and checked export/import. See
+its implementation notes for source builds, tested capabilities and limitations.
+
 ---
 
 ## Quick Start ⚡
