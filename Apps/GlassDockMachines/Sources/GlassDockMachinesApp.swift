@@ -168,7 +168,13 @@ struct MachineLibraryView: View {
         .sheet(isPresented: $creating) {
             MachineEditor { config, disk, iso in
                 creating = false
-                perform { _ = try store().create(config, disk: disk, media: iso) }
+                perform {
+                    if config.operatingSystem == .omarchy {
+                        _ = try store().create(config, omarchyGuest: disk)
+                    } else {
+                        _ = try store().create(config, disk: disk, media: iso)
+                    }
+                }
             }
         }
         .sheet(item: $editing) { machine in
@@ -242,7 +248,7 @@ struct MachineLibraryView: View {
                     MachineEmblem(system: machine.operatingSystem, size: 88)
                     VStack(spacing: 8) {
                         Text(machine.name).font(.largeTitle.weight(.semibold)).textSelection(.enabled)
-                        Text(machine.operatingSystem == .linux ? "Linux · ARM64" : "Windows · ARM64")
+                        Text("\(machine.operatingSystem.displayName) · ARM64")
                             .font(.title3).foregroundStyle(.secondary)
                         MachineStatus(value: status[machine.id])
                     }
@@ -284,7 +290,11 @@ struct MachineLibraryView: View {
                 Toggle("Mac keyboard", isOn: $matchMacTyping)
                     .help("Translate Mac typing to a US guest layout. Command-V types clipboard text directly.")
                 Toggle("Clipboard", isOn: $shareClipboard)
-                    .help("Share text with the guest. Requires guest tools.")
+                    .disabled(machine.operatingSystem == .omarchy)
+                    .help(
+                        machine.operatingSystem == .omarchy
+                            ? "Wayland clipboard sync is not available. Enable Mac keyboard and use Command-V to type text into Omarchy."
+                            : "Share text with the guest. Requires guest tools.")
             }
             Section("Folder") {
                 if let directory = sharedDirectory {

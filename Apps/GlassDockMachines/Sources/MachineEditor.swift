@@ -34,6 +34,7 @@ struct MachineEditor: View {
                         Picker("Operating system", selection: $configuration.operatingSystem) {
                             Text("Linux ARM64").tag(MachineOS.linux)
                             Text("Windows ARM64").tag(MachineOS.windows)
+                            Text("Omarchy Quattro ARM64").tag(MachineOS.omarchy)
                         }
                     }
                 }
@@ -45,7 +46,7 @@ struct MachineEditor: View {
                 Section("Display & Devices") {
                     Picker("Graphics", selection: $configuration.graphics) {
                         Text("Basic display").tag(MachineGraphics.basic)
-                        if configuration.operatingSystem == .linux { Text("VirGL (Linux)").tag(MachineGraphics.virgl) }
+                        if configuration.operatingSystem.isLinux { Text("VirGL (Linux)").tag(MachineGraphics.virgl) }
                         if configuration.operatingSystem == .windows { Text("Neptune / DXMT (experimental)").tag(MachineGraphics.neptune) }
                     }
                     Toggle("Audio output", isOn: Binding(get: { configuration.audioEnabled == true }, set: { configuration.audioEnabled = $0 }))
@@ -56,26 +57,48 @@ struct MachineEditor: View {
                 }
                 if !existing {
                     Section {
-                        HStack {
-                            LabeledContent("Disk image", value: disk?.lastPathComponent ?? "Create an empty disk")
-                            Button("Choose…") { disk = chooseFile() }.accessibilityLabel("Choose Disk Image")
-                            if disk != nil { Button("Clear") { disk = nil }.accessibilityLabel("Clear Disk Image") }
-                        }
-                        HStack {
-                            LabeledContent("Installer", value: iso?.lastPathComponent ?? "No installer selected")
-                            Button("Choose…") { iso = chooseFile() }.accessibilityLabel("Choose ARM64 Installer ISO")
-                            if iso != nil { Button("Clear") { iso = nil }.accessibilityLabel("Clear Installer ISO") }
+                        if configuration.operatingSystem == .omarchy {
+                            HStack {
+                                LabeledContent("Omarchy guest", value: disk?.lastPathComponent ?? "Choose prepared factory folder")
+                                Button("Choose…") { disk = chooseFile(directory: true) }.accessibilityLabel("Choose Omarchy Factory Guest Folder")
+                            }
+                        } else {
+                            HStack {
+                                LabeledContent("Disk image", value: disk?.lastPathComponent ?? "Create an empty disk")
+                                Button("Choose…") { disk = chooseFile() }.accessibilityLabel("Choose Disk Image")
+                                if disk != nil { Button("Clear") { disk = nil }.accessibilityLabel("Clear Disk Image") }
+                            }
+                            HStack {
+                                LabeledContent("Installer", value: iso?.lastPathComponent ?? "No installer selected")
+                                Button("Choose…") { iso = chooseFile() }.accessibilityLabel("Choose ARM64 Installer ISO")
+                                if iso != nil { Button("Clear") { iso = nil }.accessibilityLabel("Clear Installer ISO") }
+                            }
                         }
                     } header: {
                         Text("Installation")
                     } footer: {
-                        Text("Choose ARM64 media. Files are copied into the machine. Windows requires installation and a suitable license.")
+                        if configuration.operatingSystem == .omarchy {
+                            Text("Run scripts/machines/prepare-omarchy.sh, then choose its guest folder. Omarchy creates your account on first boot.")
+                        } else {
+                            Text("Choose ARM64 media. Files are copied into the machine. Windows requires installation and a suitable license.")
+                        }
                     }
                 }
             }
             .formStyle(.grouped)
             .monospacedDigit()
-            .onChange(of: configuration.operatingSystem) { _, _ in configuration.graphics = .basic }
+            .onChange(of: configuration.operatingSystem) { _, os in
+                configuration.graphics = os == .omarchy ? .virgl : .basic
+                disk = nil
+                iso = nil
+                if os == .omarchy {
+                    configuration.name = "Omarchy Quattro"
+                    configuration.cpuCount = max(4, configuration.cpuCount)
+                    configuration.memoryMiB = max(4096, configuration.memoryMiB)
+                    configuration.diskGiB = max(64, configuration.diskGiB)
+                    configuration.audioEnabled = true
+                }
+            }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red).font(.callout)
                     .textSelection(.enabled).padding(.horizontal, 24).padding(.bottom, 12)
@@ -92,14 +115,15 @@ struct MachineEditor: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(configuration.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(configuration.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!existing && configuration.operatingSystem == .omarchy && disk == nil))
             }.padding(20)
         }
         .frame(width: 560, height: existing ? 520 : 720)
     }
-    private func chooseFile() -> URL? {
+    private func chooseFile(directory: Bool = false) -> URL? {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = directory
+        panel.canChooseFiles = !directory
         panel.allowsMultipleSelection = false
         return panel.runModal() == .OK ? panel.url : nil
     }

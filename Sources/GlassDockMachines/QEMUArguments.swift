@@ -13,7 +13,8 @@ public enum QEMUArguments {
         var arguments = [
             "-L", runtime.firmware.path, "-nodefaults", "-no-user-config",
             "-name", config.name, "-uuid", config.id.uuidString,
-            "-machine", "virt,highmem=on", "-accel", config.graphics == .neptune ? "hvf,ipa-granule-size=0x1000" : "hvf", "-cpu", "host",
+            "-machine", "virt,highmem=on", "-accel", config.graphics == .neptune ? "hvf,ipa-granule-size=0x1000" : "hvf", "-cpu",
+            config.operatingSystem == .omarchy ? "host,pmu=off" : "host",
             "-smp", String(config.cpuCount), "-m", String(config.memoryMiB),
             "-drive", "if=pflash,format=raw,readonly=on,file=\(path("uefi-code.fd"))",
             "-drive", "if=pflash,format=qcow2,file=\(path("uefi-vars.qcow2"))",
@@ -34,12 +35,29 @@ public enum QEMUArguments {
                 ? "virtio-ramfb-gl,hostmem=8G,blob=true,neptune=true"
                 : config.operatingSystem == .windows ? "virtio-ramfb" : (config.graphics == .virgl ? "virtio-gpu-gl-pci" : "virtio-gpu-pci"),
         ]
+        if config.operatingSystem == .omarchy {
+            guard let boot = config.omarchyBoot else { throw MachineError.invalid("Omarchy machine is missing its paired boot metadata") }
+            for filename in ["vmlinuz-linux", "initramfs-linux.img"] {
+                guard FileManager.default.fileExists(atPath: bundle.appendingPathComponent("state/" + filename).path) else {
+                    throw MachineError.invalid("Missing Omarchy boot artifact: \(filename)")
+                }
+            }
+            // Direct-boot kernel arguments are separate argv values, not QEMU
+            // comma-separated option strings. Preserve commas in these paths.
+            arguments += [
+                "-chardev", "file,id=omarchy-console,path=\(path("omarchy-console.log"))",
+                "-device", "virtconsole,chardev=omarchy-console",
+                "-kernel", bundle.appendingPathComponent("state/vmlinuz-linux").path,
+                "-initrd", bundle.appendingPathComponent("state/initramfs-linux.img").path,
+                "-append", boot.kernelCommandLine + " console=ttyAMA0 omarchy.qemu_virgl=1" + (config.sshPort != nil ? " tryomarchy.ssh_access=1" : ""),
+            ]
+        }
         arguments += ["-chardev", "spiceport,id=webdav,name=org.spice-space.webdav.0", "-device", "virtserialport,chardev=webdav,name=org.spice-space.webdav.0"]
         if config.audioEnabled == true { arguments += ["-audiodev", "coreaudio,id=audio0", "-device", "intel-hda", "-device", "hda-output,audiodev=audio0"] }
         if config.usbEnabled == true {
             for index in 0..<3 { arguments += ["-chardev", "spicevmc,id=usbredir\(index),name=usbredir", "-device", "usb-redir,chardev=usbredir\(index),id=usbredirdev\(index)"] }
         }
-        if config.operatingSystem == .linux { arguments += ["-serial", "file:\(path("console.log"))"] }
+        if config.operatingSystem.isLinux { arguments += ["-serial", "file:\(path("console.log"))"] }
         if config.operatingSystem == .windows {
             arguments += ["-S"]  // Attach SPICE before firmware draws and before the ISO boot prompt.
             arguments += [

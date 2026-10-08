@@ -1,0 +1,15 @@
+[Unit]
+Description=Install GlassDock guest integration
+ConditionPathExists=!/var/lib/glassdock/integration-v1
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/local/lib/glassdock/omarchy-integration.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

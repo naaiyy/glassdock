@@ -1,6 +1,17 @@
 import Foundation
 
-public enum MachineOS: String, Codable, CaseIterable, Sendable { case linux, windows }
+public enum MachineOS: String, Codable, CaseIterable, Sendable {
+    case linux, windows, omarchy
+
+    public var isLinux: Bool { self != .windows }
+    public var displayName: String {
+        switch self {
+        case .linux: "Linux"
+        case .windows: "Windows"
+        case .omarchy: "Omarchy Quattro"
+        }
+    }
+}
 public enum MachineGraphics: String, Codable, CaseIterable, Sendable { case basic, virgl, neptune }
 
 public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
@@ -13,6 +24,7 @@ public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
     public var diskGiB: Int
     public var sshPort: Int?
     public var graphics: MachineGraphics = .basic
+    public var omarchyBoot: OmarchyBoot?
     public var macAddress: String
     // Media is copied into the machine bundle. No host path survives export.
     public var installationMedia: Bool = false
@@ -29,6 +41,10 @@ public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
         self.memoryMiB = memoryMiB
         self.diskGiB = diskGiB
         macAddress = Self.newMAC()
+        if operatingSystem == .omarchy {
+            graphics = .virgl
+            audioEnabled = true
+        }
     }
 
     public func validate() throws {
@@ -43,9 +59,17 @@ public struct MachineConfiguration: Codable, Identifiable, Equatable, Sendable {
             throw MachineError.invalid("Invalid locally administered MAC address")
         }
         if let sshPort, !(1024...65535).contains(sshPort) { throw MachineError.invalid("Invalid SSH port") }
-        if operatingSystem == .linux && graphics == .neptune { throw MachineError.invalid("Neptune is a Windows graphics profile") }
+        if operatingSystem.isLinux && graphics == .neptune { throw MachineError.invalid("Neptune is a Windows graphics profile") }
         if operatingSystem == .windows && graphics == .virgl {
             throw MachineError.invalid("The VirGL profile currently supports Linux only")
+        }
+        if operatingSystem == .omarchy {
+            guard graphics == .virgl, cpuCount >= 4, memoryMiB >= 4096, diskGiB >= 64 else {
+                throw MachineError.invalid("Omarchy requires VirGL, at least 4 CPUs, 4096 MiB RAM, and 64 GiB disk")
+            }
+            if let omarchyBoot { try omarchyBoot.validate() }
+        } else if omarchyBoot != nil {
+            throw MachineError.invalid("Omarchy boot artifacts require the Omarchy operating system")
         }
         if operatingSystem == .windows && (memoryMiB < 4096 || cpuCount < 2 || diskGiB < 64) {
             throw MachineError.invalid("Windows requires at least 2 CPUs, 4096 MiB RAM, and 64 GiB disk")

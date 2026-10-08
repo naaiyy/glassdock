@@ -4,7 +4,7 @@ import GlassDockMachines
 
 struct Machines: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "machines", abstract: "Manage Linux and Windows ARM virtual machines.",
+        commandName: "machines", abstract: "Manage Linux, Omarchy Quattro, and Windows ARM virtual machines.",
         subcommands: [
             List.self, Create.self, Configure.self, Start.self, Stop.self, PowerOff.self, Pause.self, Resume.self, Clone.self, Snapshot.self, Restore.self, Snapshots.self,
             Export.self, Import.self, Exec.self, Logs.self, Media.self, Memory.self,
@@ -32,7 +32,7 @@ struct Machines: ParsableCommand {
     struct Create: ParsableCommand {
         @OptionGroup var location: Location
         @Argument var name: String
-        @Option(help: "linux or windows") var os: String = "linux"
+        @Option(help: "linux, windows, or omarchy (Quattro ARM64)") var os: String = "linux"
         @Option var cpus: Int = 4
         @Option var memory: Int = 4096
         @Option var sshPort: Int?
@@ -40,12 +40,14 @@ struct Machines: ParsableCommand {
         @Option(help: "Existing disk image to import and flatten.") var disk: String?
         @Option(help: "ARM64 installation ISO.") var iso: String?
         @Option(help: "Cloud-init seed ISO.") var seed: String?
+        @Option(help: "Prepared Omarchy ARM64 factory guest folder (scripts/machines/prepare-omarchy.sh).") var omarchyGuest: String?
         func run() throws {
-            guard let operatingSystem = MachineOS(rawValue: os) else { throw ValidationError("Choose linux or windows") }
+            guard let operatingSystem = MachineOS(rawValue: os) else { throw ValidationError("Choose linux, windows, or omarchy") }
             var config = MachineConfiguration(name: name, operatingSystem: operatingSystem, cpuCount: cpus, memoryMiB: memory, diskGiB: diskSize)
             config.sshPort = sshPort
             let created = try location.store().create(
-                config, disk: disk.map { URL(fileURLWithPath: $0) }, media: iso.map { URL(fileURLWithPath: $0) }, seed: seed.map { URL(fileURLWithPath: $0) })
+                config, disk: disk.map { URL(fileURLWithPath: $0) }, media: iso.map { URL(fileURLWithPath: $0) }, seed: seed.map { URL(fileURLWithPath: $0) },
+                omarchyGuest: omarchyGuest.map { URL(fileURLWithPath: $0) })
             print(created.id.uuidString)
         }
     }
@@ -204,7 +206,7 @@ struct Machines: ParsableCommand {
         @OptionGroup var target: Target
         func run() throws {
             let (store, id) = try target.resolved()
-            for name in ["supervisor.log", "state/console.log"] {
+            for name in ["supervisor.log", "state/console.log", "state/omarchy-console.log"] {
                 let data = (try? Data(contentsOf: store.bundle(id).appendingPathComponent(name))) ?? Data()
                 print("== \(name) ==\n\(String(decoding: data.suffix(32768), as: UTF8.self))")
             }

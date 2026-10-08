@@ -17,12 +17,18 @@ public struct MachineStore: Sendable {
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     public static var defaultRoot: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GlassDock/Machines")
+        if let path = ProcessInfo.processInfo.environment["GLASSDOCK_VM_LIBRARY"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/GlassDock/Machines")
     }
     public func bundle(_ id: UUID) -> URL { root.appendingPathComponent(id.uuidString + ".glassvm") }
     public func configuration(_ id: UUID) throws -> MachineConfiguration {
         let value = try JSONDecoder().decode(MachineConfiguration.self, from: Data(contentsOf: bundle(id).appendingPathComponent("machine.json")))
         try value.validate()
+        if value.operatingSystem == .omarchy {
+            guard value.omarchyBoot != nil else { throw MachineError.invalid("Omarchy machine is missing its paired boot metadata") }
+        }
         guard value.id == id else { throw MachineError.invalid("Machine identity does not match its bundle") }
         return value
     }
@@ -49,8 +55,17 @@ public struct MachineStore: Sendable {
         try encoder.encode(configuration).write(to: location.appendingPathComponent("machine.json"), options: .atomic)
     }
 
-    public func create(_ input: MachineConfiguration, disk: URL? = nil, media: URL? = nil, seed: URL? = nil) throws -> MachineConfiguration {
+    public func create(_ input: MachineConfiguration, disk: URL? = nil, media: URL? = nil, seed: URL? = nil, omarchyGuest: URL? = nil) throws -> MachineConfiguration {
         var config = input
+        if config.operatingSystem == .omarchy {
+            guard let omarchyGuest, disk == nil, media == nil, seed == nil else {
+                throw MachineError.invalid("Omarchy requires a prepared factory guest folder; run scripts/machines/prepare-omarchy.sh")
+            }
+            config.omarchyBoot = try OmarchyGuest.inspect(omarchyGuest)
+        } else if omarchyGuest != nil {
+            throw MachineError.invalid("Factory guest folders require the Omarchy operating system")
+        }
+        let sourceDisk = omarchyGuest?.appendingPathComponent("rootfs.ext4") ?? disk
         config.installationMedia = media != nil
         config.seedMedia = seed != nil
         try config.validate()
@@ -62,8 +77,10 @@ public struct MachineStore: Sendable {
             defer { try? fm.removeItem(at: stage) }
             let state = stage.appendingPathComponent("state")
             let target = state.appendingPathComponent("disk.qcow2")
-            if let disk {
-                try runtime.tool("qemu-img", ["convert", "-O", "qcow2", disk.path, target.path])
+            if let sourceDisk {
+                var conversion = ["convert"]
+                if omarchyGuest != nil { conversion += ["-f", "raw"] }
+                try runtime.tool("qemu-img", conversion + ["-O", "qcow2", sourceDisk.path, target.path])
                 // resize never shrinks: qemu-img rejects a smaller requested size without --shrink.
                 try runtime.tool("qemu-img", ["resize", target.path, "\(config.diskGiB)G"])
             } else {
@@ -76,6 +93,11 @@ public struct MachineStore: Sendable {
             try fm.createDirectory(at: state.appendingPathComponent("tpm"), withIntermediateDirectories: false)
             if let media { try fm.copyItem(at: media, to: state.appendingPathComponent("install.iso")) }
             if let seed { try fm.copyItem(at: seed, to: state.appendingPathComponent("seed.iso")) }
+            if let omarchyGuest {
+                for filename in OmarchyGuest.bootFiles {
+                    try fm.copyItem(at: omarchyGuest.appendingPathComponent(filename), to: state.appendingPathComponent(filename))
+                }
+            }
             try save(config, at: stage)
             try fm.moveItem(at: stage, to: bundle(config.id))
             return config
