@@ -17,6 +17,25 @@ Build prerequisites: Homebrew bison, gettext, libgpg-error, glib, glib-utils, me
 
 For a development bootstrap, `bash scripts/machines/build-app.sh` without the source-runtime variable downloads and verifies official UTM 5.0.5, then packages only the selected open-source closure. This is explicitly a prebuilt bootstrap, not an independent source build. Its DMG SHA-256 is `713afe73c711f01344b8766654be531cd391ed2e30931206f43b5159f143764f`.
 
+## Resume development from a fresh clone
+
+Clone `https://github.com/naaiyy/glassdock.git` and check out `main`. Install the
+prerequisites above, then run `make test` and `bash scripts/machines/build-app.sh`.
+The bootstrap downloads its verified runtime and pinned CocoaSpice dependency;
+ignored `.build` outputs are rebuildable and are not required from a previous
+checkout. An existing installed Machines app can be supplied through
+`GLASSDOCK_VM_RUNTIME_SOURCE` instead. No project `.env` file or service API key
+is required for local development. `GLASSDOCK_VM_LIBRARY` is optional and selects
+an isolated VM library; `GLASSDOCK_VM_BUILD_JOBS` controls source-runtime build
+parallelism.
+
+VM disks, snapshots, installers and guest SSH credentials are local test data,
+not source dependencies. Create fresh guests with the scripts documented here
+and in [Omarchy](OMARCHY.md) and [macOS](MACOS.md). Keep personal signing keys and
+Keychain entries outside Git; release signing requirements are documented in
+[Releasing](../RELEASING.md). Local development uses ad-hoc signing and does not
+require those release credentials.
+
 Create an Ubuntu desktop from Canonical's cloud image and checksum manifest:
 
 ```sh

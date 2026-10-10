@@ -83,7 +83,7 @@ struct MachineLibraryView: View {
                 if let machine = currentMachine {
                     machineDetail(machine)
                         .navigationTitle(machine.name)
-                        .navigationSubtitle(displayState(machine).title)
+                        .navigationSubtitle(displayState(machine).canStart ? "" : displayState(machine).title)
                 } else {
                     ContentUnavailableView {
                         Label("A space for every system", systemImage: "desktopcomputer")
@@ -232,10 +232,7 @@ struct MachineLibraryView: View {
     }
     @ViewBuilder private func machineToolbarControls(_ machine: MachineConfiguration) -> some View {
         if working { ProgressView().controlSize(.small).accessibilityLabel("Working") }
-        if displayState(machine).canStart {
-            Button("Start", systemImage: "play.fill") { startMachine(machine) }
-                .disabled(working).help("Start Machine")
-        } else if displayState(machine).showsDesktop {
+        if displayState(machine).showsDesktop {
             if displayState(machine).canPause {
                 Button(status[machine.id] == "paused" ? "Resume" : "Pause", systemImage: status[machine.id] == "paused" ? "play" : "pause") {
                     perform { try store().control(machine.id).command(status[machine.id] == "paused" ? "cont" : "stop") }
@@ -280,7 +277,9 @@ struct MachineLibraryView: View {
                         Text(machine.name).font(.largeTitle.weight(.semibold)).textSelection(.enabled)
                         Text("\(machine.operatingSystem.displayName) · ARM64")
                             .font(.title3).foregroundStyle(.secondary)
-                        MachineStatus(value: status[machine.id])
+                        if !displayState(machine).canStart {
+                            MachineStatus(value: status[machine.id])
+                        }
                     }
                     ViewThatFits {
                         HStack(spacing: 12) { resourceTiles(machine) }
